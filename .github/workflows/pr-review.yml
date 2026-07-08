@@ -4,6 +4,27 @@ name: Reusable AI PR Review
 # Swap provider/model in ONE place: change the `models` default below
 # (or pass `with: models`), and update the org secrets
 # PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY.
+#
+# Model choice is constrained by UPSTREAM diversity, not just quality: the gateway
+# fronts several third-party upstreams, and when one goes down every model behind it
+# returns 503 `failover_exhausted` at once. `models` and `fallbacks` must therefore
+# never share an upstream. Observed mapping (2026-07-08):
+#   Console Go -> qwen3.7-max, deepseek-v4-pro, deepseek-v4-flash, kimi-k2.7-code,
+#                 kimi-k2.5, minimax-m2.7      <- flaky; caused multi-hour outages
+#   Alibaba    -> qwen3.7-plus
+#   MiniMax    -> minimax-m3   (leaks <think> into content; sanitized below)
+#   moonshotai -> kimi-k2.6
+#   fireworks / frank -> glm-5.2   (two upstreams, so the gateway can fail over)
+# Re-derive it by forcing an upstream error and reading its `Error from provider (<name>)`:
+#   curl -sS "$BASE/chat/completions" -H "authorization: Bearer $KEY" \
+#     -d '{"model":"<id>","messages":[{"role":"user","content":"hi"}],"temperature":99}'
+# The `upstream=` line this job logs per request records who actually served each review.
+#
+# Upstreams also disagree about the request contract — Fireworks 400s on `enable_thinking`
+# while Alibaba accepts it — and the gateway can move a model between them at any time.
+# So the request carries only fields every upstream understands, and `callModel` drops any
+# optional field an upstream rejects by name. Thinking needs no flag: models that reason
+# return `reasoning_content` on their own.
 
 on:
   workflow_call:
@@ -12,12 +33,22 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,qwen3.7-max"
+        default: "glm-5.2,qwen3.7-plus"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.7-max":"Qwen3.7-Max"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.7-plus":"Qwen3.7-Plus","kimi-k2.6":"Kimi-K2.6","minimax-m3":"MiniMax-M3"}'
+      fallbacks:
+        description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing. Each fallback MUST sit on a different upstream than its primary.
+        type: string
+        required: false
+        default: '{"glm-5.2":["kimi-k2.6"],"qwen3.7-plus":["minimax-m3"]}'
+      diff_char_budget:
+        description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
+        type: number
+        required: false
+        default: 100000
     secrets:
       PR_AGENT_OPENAI_KEY:
         required: true
@@ -39,6 +70,8 @@ jobs:
           OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
           PR_REVIEW_MODELS: ${{ inputs.models }}
           PR_REVIEW_MODEL_LABELS: ${{ inputs.model_labels }}
+          PR_REVIEW_FALLBACKS: ${{ inputs.fallbacks }}
+          PR_REVIEW_DIFF_BUDGET: ${{ inputs.diff_char_budget }}
         with:
           script: |
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;
@@ -85,17 +118,52 @@ jobs:
               }
             }
 
-            const rawDiffText = files.map((file) => {
+            // Pack whole file patches until the budget is spent, so a review never sees a
+            // patch cut off mid-hunk. Tests go last: when something has to be dropped it
+            // should be the tests, not the source they cover.
+            const DIFF_BUDGET = Math.max(4000, Number(process.env.PR_REVIEW_DIFF_BUDGET) || 100000);
+            const SEPARATOR = '\n\n---\n\n';
+            const TRUNCATION_NOTE = '\n[... patch truncated to fit the diff budget ...]';
+            const isTestFile = (name) => /(^|\/)(tests?|__tests__|__mocks__)\//.test(name)
+              || /\.(test|spec)\.[cm]?[jt]sx?$/.test(name)
+              || /(^|\/)test_[^/]+\.py$/.test(name)
+              || /_test\.(go|py|rs)$/.test(name);
+            const orderedFiles = [...files].sort(
+              (a, b) => Number(isTestFile(a.filename)) - Number(isTestFile(b.filename))
+            );
+
+            const keptBlocks = [];
+            const omittedFiles = [];
+            let usedChars = 0;
+            for (const file of orderedFiles) {
               const patch = file.patch || '[binary or patch unavailable]';
-              return [
+              const block = [
                 `File: ${file.filename}`,
                 `Status: ${file.status}; +${file.additions} -${file.deletions}`,
                 patch,
               ].join('\n');
-            }).join('\n\n---\n\n');
-            const diffText = rawDiffText.length > 24000
-              ? `${rawDiffText.slice(0, 24000)}\n\n[Diff truncated at 24000 characters]`
-              : rawDiffText;
+              const separatorCost = keptBlocks.length ? SEPARATOR.length : 0;
+              const remaining = DIFF_BUDGET - usedChars - separatorCost;
+              if (block.length <= remaining) {
+                keptBlocks.push(block);
+                usedChars += block.length + separatorCost;
+              } else if (remaining > TRUNCATION_NOTE.length + 400) {
+                keptBlocks.push(block.slice(0, remaining - TRUNCATION_NOTE.length) + TRUNCATION_NOTE);
+                usedChars = DIFF_BUDGET;
+              } else {
+                omittedFiles.push(file.filename);
+              }
+            }
+            let diffText = keptBlocks.join(SEPARATOR);
+            const packedChars = diffText.length;
+            if (omittedFiles.length) {
+              // The budget governs patch text; this note is bounded metadata on top of it.
+              const shown = omittedFiles.slice(0, 20).join(', ');
+              const names = shown.length > 400 ? `${shown.slice(0, 400)}…` : shown;
+              const more = omittedFiles.length > 20 ? ` (+${omittedFiles.length - 20} more)` : '';
+              diffText += `\n\n[${omittedFiles.length} file(s) omitted to fit the ${DIFF_BUDGET}-character patch budget: ${names}${more}]`;
+            }
+            console.log(`Diff packed: ${keptBlocks.length}/${files.length} files, ${packedChars}/${DIFF_BUDGET} patch chars, ${omittedFiles.length} omitted.`);
 
             const system = [
               'You are an experienced code reviewer.',
@@ -131,16 +199,42 @@ jobs:
             if (models.length === 0) {
               throw new Error('PR_REVIEW_MODELS must list at least one model id.');
             }
-            let MODEL_LABELS = {};
-            try {
-              MODEL_LABELS = JSON.parse(process.env.PR_REVIEW_MODEL_LABELS || '{}');
-            } catch (error) {
-              console.log(`Invalid PR_REVIEW_MODEL_LABELS JSON, falling back to raw model ids: ${error.message}`);
-            }
-            const maxAttempts = 3;
+            const parseJsonEnv = (name) => {
+              try {
+                return JSON.parse(process.env[name] || '{}');
+              } catch (error) {
+                console.log(`Invalid ${name} JSON, ignoring it: ${error.message}`);
+                return {};
+              }
+            };
+            const MODEL_LABELS = parseJsonEnv('PR_REVIEW_MODEL_LABELS');
+            const FALLBACKS = parseJsonEnv('PR_REVIEW_FALLBACKS');
+            const maxAttempts = 4;
+            const requestTimeoutMs = 480000;
 
-            async function requestReview(model) {
-              const requestBody = JSON.stringify({
+            // Some upstreams (e.g. MiniMax) inline their chain-of-thought into `content`
+            // instead of `reasoning_content`. Never let that reach the PR comment.
+            function stripThinking(text) {
+              if (!text) return '';
+              return text
+                .replace(/<think>[\s\S]*?<\/think>/gi, '')
+                .replace(/<\/?think>/gi, '')
+                .trim();
+            }
+
+            // Optional request fields an upstream may reject outright. Dropping one and
+            // retrying is always safe; `model`/`messages`/`stream` never are.
+            const DROPPABLE_FIELDS = new Set(['enable_thinking', 'temperature', 'top_p', 'max_tokens']);
+            const EXTRA_FIELD_REJECTED = [
+              /Extra inputs are not permitted, field: '([^']+)'/i,
+              /unknown field:? '?([a-z_]+)'?/i,
+              /unsupported parameter:? '?([a-z_]+)'?/i,
+            ];
+
+            // No `enable_thinking`: every model here emits `reasoning_content` on its own when
+            // it thinks, and the Fireworks upstream behind glm-5.2 rejects the field with a 400.
+            function basePayload(model) {
+              return {
                 model,
                 messages: [
                   { role: 'system', content: system },
@@ -148,9 +242,12 @@ jobs:
                 ],
                 temperature: 0.2,
                 stream: false,
-                enable_thinking: true,
                 max_tokens: 16384,
-              });
+              };
+            }
+
+            async function callOnce(model, payload) {
+              const requestBody = JSON.stringify(payload);
               let response;
               let responseText = '';
               let requestError = '';
@@ -159,7 +256,7 @@ jobs:
                 responseText = '';
                 requestError = '';
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 300000);
+                const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
                 try {
                   response = await fetch(`${baseUrl}/chat/completions`, {
                     method: 'POST',
@@ -175,7 +272,7 @@ jobs:
                   responseText = await response.text();
                 } catch (error) {
                   requestError = error?.name === 'AbortError'
-                    ? 'AI endpoint request timed out after 300 seconds.'
+                    ? `AI endpoint request timed out after ${requestTimeoutMs / 1000} seconds.`
                     : (error?.message || String(error));
                 } finally {
                   clearTimeout(timeout);
@@ -184,78 +281,156 @@ jobs:
                 const status = response?.status ?? 'request failed';
                 const diag = (responseText || requestError || '').slice(0, 1000);
                 console.log(`[${model}] attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
-                // Retry transient failures only (5xx or network/timeout); a 4xx is a request/auth problem that will not fix itself on retry.
-                const retriable = !response || response.status >= 500;
+                // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
+                // request/auth problems that will not fix themselves on retry.
+                const retriable = !response || response.status >= 500 || response.status === 429;
                 if (!retriable || attempt === maxAttempts) break;
-                await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+                // Exponential backoff with jitter (~3s, ~9s, ~27s): rides out short upstream
+                // blips without stalling the job when an upstream is down for hours.
+                const backoff = 3000 * Math.pow(3, attempt - 1);
+                await new Promise((resolve) => setTimeout(resolve, backoff + Math.floor(Math.random() * 1000)));
               }
+              return { response, responseText, requestError };
+            }
 
-              let review;
-              let reasoningLength = 0;
-              if (response?.ok) {
-                try {
-                  const payload = JSON.parse(responseText);
-                  const message = payload?.choices?.[0]?.message;
-                  const finishReason = payload?.choices?.[0]?.finish_reason;
-                  reasoningLength = message?.reasoning_content?.length || 0;
-                  review = message?.content?.trim() || message?.reasoning_content?.trim();
-                  console.log(`[${model}] finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
-                } catch (error) {
-                  console.log(`[${model}] parse error: ${error?.message || error}`);
-                  review = null;
+            // The gateway silently re-routes a model between upstreams, and upstreams disagree
+            // about which optional fields exist. When one rejects a field by name, drop it and
+            // retry rather than losing the whole review.
+            async function callModel(model) {
+              const payload = basePayload(model);
+              for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
+                const result = await callOnce(model, payload);
+                if (result.response?.status !== 400) return result;
+                const text = result.responseText || '';
+                const matched = EXTRA_FIELD_REJECTED.map((re) => re.exec(text)).find(Boolean);
+                const field = matched?.[1];
+                if (!field || !DROPPABLE_FIELDS.has(field) || !(field in payload)) return result;
+                console.log(`[${model}] upstream rejected optional field '${field}'; dropping it and retrying.`);
+                delete payload[field];
+              }
+              return callOnce(model, payload);
+            }
+
+            function extractReview(model, responseText) {
+              const payload = JSON.parse(responseText);
+              const choice = payload?.choices?.[0];
+              const message = choice?.message;
+              const finishReason = choice?.finish_reason;
+              const reasoning = message?.reasoning_content || '';
+              const content = stripThinking(message?.content);
+              let review = content || stripThinking(reasoning);
+              console.log(`[${model}] upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
+              if (review && finishReason === 'length') {
+                review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
+              }
+              return { review, reasoningLength: reasoning.length };
+            }
+
+            // Try the primary model, then its fallbacks (which live on other upstreams).
+            // A single upstream outage should degrade the review, not delete it.
+            async function requestReview(primary) {
+              const chain = [primary, ...(Array.isArray(FALLBACKS[primary]) ? FALLBACKS[primary] : [])];
+              const tried = [];
+              let lastResponse;
+              let lastResponseText = '';
+              let lastRequestError = '';
+
+              for (const model of chain) {
+                const { response, responseText, requestError } = await callModel(model);
+                lastResponse = response;
+                lastResponseText = responseText;
+                lastRequestError = requestError;
+                if (response?.ok) {
+                  try {
+                    const { review, reasoningLength } = extractReview(model, responseText);
+                    if (review) {
+                      return { primary, servedBy: model, review, reasoningLength, degraded: model !== primary };
+                    }
+                    console.log(`[${model}] response parsed but contained no review text.`);
+                  } catch (error) {
+                    console.log(`[${model}] parse error: ${error?.message || error}`);
+                  }
+                }
+                tried.push(`${model} -> HTTP ${response?.status ?? 'request failed'}`);
+                if (model !== chain[chain.length - 1]) {
+                  console.log(`[${primary}] falling back to the next model in the chain.`);
                 }
               }
 
-              if (!review) {
-                const failText = (responseText || requestError || '').trim();
-                const gatewayBlocked = failText.includes('验证失败') || failText.includes('<!DOCTYPE html>');
-                const status = response?.status ?? 'request failed';
-                const isServerSide = typeof status === 'number' && status >= 500;
-                const fence = '```';
-                const snippet = failText.replace(/`/g, "'").slice(0, 600);
-                review = [
-                  '> AI review was not generated.',
-                  '',
-                  gatewayBlocked
-                    ? 'GitHub Actions reached the configured API endpoint, but the gateway returned an HTML verification page instead of JSON.'
-                    : `The AI endpoint returned an unusable response after ${maxAttempts} attempt(s). HTTP status: ${status}.`,
-                  '',
-                  snippet
-                    ? `<details><summary>Upstream response (truncated)</summary>\n\n${fence}\n${snippet}\n${fence}\n</details>`
-                    : '',
-                  '',
-                  gatewayBlocked
-                    ? 'Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner.'
+              const failText = (lastResponseText || lastRequestError || '').trim();
+              const gatewayBlocked = failText.includes('验证失败') || failText.includes('<!DOCTYPE html>');
+              const upstreamExhausted = failText.includes('failover_exhausted');
+              const status = lastResponse?.status ?? 'request failed';
+              const isServerSide = typeof status === 'number' && status >= 500;
+              const fence = '```';
+              const snippet = failText.replace(/`/g, "'").slice(0, 600);
+              const review = [
+                '> AI review was not generated.',
+                '',
+                gatewayBlocked
+                  ? 'GitHub Actions reached the configured API endpoint, but the gateway returned an HTML verification page instead of JSON.'
+                  : `Every model in the chain failed after ${maxAttempts} attempt(s) each. Tried: ${tried.join('; ')}.`,
+                '',
+                snippet
+                  ? `<details><summary>Upstream response (truncated)</summary>\n\n${fence}\n${snippet}\n${fence}\n</details>`
+                  : '',
+                '',
+                gatewayBlocked
+                  ? 'Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner.'
+                  : upstreamExhausted
+                    ? 'Action needed: `failover_exhausted` means the gateway ran out of healthy upstreams for every model in the chain — a provider-side outage, not a problem with this repo, the key, or the model name. It usually clears on its own; if it persists, point `models`/`fallbacks` at ids on a different upstream (see the mapping at the top of pr-review.yml).'
                     : isServerSide
                       ? 'Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above — most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage.'
                       : 'Action needed: inspect the upstream response above to identify the request or auth problem.',
-                ].join('\n');
-              }
+              ].join('\n');
 
-              return { model, review, reasoningLength };
+              return { primary, servedBy: null, review, reasoningLength: 0, degraded: false };
             }
 
             const headSha = (context.payload.pull_request?.head?.sha ?? context.sha ?? '').slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const labelOf = (model) => MODEL_LABELS[model] || model;
 
             // Run every configured model in parallel, then post one comment per model.
-            const results = await Promise.all(models.map((model) => requestReview(model)));
+            const settled = await Promise.allSettled(models.map((model) => requestReview(model)));
 
-            for (const { model, review, reasoningLength } of results) {
-              const label = MODEL_LABELS[model] || model;
+            let posted = 0;
+            for (let i = 0; i < settled.length; i++) {
+              const primary = models[i];
+              if (settled[i].status === 'rejected') {
+                console.log(`[${primary}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
+                continue;
+              }
+              const { servedBy, review, reasoningLength, degraded } = settled[i].value;
+              const modelLine = degraded
+                ? `Model: ${primary} unavailable -> served by ${servedBy}`
+                : `Model: ${servedBy ?? primary}`;
+              const banner = degraded
+                ? [`> ℹ️ \`${labelOf(primary)}\` 当前不可用，本条 review 由备用模型 \`${labelOf(servedBy)}\` 生成。`, '']
+                : [];
               const body = [
-                `<!-- ai-pr-review-bot:${model} -->`,
-                `## AI PR Review · ${label}`,
+                `<!-- ai-pr-review-bot:${primary} -->`,
+                `## AI PR Review · ${labelOf(primary)}`,
                 '',
+                ...banner,
                 review,
                 '',
-                `<sub>Model: ${model} · Thinking: enabled${reasoningLength ? ` (${reasoningLength} chars)` : ''} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
+                `<sub>${modelLine} · Thinking: ${reasoningLength ? `${reasoningLength} chars` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
               ].join('\n');
-              const { data: createdComment } = await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: pullNumber,
-                body,
-              });
-              console.log(`Created AI PR Review comment ${createdComment.id} for ${model}.`);
+              try {
+                const { data: createdComment } = await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pullNumber,
+                  body,
+                });
+                posted++;
+                console.log(`Created AI PR Review comment ${createdComment.id} for ${primary}.`);
+              } catch (error) {
+                // One failed comment must not swallow the others.
+                console.log(`Failed to post comment for ${primary}: ${error?.message || error}`);
+              }
+            }
+            if (posted === 0) {
+              throw new Error('No AI PR Review comment could be posted for any configured model.');
             }

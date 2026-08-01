@@ -2,6 +2,12 @@ name: Reusable Claude PR Review
 
 # Centralized Claude review implementation. Calling repositories keep only
 # event-specific authorization and forward their Claude OAuth secret.
+#
+# 调用方约定：Claude 每个 PR 只自动审一次（synchronize 不触发），所以这一次必须落地。
+# 本文件的两处硬化都是为此：
+#   - fallback_model + 失败重试一次，对付 529 overloaded（曾让 NebulaLab#487 静默丢审）
+#   - CLAUDE_CODE_MAX_OUTPUT_TOKENS + 提示词篇幅约束，对付输出超限
+#     （曾让 NebulaLab#490 跑满 22 轮后整份分析作废）
 
 on:
   workflow_call:
@@ -15,6 +21,16 @@ on:
         type: string
         required: false
         default: "claude-opus-5"
+      fallback_model:
+        description: "Model used when the primary model is overloaded or unavailable (API 529)."
+        type: string
+        required: false
+        default: "claude-sonnet-5"
+      max_output_tokens:
+        description: "Per-response output cap for Claude Code. claude-opus-5 supports up to 128000."
+        type: string
+        required: false
+        default: "64000"
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -32,9 +48,12 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
-      - name: Collect referenced issue context
-        id: issue_context
+      - name: Build review prompt
+        id: review_prompt
         uses: actions/github-script@v8
+        env:
+          # 每次 run 唯一，且下面还会把正文里同名的行剔掉，避免 issue 正文伪造分隔符注入
+          HEREDOC_DELIMITER: REVIEW_PROMPT_EOF_${{ github.run_id }}_${{ github.run_attempt }}
         with:
           script: |
             const pullNumber = context.payload.pull_request.number;
@@ -49,38 +68,82 @@ jobs:
             const nums = [...new Set(
               sources.flatMap((t) => [...t.matchAll(issueRefPattern)].map((m) => Number(m[1])))
             )].slice(0, 10);
-            let out = '';
+            let issueContext = '';
             for (const num of nums) {
               try {
                 const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: num });
                 if (issue.pull_request) continue;
-                out += `\n### Issue #${num}: ${issue.title}\n${(issue.body || '').slice(0, 2000)}\n`;
+                issueContext += `\n### Issue #${num}: ${issue.title}\n${(issue.body || '').slice(0, 2000)}\n`;
               } catch (error) {
                 console.log(`Skip referenced issue #${num}: ${error.message}`);
               }
             }
+
+            const prompt = [
+              '先阅读本 PR 在标题/描述/commit 中引用的关联 Issue 背景（下方为空则表示没有引用），',
+              '理解"要解决什么、为什么改、为什么这么交"，再开始 review：',
+              issueContext,
+              '',
+              '然后 review 这个 PR，重点关注：',
+              '1. 潜在的 bug 或逻辑错误',
+              '2. Python/TypeScript/Rust 代码的健壮性和错误处理',
+              '3. 安全问题（注入、越权、敏感信息泄露等）',
+              '4. 接口设计是否合理，有无破坏性变更',
+              '5. 改动是否真正解决了关联 Issue 的需求',
+              '',
+              '篇幅要求（这条同样重要，写超了整份 review 会因为超出输出上限而作废）：',
+              '- 总体评价控制在 200 字以内。',
+              '- 问题按严重程度排序，最多列 8 条；每条不超过 150 字，只贴必要的代码片段。',
+              '- 不要逐文件复述 diff，不要重复贴大段原始代码。',
+              '- 没发现阻断性问题就直说，不要为了凑数编次要问题。',
+              '',
+              '请用中文回复，给出具体的行内建议。',
+            ].join('\n');
+
             const fs = require('fs');
-            const delimiter = 'ISSUE_CTX_EOF';
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `text<<${delimiter}\n${out}\n${delimiter}\n`);
-      - uses: anthropics/claude-code-action@beta
+            const delimiter = process.env.HEREDOC_DELIMITER;
+            const safePrompt = prompt
+              .split('\n')
+              .filter((line) => line.trim() !== delimiter)
+              .join('\n');
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `text<<${delimiter}\n${safePrompt}\n${delimiter}\n`,
+            );
+
+      - name: Claude review
+        id: review
+        # 单次审查是唯一机会：先不让它直接判死，失败后重试一次。
+        continue-on-error: true
+        uses: anthropics/claude-code-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           model: ${{ inputs.model }}
-          direct_prompt: |
-            先阅读本 PR 在标题/描述/commit 中引用的关联 Issue 背景（下方为空则表示没有引用），理解"要解决什么、为什么改、为什么这么交"，再开始 review：
-            ${{ steps.issue_context.outputs.text }}
+          fallback_model: ${{ inputs.fallback_model }}
+          claude_env: |
+            CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
+          direct_prompt: ${{ steps.review_prompt.outputs.text }}
 
-            然后 review 这个 PR，重点关注：
-            1. 潜在的 bug 或逻辑错误
-            2. Python/TypeScript/Rust 代码的健壮性和错误处理
-            3. 安全问题（注入、越权、敏感信息泄露等）
-            4. 接口设计是否合理，有无破坏性变更
-            5. 改动是否真正解决了关联 Issue 的需求
-            请用中文回复，给出具体的行内建议。
+      - name: Claude review (retry)
+        id: review_retry
+        # 首轮多半死于 API 529 overloaded（重试即可）或输出超限（重试时篇幅约束仍在）。
+        # 不用 sticky comment：让首轮那条 "Claude encountered an error" 留在 PR 上，
+        # 重试成功后另起一条，看得出确实重试过，也不会覆盖掉已有的有效 review。
+        if: steps.review.outcome == 'failure'
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          model: ${{ inputs.model }}
+          fallback_model: ${{ inputs.fallback_model }}
+          claude_env: |
+            CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
+          direct_prompt: ${{ steps.review_prompt.outputs.text }}
 
   on-demand-review:
     name: Claude On-demand Review
+    # @claude 是自动审只有一次之后唯一的复审入口，同样做失败重试。
     if: inputs.review_mode == 'on-demand'
     runs-on: ubuntu-latest
     permissions:
@@ -91,8 +154,25 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
-      - uses: anthropics/claude-code-action@beta
+      - name: Claude review
+        id: review
+        continue-on-error: true
+        uses: anthropics/claude-code-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           model: ${{ inputs.model }}
+          fallback_model: ${{ inputs.fallback_model }}
+          claude_env: |
+            CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
+
+      - name: Claude review (retry)
+        if: steps.review.outcome == 'failure'
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          model: ${{ inputs.model }}
+          fallback_model: ${{ inputs.fallback_model }}
+          claude_env: |
+            CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}

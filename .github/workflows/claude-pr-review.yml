@@ -59,7 +59,10 @@ jobs:
             const pullNumber = context.payload.pull_request.number;
             const { owner, repo } = context.repo;
             const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
-            const issueRefPattern = /#(\d+)/g;
+            // 负向后顾：只认裸 #N，不认 owner/repo#N。
+            // 否则 PR 描述里写 "TshyGO/ci-central#6" 会被当成本仓库的 issue #6 抓进来，
+            // review 就带着一条毫不相干的背景开始跑（NebulaLab#492 实测踩过）。
+            const issueRefPattern = /(?<![\w/-])#(\d+)/g;
             const sources = [pull.title || '', pull.body || ''];
             const prCommits = await github.paginate(github.rest.pulls.listCommits, {
               owner, repo, pull_number: pullNumber, per_page: 100,

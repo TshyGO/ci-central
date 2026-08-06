@@ -154,38 +154,52 @@ jobs:
               (a, b) => Number(isTestFile(a.filename)) - Number(isTestFile(b.filename))
             );
 
-            const keptBlocks = [];
-            const omittedFiles = [];
-            let usedChars = 0;
-            for (const file of orderedFiles) {
-              const patch = file.patch || '[binary or patch unavailable]';
-              const block = [
-                `File: ${file.filename}`,
-                `Status: ${file.status}; +${file.additions} -${file.deletions}`,
-                patch,
-              ].join('\n');
-              const separatorCost = keptBlocks.length ? SEPARATOR.length : 0;
-              const remaining = DIFF_BUDGET - usedChars - separatorCost;
-              if (block.length <= remaining) {
-                keptBlocks.push(block);
-                usedChars += block.length + separatorCost;
-              } else if (remaining > TRUNCATION_NOTE.length + 400) {
-                keptBlocks.push(block.slice(0, remaining - TRUNCATION_NOTE.length) + TRUNCATION_NOTE);
-                usedChars = DIFF_BUDGET;
-              } else {
-                omittedFiles.push(file.filename);
+            function packDiff(budget) {
+              const keptBlocks = [];
+              const omittedFiles = [];
+              let usedChars = 0;
+              for (const file of orderedFiles) {
+                const patch = file.patch || '[binary or patch unavailable]';
+                const block = [
+                  `File: ${file.filename}`,
+                  `Status: ${file.status}; +${file.additions} -${file.deletions}`,
+                  patch,
+                ].join('\n');
+                const separatorCost = keptBlocks.length ? SEPARATOR.length : 0;
+                const remaining = budget - usedChars - separatorCost;
+                if (block.length <= remaining) {
+                  keptBlocks.push(block);
+                  usedChars += block.length + separatorCost;
+                } else if (remaining > TRUNCATION_NOTE.length + 400) {
+                  keptBlocks.push(block.slice(0, remaining - TRUNCATION_NOTE.length) + TRUNCATION_NOTE);
+                  usedChars = budget;
+                } else {
+                  omittedFiles.push(file.filename);
+                }
               }
+              let text = keptBlocks.join(SEPARATOR);
+              const packedChars = text.length;
+              if (omittedFiles.length) {
+                // The budget governs patch text; this note is bounded metadata on top of it.
+                const shown = omittedFiles.slice(0, 20).join(', ');
+                const names = shown.length > 400 ? `${shown.slice(0, 400)}…` : shown;
+                const more = omittedFiles.length > 20 ? ` (+${omittedFiles.length - 20} more)` : '';
+                text += `\n\n[${omittedFiles.length} file(s) omitted to fit the ${budget}-character patch budget: ${names}${more}]`;
+              }
+              return { text, kept: keptBlocks.length, packedChars, omitted: omittedFiles.length };
             }
-            let diffText = keptBlocks.join(SEPARATOR);
-            const packedChars = diffText.length;
-            if (omittedFiles.length) {
-              // The budget governs patch text; this note is bounded metadata on top of it.
-              const shown = omittedFiles.slice(0, 20).join(', ');
-              const names = shown.length > 400 ? `${shown.slice(0, 400)}…` : shown;
-              const more = omittedFiles.length > 20 ? ` (+${omittedFiles.length - 20} more)` : '';
-              diffText += `\n\n[${omittedFiles.length} file(s) omitted to fit the ${DIFF_BUDGET}-character patch budget: ${names}${more}]`;
+
+            const diffPack = packDiff(DIFF_BUDGET);
+            console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted.`);
+            // Kimi K2.7 can spend its entire completion budget reasoning over a 100k diff.
+            // Bound only Kimi's context while preserving whole-file, source-before-test packing.
+            const KIMI_DIFF_BUDGET = Math.min(DIFF_BUDGET, 50000);
+            const kimiDiffPack = KIMI_DIFF_BUDGET === DIFF_BUDGET
+              ? diffPack
+              : packDiff(KIMI_DIFF_BUDGET);
+            if (kimiDiffPack !== diffPack) {
+              console.log(`Kimi diff packed: ${kimiDiffPack.kept}/${files.length} files, ${kimiDiffPack.packedChars}/${KIMI_DIFF_BUDGET} patch chars, ${kimiDiffPack.omitted} omitted.`);
             }
-            console.log(`Diff packed: ${keptBlocks.length}/${files.length} files, ${packedChars}/${DIFF_BUDGET} patch chars, ${omittedFiles.length} omitted.`);
 
             const system = [
               'You are an experienced code reviewer.',
@@ -195,7 +209,7 @@ jobs:
               'If there are no actionable issues, say that clearly and mention residual risks.',
             ].join(' ');
 
-            const user = [
+            const buildUser = (diffText) => [
               `Repository: ${owner}/${repo}`,
               `Pull Request: #${pull.number} ${pull.title}`,
               `Author: ${pull.user.login}`,
@@ -212,6 +226,8 @@ jobs:
               'Changed files and patches:',
               diffText || '[No diff available]',
             ].join('\n');
+            const user = buildUser(diffPack.text);
+            const kimiUser = buildUser(kimiDiffPack.text);
 
             const baseUrl = process.env.OPENAI_API_BASE.replace(/\/$/, '');
             const models = (process.env.PR_REVIEW_MODELS || '')
@@ -272,7 +288,7 @@ jobs:
             function basePayload(model) {
               const messages = [
                 { role: 'system', content: system },
-                { role: 'user', content: user },
+                { role: 'user', content: FIXED_SAMPLING_KIMI_MODELS.has(model) ? kimiUser : user },
               ];
               if (model === 'grok-4.5') {
                 return {
@@ -286,10 +302,9 @@ jobs:
                 model,
                 messages,
                 stream: false,
-                // On a 100k-character PR, Kimi K2.7 consumed the full 16k completion in
-                // reasoning before emitting final content. Give only these Kimi models enough
-                // room to finish; every other model retains the established 16k cap.
-                max_tokens: FIXED_SAMPLING_KIMI_MODELS.has(model) ? 32768 : 16384,
+                // Kimi gets a bounded input plus extra room to finish its reasoning; every
+                // other model retains the established 16k output cap and full diff context.
+                max_tokens: FIXED_SAMPLING_KIMI_MODELS.has(model) ? 24576 : 16384,
               };
               // Moonshot locks sampling for these Kimi models and documents that clients must
               // omit temperature. Every other Chat Completions model keeps the proven 0.2.

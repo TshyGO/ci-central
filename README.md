@@ -25,6 +25,7 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 ### OpenCode Go 模型协议兼容
 
 - `kimi-k3` 和 `kimi-k2.7-code` 的 Moonshot 上游要求省略 `temperature`；workflow 仅对这两个模型删掉该字段，GLM、Qwen、MiniMax 仍使用原来的 `0.2`。K3 在 2026-08-06 通过参数校验后仍持续返回上游 503，因此默认 reviewer 暂用面向代码审查的 K2.7 Code。
+- 这两个 Kimi 模型单独使用 32768 completion token 上限。若大 diff 下仍在达到上限时只有 `reasoning_content`、没有最终 `content`，workflow 不会把私有推理当 review 发布，而是转到既有 fallback；其他模型仍保持 16384 上限和原解析行为。
 - `grok-4.5` 使用 `/responses` 和 `max_output_tokens`。2026-08-06 的实际 PR 日志显示其 `/chat/completions` 路径持续返回 503 `Endpoint is unavailable`；xAI 当前官方 Grok 4.5 示例以及 models.dev 的 `@ai-sdk/openai` 映射均指向 Responses 协议。
 - 其余模型仍使用 `/chat/completions`、`messages`、`max_tokens`，请求形状没有变化。
 

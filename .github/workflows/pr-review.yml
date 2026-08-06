@@ -18,13 +18,14 @@ name: Reusable AI PR Review
 # and kimi-k2.6 on moonshotai; both are Console Go now. Re-probe before trusting this list.
 #
 # All three primaries below live on Console Go — the only upstream serving glm-5.2,
-# kimi-k2.7-code and grok-4.5. Only glm-5.2's fallback (minimax-m3) escapes it; the Kimi and
+# kimi-k2.6 and grok-4.5. Only glm-5.2's fallback (minimax-m3) escapes it; the Kimi and
 # Grok reviewers fall back to qwen3.7-max by explicit choice, which is Console Go too. So
 # those two chains cover a per-model failure but NOT a Console Go outage — when that
 # upstream goes down, only the glm-5.2 comment survives. That is a deliberate trade, not an
 # oversight: qwen3.7-max's sole upstream is what caused the 2026-07-02 and 07-06 blackouts.
-# Kimi K3 was already intermittent on 2026-07-23 and returned persistent endpoint-level 503s
-# on 2026-08-06 even after its request contract was corrected, hence K2.7 Code as the default.
+# Kimi K3 returned persistent endpoint-level 503s on 2026-08-06; K2.7 Code then spent its
+# whole completion on reasoning with no final content. K2.6 has produced complete reviews in
+# prior production runs, so it is the default Kimi reviewer.
 # Re-derive the mapping by forcing an upstream error and reading `Error from provider (<name>)`:
 #   curl -sS "$BASE/chat/completions" -H "authorization: Bearer $KEY" \
 #     -d '{"model":"<id>","messages":[{"role":"user","content":"hi"}],"temperature":99}'
@@ -37,9 +38,8 @@ name: Reusable AI PR Review
 # return `reasoning_content` on their own.
 #
 # OpenCode Go models need narrow protocol overrides (verified 2026-08-06):
-# - Kimi K3 and Kimi K2.7 Code require clients to omit temperature. Kimi K3 then reaches
-#   its upstream but currently returns 503 `Endpoint is unavailable`, so the default Kimi
-#   reviewer uses the coding-focused K2.7 model until K3's provider route recovers.
+# - Kimi K3 and Kimi K2.7 Code require clients to omit temperature. The default K2.6 model
+#   accepts the normal review temperature and is bounded to Kimi's smaller whole-file context.
 # - Grok 4.5's Chat Completions route returns 503 `Endpoint is unavailable`; current xAI
 #   documentation and models.dev expose it through the Responses protocol. Only Grok uses
 #   `/responses`; all existing models keep the original `/chat/completions` contract.
@@ -51,17 +51,17 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,kimi-k2.7-code,grok-4.5"
+        default: "glm-5.2,kimi-k2.6,grok-4.5"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.7-code":"Kimi-K2.7-Code","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}'
+        default: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.7-code":"Kimi-K2.7-Code","kimi-k2.6":"Kimi-K2.6","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing. Each fallback MUST sit on a different upstream than its primary.
         type: string
         required: false
-        default: '{"glm-5.2":["minimax-m3"],"kimi-k2.7-code":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
+        default: '{"glm-5.2":["minimax-m3"],"kimi-k2.6":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
       diff_char_budget:
         description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
         type: number
@@ -283,12 +283,13 @@ jobs:
               return model === 'grok-4.5' ? 'responses' : 'chat/completions';
             }
 
+            const KIMI_MODELS = new Set(['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']);
             const FIXED_SAMPLING_KIMI_MODELS = new Set(['kimi-k3', 'kimi-k2.7-code']);
 
             function basePayload(model) {
               const messages = [
                 { role: 'system', content: system },
-                { role: 'user', content: FIXED_SAMPLING_KIMI_MODELS.has(model) ? kimiUser : user },
+                { role: 'user', content: KIMI_MODELS.has(model) ? kimiUser : user },
               ];
               if (model === 'grok-4.5') {
                 return {
@@ -428,7 +429,7 @@ jobs:
               // Never publish its private reasoning as a review: an empty review makes the
               // caller continue to the configured fallback instead. Preserve the legacy
               // reasoning fallback for other providers whose final text may live there.
-              let review = content || (FIXED_SAMPLING_KIMI_MODELS.has(model)
+              let review = content || (KIMI_MODELS.has(model)
                 ? ''
                 : stripThinking(reasoning));
               console.log(`[${model}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);

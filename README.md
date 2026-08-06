@@ -17,15 +17,15 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
         │  默认调 /chat/completions；Grok 4.5 单独调 /responses
         ▼
 供应商:OpenCode Go (https://opencode.ai/zen/go/v1)
-        模型:glm-5.2 + kimi-k2.7-code + grok-4.5,各自带一个 fallback
+        模型:glm-5.2 + kimi-k2.6 + grok-4.5,各自带一个 fallback
 ```
 
 每个模型出一条独立评论(评论头 `<!-- ai-pr-review-bot:<model> -->`),三条并行发。
 
 ### OpenCode Go 模型协议兼容
 
-- `kimi-k3` 和 `kimi-k2.7-code` 的 Moonshot 上游要求省略 `temperature`；workflow 仅对这两个模型删掉该字段，GLM、Qwen、MiniMax 仍使用原来的 `0.2`。K3 在 2026-08-06 通过参数校验后仍持续返回上游 503，因此默认 reviewer 暂用面向代码审查的 K2.7 Code。
-- 这两个 Kimi 模型单独使用 50000 字符的完整文件 diff 预算和 24576 completion token 上限，避免在 100k diff 上把整个请求预算耗在推理。若仍只有 `reasoning_content`、没有最终 `content`，workflow 不会把私有推理当 review 发布，而是转到既有 fallback；其他模型继续获得完整 `diff_char_budget`（默认 100000）并保持 16384 输出上限和原解析行为。
+- `kimi-k3` 和 `kimi-k2.7-code` 的 Moonshot 上游要求省略 `temperature`；workflow 仅对这两个模型删掉该字段。K3 在 2026-08-06 持续返回上游 503，K2.7 又在大 diff 上只产出 reasoning，因此默认 reviewer 使用历史生产 review 已验证成功的 `kimi-k2.6`，它保留正常的 `temperature: 0.2`。
+- 所有 Kimi 模型单独使用 50000 字符的完整文件 diff 预算；K3/K2.7 可使用 24576 completion token，默认 K2.6 保持 16384。若只有 `reasoning_content`、没有最终 `content`，workflow 不会把私有推理当 review 发布，而是转到既有 fallback；GLM/Grok 继续获得完整 `diff_char_budget`（默认 100000）并保持原输出上限和解析行为。
 - `grok-4.5` 使用 `/responses` 和 `max_output_tokens`。2026-08-06 的实际 PR 日志显示其 `/chat/completions` 路径持续返回 503 `Endpoint is unavailable`；xAI 当前官方 Grok 4.5 示例以及 models.dev 的 `@ai-sdk/openai` 映射均指向 Responses 协议。
 - 其余模型仍使用 `/chat/completions`、`messages`、`max_tokens`，请求形状没有变化。
 
@@ -46,11 +46,11 @@ OpenCode Go 只是个网关,背后转发给若干第三方上游。**一个上�
 
 **`models` 里的模型和它的 `fallbacks` 必须落在不同上游**,否则 fallback 形同虚设。
 
-> ⚠️ 现在三个主模型 `glm-5.2` / `kimi-k2.7-code` / `grok-4.5` **全在 `Console Go`** —— 网关上只有它供这三个 id,没得选。
+> ⚠️ 现在三个主模型 `glm-5.2` / `kimi-k2.6` / `grok-4.5` **全在 `Console Go`** —— 网关上只有它供这三个 id,没得选。
 >
-> **只有 `glm-5.2` 的 fallback(`minimax-m3`)跨出了 Console Go**;`kimi-k2.7-code` 和 `grok-4.5` 是**指定**回落到 `qwen3.7-max` 的,而它也在 Console Go。所以这两条链只挡得住"单个模型自己抽风",**挡不住 Console Go 整体宕机**——那种时候只有 GLM 那条评论还在。这是明知代价的选择:`qwen3.7-max` 唯一上游就是 Console Go,2026-07-02 和 07-06 两次多小时静默正是它造成的。想要三条都保命,把这两个 fallback 换回 `qwen3.7-plus` / `qwen3.6-plus`(Alibaba)即可。
+> **只有 `glm-5.2` 的 fallback(`minimax-m3`)跨出了 Console Go**;`kimi-k2.6` 和 `grok-4.5` 是**指定**回落到 `qwen3.7-max` 的,而它也在 Console Go。所以这两条链只挡得住"单个模型自己抽风",**挡不住 Console Go 整体宕机**——那种时候只有 GLM 那条评论还在。这是明知代价的选择:`qwen3.7-max` 唯一上游就是 Console Go,2026-07-02 和 07-06 两次多小时静默正是它造成的。想要三条都保命,把这两个 fallback 换回 `qwen3.7-plus` / `qwen3.6-plus`(Alibaba)即可。
 >
-> `kimi-k3` 单独有个坑:2026-07-23 实测大约 8 次里只成 1 次；2026-08-06 省略不兼容的温度参数后又稳定暴露为 503 `Endpoint is unavailable`。所以默认 Kimi reviewer 改用同系列、面向长时仓库编码任务的 `kimi-k2.7-code`，K3 仍保留在标签和请求兼容表里，待上游恢复后可随时切回。
+> `kimi-k3` 2026-08-06 省略不兼容的温度参数后仍稳定返回 503；`kimi-k2.7-code` 在大 diff 上连续把全部 16k/24k completion 用于 reasoning 而没有最终正文。默认 reviewer 因此改用曾在 NebulaLab PR #418/#424/#446 成功生成完整 review 的 `kimi-k2.6`。
 >
 > `qwen3.8-max` 已于 2026-08-06 出现在 OpenCode Go `/models`；当前仍保留已验证的 `qwen3.7-max` fallback，若要升级需另做真实请求验证。
 
@@ -87,12 +87,12 @@ on:
   workflow_call:
     inputs:
       models:
-        default: "glm-5.2,kimi-k2.7-code,grok-4.5"      # ← 改这里(逗号分隔,多个并行)
+        default: "glm-5.2,kimi-k2.6,grok-4.5"      # ← 改这里(逗号分隔,多个并行)
       model_labels:
-        default: '{"glm-5.2":"GLM-5.2","kimi-k2.7-code":"Kimi-K2.7-Code","grok-4.5":"Grok-4.5", ...}'   # ← 顺手改显示名
+        default: '{"glm-5.2":"GLM-5.2","kimi-k2.6":"Kimi-K2.6","grok-4.5":"Grok-4.5", ...}'   # ← 顺手改显示名
       fallbacks:
         # ↓ 原则上必须换上游!当前 Kimi/Grok 两条是知情破例(见上方 ⚠️)
-        default: '{"glm-5.2":["minimax-m3"],"kimi-k2.7-code":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
+        default: '{"glm-5.2":["minimax-m3"],"kimi-k2.6":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
 ```
 
 改之前**先查上游归属**(见上文表格),别把主模型和它的 fallback 放在同一个上游。合并到 `main` 后,所有业务仓库下次审查自动用新模型。可用模型列表:

@@ -57,9 +57,9 @@ const context = {
 };
 const BASE_ENV = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/',
-  PR_REVIEW_MODELS: 'glm-5.2,kimi-k2.7-code,grok-4.5',
-  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.7-code":"Kimi-K2.7-Code","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}',
-  PR_REVIEW_FALLBACKS: '{"glm-5.2":["minimax-m3"],"kimi-k2.7-code":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}',
+  PR_REVIEW_MODELS: 'glm-5.2,kimi-k2.6,grok-4.5',
+  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.7-code":"Kimi-K2.7-Code","kimi-k2.6":"Kimi-K2.6","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}',
+  PR_REVIEW_FALLBACKS: '{"glm-5.2":["minimax-m3"],"kimi-k2.6":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}',
   PR_REVIEW_DIFF_BUDGET: '100000',
 };
 
@@ -154,7 +154,7 @@ const promptFor = (r, model) => {
 // ------------------------------------------------------------------ 1. happy path
 let r = await scenario({ route: (m) => reply(200, okBody(m, `# review by ${m}`)) });
 check('happy: one comment per configured model', r.posted.length === 3);
-check('happy: primaries used', r.captured.map((c) => c.model).sort().join(',') === 'glm-5.2,grok-4.5,kimi-k2.7-code');
+check('happy: primaries used', r.captured.map((c) => c.model).sort().join(',') === 'glm-5.2,grok-4.5,kimi-k2.6');
 check('happy: no degraded banner', !r.posted.some((b) => b.includes('备用模型')));
 check('happy: actual upstream is logged', r.logs.some((l) => l.includes('upstream=upstream/glm-5.2')));
 check('happy: footer is its own paragraph', /\n\n<sub>Model: /.test(r.posted[0]));
@@ -167,11 +167,11 @@ check('payload: required fields present', r.captured.every((c) => c.model
   && c.stream === false));
 const happyByModel = Object.fromEntries(r.captured.map((c, i) => [c.model, { body: c, url: r.capturedUrls[i] }]));
 check('payload: existing chat models retain temperature 0.2', happyByModel['glm-5.2'].body.temperature === 0.2);
-check('payload: Kimi K2.7 Code alone omits temperature and gets room to finish',
-  !('temperature' in happyByModel['kimi-k2.7-code'].body)
-  && happyByModel['kimi-k2.7-code'].body.max_tokens === 24576
+check('payload: default Kimi K2.6 keeps the normal sampling contract',
+  happyByModel['kimi-k2.6'].body.temperature === 0.2
+  && happyByModel['kimi-k2.6'].body.max_tokens === 16384
   && happyByModel['glm-5.2'].body.max_tokens === 16384);
-check('payload: Kimi and GLM stay on chat completions', ['glm-5.2', 'kimi-k2.7-code'].every((m) => happyByModel[m].url.endsWith('/chat/completions')));
+check('payload: Kimi and GLM stay on chat completions', ['glm-5.2', 'kimi-k2.6'].every((m) => happyByModel[m].url.endsWith('/chat/completions')));
 check('payload: Grok alone uses responses', happyByModel['grok-4.5'].url.endsWith('/responses')
   && !('temperature' in happyByModel['grok-4.5'].body)
   && happyByModel['grok-4.5'].body.max_output_tokens === 16384);
@@ -202,24 +202,24 @@ check('payload: caller-selected Kimi K3 also omits temperature',
   && r.capturedUrls[0].endsWith('/chat/completions'));
 
 r = await scenario({
-  route: (m) => (m === 'kimi-k2.7-code'
+  route: (m) => (m === 'kimi-k2.6'
     ? reply(200, okBody(m, '', { finish: 'length', reasoning: 'PRIVATE KIMI REASONING' }))
     : reply(200, okBody(m, `# review by ${m}`))),
 });
-const kimiFallbackBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k2.7-code'));
+const kimiFallbackBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k2.6'));
 check('safety: reasoning-only Kimi response falls back',
   r.captured.some((c) => c.model === 'qwen3.7-max') && kimiFallbackBody.includes('由备用模型'));
 check('safety: Kimi private reasoning is never posted',
   !r.posted.some((b) => b.includes('PRIVATE KIMI REASONING')));
 
 // ------------------------------------------------------------------ 3. upstream outage -> fallback
-r = await scenario({ route: (m) => (m === 'kimi-k2.7-code' ? reply(503, FAILOVER_503) : reply(200, okBody(m, `# review by ${m}`))) });
-check('outage: primary retried maxAttempts (3) times', r.captured.filter((c) => c.model === 'kimi-k2.7-code').length === 3);
+r = await scenario({ route: (m) => (m === 'kimi-k2.6' ? reply(503, FAILOVER_503) : reply(200, okBody(m, `# review by ${m}`))) });
+check('outage: primary retried maxAttempts (3) times', r.captured.filter((c) => c.model === 'kimi-k2.6').length === 3);
 check('outage: fallback model invoked', r.captured.some((c) => c.model === 'qwen3.7-max'));
 check('outage: review still posted', r.posted.length === 3);
-const degradedBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k2.7-code'));
+const degradedBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k2.6'));
 check('outage: degraded banner rendered', /\n\n> ℹ️ .*由备用模型 `Qwen3\.7-Max` 生成。\n\n/.test(degradedBody));
-check('outage: footer names both models', degradedBody.includes('Model: kimi-k2.7-code unavailable -> served by qwen3.7-max'));
+check('outage: footer names both models', degradedBody.includes('Model: kimi-k2.6 unavailable -> served by qwen3.7-max'));
 check('outage: healthy model unaffected', r.posted.some((b) => b.includes('# review by glm-5.2')));
 
 // ------------------------------------------------------------------ 3b. hung upstream is bounded
@@ -261,7 +261,7 @@ check('budget: falls back after giving up', r.captured.some((c) => c.model === '
 // ------------------------------------------------------------------ 4. whole chain down
 r = await scenario({ route: () => reply(503, FAILOVER_503) });
 check('chain down: diagnostic comments still posted', r.posted.length === 3 && r.threw === null);
-check('chain down: lists every model tried', r.posted[1].includes('kimi-k2.7-code -> HTTP 503') && r.posted[1].includes('qwen3.7-max -> HTTP 503'));
+check('chain down: lists every model tried', r.posted[1].includes('kimi-k2.6 -> HTTP 503') && r.posted[1].includes('qwen3.7-max -> HTTP 503'));
 check('chain down: explains failover_exhausted', r.posted[0].includes('provider-side outage, not a problem with this repo'));
 
 // ------------------------------------------------------------------ 5. optional-field repair
@@ -334,10 +334,10 @@ check('packing: oversized file still respects the budget', hugePacked <= 5000, `
 
 r = await scenario({ route: (m) => reply(200, okBody(m, 'ok')), files: KIMI_HEAVY });
 check('packing: Kimi alone gets the 50k diff cap',
-  promptFor(r, 'kimi-k2.7-code').includes('50000-character patch budget')
+  promptFor(r, 'kimi-k2.6').includes('50000-character patch budget')
   && !promptFor(r, 'glm-5.2').includes('50000-character patch budget'));
 check('packing: Kimi cap preserves more context for other models',
-  promptFor(r, 'glm-5.2').length > promptFor(r, 'kimi-k2.7-code').length);
+  promptFor(r, 'glm-5.2').length > promptFor(r, 'kimi-k2.6').length);
 check('packing: Kimi-specific packing is logged',
   r.logs.some((l) => l.startsWith('Kimi diff packed:') && l.includes('/50000 patch chars')));
 

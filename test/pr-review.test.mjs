@@ -44,6 +44,7 @@ const FILES = [
   patch('tests/experiment_db/test_tag_routes.py', 6000),
 ];
 const HUGE = [patch('src/generated/schema.ts', 30000)];
+const KIMI_HEAVY = Array.from({ length: 6 }, (_, i) => patch(`src/module-${i}.ts`, 12000));
 
 const pull = {
   number: 42, title: 'Add tags', user: { login: 'octocat' },
@@ -145,6 +146,10 @@ const check = (name, cond, detail = '') => {
 };
 const packLog = (r) => r.logs.find((l) => l.startsWith('Diff packed:'));
 const promptOf = (r) => r.captured[0].messages[1].content;
+const promptFor = (r, model) => {
+  const body = r.captured.find((c) => c.model === model);
+  return (body.messages || body.input)[1].content;
+};
 
 // ------------------------------------------------------------------ 1. happy path
 let r = await scenario({ route: (m) => reply(200, okBody(m, `# review by ${m}`)) });
@@ -164,7 +169,7 @@ const happyByModel = Object.fromEntries(r.captured.map((c, i) => [c.model, { bod
 check('payload: existing chat models retain temperature 0.2', happyByModel['glm-5.2'].body.temperature === 0.2);
 check('payload: Kimi K2.7 Code alone omits temperature and gets room to finish',
   !('temperature' in happyByModel['kimi-k2.7-code'].body)
-  && happyByModel['kimi-k2.7-code'].body.max_tokens === 32768
+  && happyByModel['kimi-k2.7-code'].body.max_tokens === 24576
   && happyByModel['glm-5.2'].body.max_tokens === 16384);
 check('payload: Kimi and GLM stay on chat completions', ['glm-5.2', 'kimi-k2.7-code'].every((m) => happyByModel[m].url.endsWith('/chat/completions')));
 check('payload: Grok alone uses responses', happyByModel['grok-4.5'].url.endsWith('/responses')
@@ -193,7 +198,7 @@ r = await scenario({
 });
 check('payload: caller-selected Kimi K3 also omits temperature',
   r.captured.length === 1 && !('temperature' in r.captured[0])
-  && r.captured[0].max_tokens === 32768
+  && r.captured[0].max_tokens === 24576
   && r.capturedUrls[0].endsWith('/chat/completions'));
 
 r = await scenario({
@@ -326,6 +331,15 @@ check('packing: oversized single file is kept but marked', promptOf(r).includes(
   && promptOf(r).includes('[... patch truncated to fit the diff budget ...]'));
 const hugePacked = Number(packLog(r).match(/(\d+)\/5000 patch chars/)[1]);
 check('packing: oversized file still respects the budget', hugePacked <= 5000, `${hugePacked} <= 5000`);
+
+r = await scenario({ route: (m) => reply(200, okBody(m, 'ok')), files: KIMI_HEAVY });
+check('packing: Kimi alone gets the 50k diff cap',
+  promptFor(r, 'kimi-k2.7-code').includes('50000-character patch budget')
+  && !promptFor(r, 'glm-5.2').includes('50000-character patch budget'));
+check('packing: Kimi cap preserves more context for other models',
+  promptFor(r, 'glm-5.2').length > promptFor(r, 'kimi-k2.7-code').length);
+check('packing: Kimi-specific packing is logged',
+  r.logs.some((l) => l.startsWith('Kimi diff packed:') && l.includes('/50000 patch chars')));
 
 // ------------------------------------------------------------------ 10. bad config must not crash
 r = await scenario({ route: (m) => reply(200, okBody(m, 'ok')), env: { PR_REVIEW_FALLBACKS: '{not json' } });

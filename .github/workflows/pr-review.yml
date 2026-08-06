@@ -17,15 +17,14 @@ name: Reusable AI PR Review
 # The gateway re-routes ids without notice: on 2026-07-08 glm-5.2 sat on fireworks/frank
 # and kimi-k2.6 on moonshotai; both are Console Go now. Re-probe before trusting this list.
 #
-# All three primaries below live on Console Go — the only upstream serving glm-5.2, kimi-k3
-# and grok-4.5. Only glm-5.2's fallback (minimax-m3) escapes it; kimi-k3 and grok-4.5 fall
-# back to qwen3.7-max by explicit choice, which is Console Go too. So those two chains cover
-# a per-model failure (kimi-k3's quota, see below) but NOT a Console Go outage — when that
+# All three primaries below live on Console Go — the only upstream serving glm-5.2,
+# kimi-k2.7-code and grok-4.5. Only glm-5.2's fallback (minimax-m3) escapes it; the Kimi and
+# Grok reviewers fall back to qwen3.7-max by explicit choice, which is Console Go too. So
+# those two chains cover a per-model failure but NOT a Console Go outage — when that
 # upstream goes down, only the glm-5.2 comment survives. That is a deliberate trade, not an
 # oversight: qwen3.7-max's sole upstream is what caused the 2026-07-02 and 07-06 blackouts.
-# kimi-k3 was answering roughly 1 request in 8 on 2026-07-23 (429 `Provider rate limit
-# exceeded`, or 400 `Upstream request failed`) while glm-5.2 and grok-4.5 on the same
-# upstream answered first try, so expect its fallback to carry it.
+# Kimi K3 was already intermittent on 2026-07-23 and returned persistent endpoint-level 503s
+# on 2026-08-06 even after its request contract was corrected, hence K2.7 Code as the default.
 # Re-derive the mapping by forcing an upstream error and reading `Error from provider (<name>)`:
 #   curl -sS "$BASE/chat/completions" -H "authorization: Bearer $KEY" \
 #     -d '{"model":"<id>","messages":[{"role":"user","content":"hi"}],"temperature":99}'
@@ -36,6 +35,14 @@ name: Reusable AI PR Review
 # So the request carries only fields every upstream understands, and `callModel` drops any
 # optional field an upstream rejects by name. Thinking needs no flag: models that reason
 # return `reasoning_content` on their own.
+#
+# OpenCode Go models need narrow protocol overrides (verified 2026-08-06):
+# - Kimi K3 and Kimi K2.7 Code require clients to omit temperature. Kimi K3 then reaches
+#   its upstream but currently returns 503 `Endpoint is unavailable`, so the default Kimi
+#   reviewer uses the coding-focused K2.7 model until K3's provider route recovers.
+# - Grok 4.5's Chat Completions route returns 503 `Endpoint is unavailable`; current xAI
+#   documentation and models.dev expose it through the Responses protocol. Only Grok uses
+#   `/responses`; all existing models keep the original `/chat/completions` contract.
 
 on:
   workflow_call:
@@ -44,17 +51,17 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,kimi-k3,grok-4.5"
+        default: "glm-5.2,kimi-k2.7-code,grok-4.5"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}'
+        default: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.7-code":"Kimi-K2.7-Code","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing. Each fallback MUST sit on a different upstream than its primary.
         type: string
         required: false
-        default: '{"glm-5.2":["minimax-m3"],"kimi-k3":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
+        default: '{"glm-5.2":["minimax-m3"],"kimi-k2.7-code":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
       diff_char_budget:
         description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
         type: number
@@ -245,27 +252,46 @@ jobs:
 
             // Optional request fields an upstream may reject outright. Dropping one and
             // retrying is always safe; `model`/`messages`/`stream` never are.
-            const DROPPABLE_FIELDS = new Set(['enable_thinking', 'temperature', 'top_p', 'max_tokens']);
+            const DROPPABLE_FIELDS = new Set([
+              'enable_thinking', 'temperature', 'top_p', 'max_tokens', 'max_output_tokens',
+            ]);
             const EXTRA_FIELD_REJECTED = [
               /Extra inputs are not permitted, field: '([^']+)'/i,
               /unknown field:? '?([a-z_]+)'?/i,
               /unsupported parameter:? '?([a-z_]+)'?/i,
             ];
 
-            // No `enable_thinking`: every model here emits `reasoning_content` on its own when
-            // it thinks, and it once cost a whole review when the Fireworks upstream then behind
-            // glm-5.2 started 400ing on the field. Verified on glm-5.2 / kimi-k3 / grok-4.5.
+            // No `enable_thinking`: every model here reasons without it, and the Fireworks
+            // upstream once started 400ing on the field after a silent route change.
+            function apiPath(model) {
+              return model === 'grok-4.5' ? 'responses' : 'chat/completions';
+            }
+
+            const NO_TEMPERATURE_MODELS = new Set(['kimi-k3', 'kimi-k2.7-code']);
+
             function basePayload(model) {
-              return {
+              const messages = [
+                { role: 'system', content: system },
+                { role: 'user', content: user },
+              ];
+              if (model === 'grok-4.5') {
+                return {
+                  model,
+                  input: messages,
+                  stream: false,
+                  max_output_tokens: 16384,
+                };
+              }
+              const payload = {
                 model,
-                messages: [
-                  { role: 'system', content: system },
-                  { role: 'user', content: user },
-                ],
-                temperature: 0.2,
+                messages,
                 stream: false,
                 max_tokens: 16384,
               };
+              // Moonshot locks sampling for these Kimi models and documents that clients must
+              // omit temperature. Every other Chat Completions model keeps the proven 0.2.
+              if (!NO_TEMPERATURE_MODELS.has(model)) payload.temperature = 0.2;
+              return payload;
             }
 
             async function callOnce(model, payload, deadline) {
@@ -288,7 +314,7 @@ jobs:
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remaining));
                 try {
-                  response = await fetch(`${baseUrl}/chat/completions`, {
+                  response = await fetch(`${baseUrl}/${apiPath(model)}`, {
                     method: 'POST',
                     signal: controller.signal,
                     headers: {
@@ -310,7 +336,7 @@ jobs:
                 if (response?.ok) break;
                 const status = response?.status ?? 'request failed';
                 const diag = (responseText || requestError || '').slice(0, 1000);
-                console.log(`[${model}] attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
+                console.log(`[${model}] api=${apiPath(model)} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
                 // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
                 // request/auth problems that will not fix themselves on retry.
                 const retriable = !response || response.status >= 500 || response.status === 429;
@@ -349,13 +375,39 @@ jobs:
 
             function extractReview(model, responseText) {
               const payload = JSON.parse(responseText);
+              if (Array.isArray(payload?.output)) {
+                const textParts = [];
+                let reasoningLength = 0;
+                for (const item of payload.output) {
+                  const blocks = Array.isArray(item?.content) ? item.content : [];
+                  if (item?.type === 'message') {
+                    for (const block of blocks) {
+                      if (block?.type === 'output_text' && typeof block.text === 'string') {
+                        textParts.push(block.text);
+                      }
+                    }
+                  } else if (item?.type === 'reasoning') {
+                    const summaries = Array.isArray(item.summary) ? item.summary : [];
+                    reasoningLength += summaries.reduce(
+                      (sum, part) => sum + (typeof part?.text === 'string' ? part.text.length : 0),
+                      0,
+                    );
+                  }
+                }
+                let review = stripThinking(textParts.join('\n').trim());
+                console.log(`[${model}] api=responses status=${payload?.status} contentLen=${review.length} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
+                if (review && payload?.status === 'incomplete') {
+                  review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
+                }
+                return { review, reasoningLength };
+              }
               const choice = payload?.choices?.[0];
               const message = choice?.message;
               const finishReason = choice?.finish_reason;
               const reasoning = message?.reasoning_content || '';
               const content = stripThinking(message?.content);
               let review = content || stripThinking(reasoning);
-              console.log(`[${model}] upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
+              console.log(`[${model}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
               if (review && finishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }

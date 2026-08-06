@@ -56,9 +56,9 @@ const context = {
 };
 const BASE_ENV = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/',
-  PR_REVIEW_MODELS: 'glm-5.2,kimi-k3,grok-4.5',
-  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}',
-  PR_REVIEW_FALLBACKS: '{"glm-5.2":["minimax-m3"],"kimi-k3":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}',
+  PR_REVIEW_MODELS: 'glm-5.2,kimi-k2.7-code,grok-4.5',
+  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.7-code":"Kimi-K2.7-Code","grok-4.5":"Grok-4.5","minimax-m3":"MiniMax-M3","qwen3.7-max":"Qwen3.7-Max"}',
+  PR_REVIEW_FALLBACKS: '{"glm-5.2":["minimax-m3"],"kimi-k2.7-code":["qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}',
   PR_REVIEW_DIFF_BUDGET: '100000',
 };
 
@@ -69,6 +69,15 @@ const okBody = (model, content, extra = {}) => JSON.stringify({
   choices: [{ finish_reason: extra.finish || 'stop', message: { content, reasoning_content: extra.reasoning ?? 'thinking...' } }],
   usage: { prompt_tokens: 100 },
 });
+const okResponsesBody = (model, content, extra = {}) => JSON.stringify({
+  model: `upstream/${model}`,
+  status: extra.status || 'completed',
+  output: [
+    { type: 'reasoning', summary: [{ type: 'summary_text', text: extra.reasoning ?? 'thinking...' }] },
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: content }] },
+  ],
+  usage: { input_tokens: 100, output_tokens: 50 },
+});
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
 
 // ------------------------------------------------------------------ harness
@@ -78,8 +87,10 @@ const reply = (status, text) => ({ ok: status < 400, status, text: async () => t
 // `hangUntilAbort` makes a request never resolve until its AbortController fires, so the
 // per-attempt timeout / budget abort path can be tested with backoff sleeps collapsed to 0.
 let captured = [];
+let capturedUrls = [];
 async function scenario({ route, files = FILES, commentBehaviour = () => true, env = {}, clockPerFetch = 0 }) {
   captured = [];
+  capturedUrls = [];
   const posted = [];
   const logs = [];
   let attempts = 0; // count CALLS, not successes: a rejected post must still advance this
@@ -101,9 +112,10 @@ async function scenario({ route, files = FILES, commentBehaviour = () => true, e
   const realNow = Date.now;
   let fakeNow = realNow();
   if (clockPerFetch) Date.now = () => fakeNow;
-  const stubFetch = async (_url, opts) => {
+  const stubFetch = async (url, opts) => {
     const body = JSON.parse(opts.body);
     captured.push(body);
+    capturedUrls.push(url);
     if (clockPerFetch) fakeNow += clockPerFetch;
     const res = route(body.model, opts);
     if (res === 'HANG') {
@@ -123,7 +135,7 @@ async function scenario({ route, files = FILES, commentBehaviour = () => true, e
       { log: (...a) => logs.push(a.join(' ')) },
     );
   } catch (e) { threw = e; } finally { Date.now = realNow; }
-  return { posted, logs, threw, captured: [...captured] };
+  return { posted, logs, threw, captured: [...captured], capturedUrls: [...capturedUrls] };
 }
 
 const results = [];
@@ -137,7 +149,7 @@ const promptOf = (r) => r.captured[0].messages[1].content;
 // ------------------------------------------------------------------ 1. happy path
 let r = await scenario({ route: (m) => reply(200, okBody(m, `# review by ${m}`)) });
 check('happy: one comment per configured model', r.posted.length === 3);
-check('happy: primaries used', r.captured.map((c) => c.model).sort().join(',') === 'glm-5.2,grok-4.5,kimi-k3');
+check('happy: primaries used', r.captured.map((c) => c.model).sort().join(',') === 'glm-5.2,grok-4.5,kimi-k2.7-code');
 check('happy: no degraded banner', !r.posted.some((b) => b.includes('备用模型')));
 check('happy: actual upstream is logged', r.logs.some((l) => l.includes('upstream=upstream/glm-5.2')));
 check('happy: footer is its own paragraph', /\n\n<sub>Model: /.test(r.posted[0]));
@@ -145,16 +157,49 @@ check('happy: header is its own paragraph', /## AI PR Review · GLM-5\.2\n\n# re
 
 // ------------------------------------------------------------------ 2. request contract
 check('payload: enable_thinking is never sent', r.captured.every((c) => !('enable_thinking' in c)));
-check('payload: required fields present', r.captured.every((c) => c.model && c.messages?.length === 2 && c.stream === false));
+check('payload: required fields present', r.captured.every((c) => c.model
+  && (c.model === 'grok-4.5' ? c.input?.length === 2 : c.messages?.length === 2)
+  && c.stream === false));
+const happyByModel = Object.fromEntries(r.captured.map((c, i) => [c.model, { body: c, url: r.capturedUrls[i] }]));
+check('payload: existing chat models retain temperature 0.2', happyByModel['glm-5.2'].body.temperature === 0.2);
+check('payload: Kimi K2.7 Code alone omits temperature', !('temperature' in happyByModel['kimi-k2.7-code'].body));
+check('payload: Kimi and GLM stay on chat completions', ['glm-5.2', 'kimi-k2.7-code'].every((m) => happyByModel[m].url.endsWith('/chat/completions')));
+check('payload: Grok alone uses responses', happyByModel['grok-4.5'].url.endsWith('/responses')
+  && !('temperature' in happyByModel['grok-4.5'].body)
+  && happyByModel['grok-4.5'].body.max_output_tokens === 16384);
+
+r = await scenario({ route: (m) => reply(200, m === 'grok-4.5'
+  ? okResponsesBody(m, '# responses review', { reasoning: 'private summary' })
+  : okBody(m, `# review by ${m}`)) });
+const grokBody = r.posted.find((b) => b.includes('ai-pr-review-bot:grok-4.5'));
+check('responses: Grok output_text is posted', grokBody.includes('# responses review'));
+check('responses: Grok reasoning summary is not posted', !grokBody.includes('private summary'));
+check('responses: Grok reasoning length is reported', grokBody.includes('Thinking: 15 chars'));
+
+r = await scenario({ route: (m) => (m === 'grok-4.5'
+  ? reply(503, FAILOVER_503)
+  : reply(200, okBody(m, `# review by ${m}`))) });
+const grokCalls = r.captured.map((c, i) => ({ model: c.model, url: r.capturedUrls[i] }));
+check('responses: a failed Grok still falls back on chat completions',
+  grokCalls.filter((c) => c.model === 'grok-4.5').every((c) => c.url.endsWith('/responses'))
+  && grokCalls.some((c) => c.model === 'qwen3.7-max' && c.url.endsWith('/chat/completions')));
+
+r = await scenario({
+  env: { PR_REVIEW_MODELS: 'kimi-k3', PR_REVIEW_FALLBACKS: '{}' },
+  route: (m) => reply(200, okBody(m, '# review')),
+});
+check('payload: caller-selected Kimi K3 also omits temperature',
+  r.captured.length === 1 && !('temperature' in r.captured[0])
+  && r.capturedUrls[0].endsWith('/chat/completions'));
 
 // ------------------------------------------------------------------ 3. upstream outage -> fallback
-r = await scenario({ route: (m) => (m === 'kimi-k3' ? reply(503, FAILOVER_503) : reply(200, okBody(m, `# review by ${m}`))) });
-check('outage: primary retried maxAttempts (3) times', r.captured.filter((c) => c.model === 'kimi-k3').length === 3);
+r = await scenario({ route: (m) => (m === 'kimi-k2.7-code' ? reply(503, FAILOVER_503) : reply(200, okBody(m, `# review by ${m}`))) });
+check('outage: primary retried maxAttempts (3) times', r.captured.filter((c) => c.model === 'kimi-k2.7-code').length === 3);
 check('outage: fallback model invoked', r.captured.some((c) => c.model === 'qwen3.7-max'));
 check('outage: review still posted', r.posted.length === 3);
-const degradedBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k3'));
+const degradedBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k2.7-code'));
 check('outage: degraded banner rendered', /\n\n> ℹ️ .*由备用模型 `Qwen3\.7-Max` 生成。\n\n/.test(degradedBody));
-check('outage: footer names both models', degradedBody.includes('Model: kimi-k3 unavailable -> served by qwen3.7-max'));
+check('outage: footer names both models', degradedBody.includes('Model: kimi-k2.7-code unavailable -> served by qwen3.7-max'));
 check('outage: healthy model unaffected', r.posted.some((b) => b.includes('# review by glm-5.2')));
 
 // ------------------------------------------------------------------ 3b. hung upstream is bounded
@@ -196,7 +241,7 @@ check('budget: falls back after giving up', r.captured.some((c) => c.model === '
 // ------------------------------------------------------------------ 4. whole chain down
 r = await scenario({ route: () => reply(503, FAILOVER_503) });
 check('chain down: diagnostic comments still posted', r.posted.length === 3 && r.threw === null);
-check('chain down: lists every model tried', r.posted[1].includes('kimi-k3 -> HTTP 503') && r.posted[1].includes('qwen3.7-max -> HTTP 503'));
+check('chain down: lists every model tried', r.posted[1].includes('kimi-k2.7-code -> HTTP 503') && r.posted[1].includes('qwen3.7-max -> HTTP 503'));
 check('chain down: explains failover_exhausted', r.posted[0].includes('provider-side outage, not a problem with this repo'));
 
 // ------------------------------------------------------------------ 5. optional-field repair

@@ -199,6 +199,15 @@ jobs:
             if (kimiDiffPack !== diffPack) {
               console.log(`Kimi diff packed: ${kimiDiffPack.kept}/${files.length} files, ${kimiDiffPack.packedChars}/${KIMI_DIFF_BUDGET} patch chars, ${kimiDiffPack.omitted} omitted.`);
             }
+            // K3 reasons much more slowly than the other Kimi models. Keep it useful and
+            // bounded: all changed filenames plus a compact summary and a small patch sample.
+            const K3_DIFF_BUDGET = Math.min(DIFF_BUDGET, 1000);
+            const k3DiffPack = K3_DIFF_BUDGET === DIFF_BUDGET
+              ? diffPack
+              : packDiff(K3_DIFF_BUDGET);
+            if (k3DiffPack !== diffPack) {
+              console.log(`Kimi K3 diff packed: ${k3DiffPack.kept}/${files.length} files, ${k3DiffPack.packedChars}/${K3_DIFF_BUDGET} patch chars, ${k3DiffPack.omitted} omitted.`);
+            }
 
             const system = [
               'You are an experienced code reviewer.',
@@ -207,8 +216,9 @@ jobs:
               'Return concise Markdown in Chinese.',
               'If there are no actionable issues, say that clearly and mention residual risks.',
             ].join(' ');
+            const k3System = `${system} Keep the review focused and produce the final Markdown directly after brief internal reasoning.`;
 
-            const buildUser = (diffText) => [
+            const buildUser = (diffText, options = {}) => [
               `Repository: ${owner}/${repo}`,
               `Pull Request: #${pull.number} ${pull.title}`,
               `Author: ${pull.user.login}`,
@@ -216,17 +226,23 @@ jobs:
               `Head: ${pull.head.ref}`,
               '',
               'PR description:',
-              (pull.body || '[No description]').slice(0, 4000),
+              (pull.body || '[No description]').slice(0, options.descriptionLimit ?? 4000),
               '',
-              issueContext
-                ? `Referenced issues (background — what & why):\n${issueContext}`
+              (options.issueText ?? issueContext)
+                ? `Referenced issues (background — what & why):\n${options.issueText ?? issueContext}`
                 : 'Referenced issues: none.',
               '',
+              ...(options.fileList ? ['All changed file names:', options.fileList, ''] : []),
               'Changed files and patches:',
               diffText || '[No diff available]',
             ].join('\n');
             const user = buildUser(diffPack.text);
             const kimiUser = buildUser(kimiDiffPack.text);
+            const k3User = buildUser(k3DiffPack.text, {
+              descriptionLimit: 1000,
+              issueText: '',
+              fileList: files.map((file) => file.filename).join(', ').slice(0, 2000),
+            });
 
             const baseUrl = process.env.OPENAI_API_BASE.replace(/\/$/, '');
             const models = (process.env.PR_REVIEW_MODELS || '')
@@ -286,9 +302,12 @@ jobs:
             const FIXED_SAMPLING_KIMI_MODELS = new Set(['kimi-k3', 'kimi-k2.7-code']);
 
             function basePayload(model) {
+              const userContent = model === 'kimi-k3'
+                ? k3User
+                : (KIMI_MODELS.has(model) ? kimiUser : user);
               const messages = [
-                { role: 'system', content: system },
-                { role: 'user', content: KIMI_MODELS.has(model) ? kimiUser : user },
+                { role: 'system', content: model === 'kimi-k3' ? k3System : system },
+                { role: 'user', content: userContent },
               ];
               if (model === 'grok-4.5') {
                 return {
@@ -302,9 +321,11 @@ jobs:
                 model,
                 messages,
                 stream: false,
-                // Kimi gets a bounded input plus extra room to finish its reasoning; every
-                // other model retains the established 16k output cap and full diff context.
-                max_tokens: FIXED_SAMPLING_KIMI_MODELS.has(model) ? 24576 : 16384,
+                // K3 gets a compact high-level review budget so its slow reasoning completes
+                // inside the request timeout. K2.7 keeps extra room; other models stay at 16k.
+                max_tokens: model === 'kimi-k3'
+                  ? 8192
+                  : (model === 'kimi-k2.7-code' ? 24576 : 16384),
               };
               // Moonshot locks sampling for these Kimi models and documents that clients must
               // omit temperature. Every other Chat Completions model keeps the proven 0.2.

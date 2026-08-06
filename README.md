@@ -25,7 +25,7 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 ### OpenCode Go 模型协议兼容
 
 - `kimi-k3` 是默认且明确要求的 Kimi reviewer。Moonshot 要求 K3 完全省略 `temperature`；workflow 按该契约发送。`kimi-k2.6` 只作为 K3 上游故障时的第一备用，`qwen3.7-max` 是第二备用。
-- 所有 Kimi 模型单独使用 50000 字符的完整文件 diff 预算；K3/K2.7 可使用 24576 completion token，默认 K2.6 保持 16384。若只有 `reasoning_content`、没有最终 `content`，workflow 不会把私有推理当 review 发布，而是转到既有 fallback；GLM/Grok 继续获得完整 `diff_char_budget`（默认 100000）并保持原输出上限和解析行为。
+- K3 是慢速深度推理模型：为保证它在 GitHub Actions 的 5 分钟请求窗口内由本模型完成，K3 会收到完整文件名列表、1000 字符 patch 样本、精简 PR 摘要和 8192 completion token，定位为高层风险复核。K2.6/K2.7 的 Kimi 上下文上限仍为 50000；GLM/Grok 继续获得完整 `diff_char_budget`（默认 100000）。若 Kimi 只有 `reasoning_content`、没有最终 `content`，workflow 不会把私有推理当 review 发布，而是转到明确标注的 fallback。
 - `grok-4.5` 使用 `/responses` 和 `max_output_tokens`。2026-08-06 的实际 PR 日志显示其 `/chat/completions` 路径持续返回 503 `Endpoint is unavailable`；xAI 当前官方 Grok 4.5 示例以及 models.dev 的 `@ai-sdk/openai` 映射均指向 Responses 协议。
 - 其余模型仍使用 `/chat/completions`、`messages`、`max_tokens`，请求形状没有变化。
 

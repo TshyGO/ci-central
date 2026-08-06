@@ -169,7 +169,7 @@ const happyByModel = Object.fromEntries(r.captured.map((c, i) => [c.model, { bod
 check('payload: existing chat models retain temperature 0.2', happyByModel['glm-5.2'].body.temperature === 0.2);
 check('payload: default Kimi K3 uses its exact sampling contract',
   !('temperature' in happyByModel['kimi-k3'].body)
-  && happyByModel['kimi-k3'].body.max_tokens === 24576
+  && happyByModel['kimi-k3'].body.max_tokens === 8192
   && happyByModel['glm-5.2'].body.max_tokens === 16384);
 check('payload: Kimi and GLM stay on chat completions', ['glm-5.2', 'kimi-k3'].every((m) => happyByModel[m].url.endsWith('/chat/completions')));
 check('payload: Grok alone uses responses', happyByModel['grok-4.5'].url.endsWith('/responses')
@@ -335,13 +335,17 @@ const hugePacked = Number(packLog(r).match(/(\d+)\/5000 patch chars/)[1]);
 check('packing: oversized file still respects the budget', hugePacked <= 5000, `${hugePacked} <= 5000`);
 
 r = await scenario({ route: (m) => reply(200, okBody(m, 'ok')), files: KIMI_HEAVY });
-check('packing: Kimi alone gets the 50k diff cap',
-  promptFor(r, 'kimi-k3').includes('50000-character patch budget')
-  && !promptFor(r, 'glm-5.2').includes('50000-character patch budget'));
-check('packing: Kimi cap preserves more context for other models',
+check('packing: K3 alone gets the 1k diff cap',
+  promptFor(r, 'kimi-k3').includes('1000-character patch budget')
+  && !promptFor(r, 'glm-5.2').includes('1000-character patch budget'));
+check('packing: K3 still receives every changed filename',
+  promptFor(r, 'kimi-k3').includes('All changed file names:')
+  && promptFor(r, 'kimi-k3').includes('src/module-5.ts'));
+check('packing: K3 cap preserves more context for other models',
   promptFor(r, 'glm-5.2').length > promptFor(r, 'kimi-k3').length);
 check('packing: Kimi-specific packing is logged',
-  r.logs.some((l) => l.startsWith('Kimi diff packed:') && l.includes('/50000 patch chars')));
+  r.logs.some((l) => l.startsWith('Kimi diff packed:') && l.includes('/50000 patch chars'))
+  && r.logs.some((l) => l.startsWith('Kimi K3 diff packed:') && l.includes('/1000 patch chars')));
 
 // ------------------------------------------------------------------ 10. bad config must not crash
 r = await scenario({ route: (m) => reply(200, okBody(m, 'ok')), env: { PR_REVIEW_FALLBACKS: '{not json' } });

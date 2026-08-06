@@ -162,7 +162,10 @@ check('payload: required fields present', r.captured.every((c) => c.model
   && c.stream === false));
 const happyByModel = Object.fromEntries(r.captured.map((c, i) => [c.model, { body: c, url: r.capturedUrls[i] }]));
 check('payload: existing chat models retain temperature 0.2', happyByModel['glm-5.2'].body.temperature === 0.2);
-check('payload: Kimi K2.7 Code alone omits temperature', !('temperature' in happyByModel['kimi-k2.7-code'].body));
+check('payload: Kimi K2.7 Code alone omits temperature and gets room to finish',
+  !('temperature' in happyByModel['kimi-k2.7-code'].body)
+  && happyByModel['kimi-k2.7-code'].body.max_tokens === 32768
+  && happyByModel['glm-5.2'].body.max_tokens === 16384);
 check('payload: Kimi and GLM stay on chat completions', ['glm-5.2', 'kimi-k2.7-code'].every((m) => happyByModel[m].url.endsWith('/chat/completions')));
 check('payload: Grok alone uses responses', happyByModel['grok-4.5'].url.endsWith('/responses')
   && !('temperature' in happyByModel['grok-4.5'].body)
@@ -190,7 +193,19 @@ r = await scenario({
 });
 check('payload: caller-selected Kimi K3 also omits temperature',
   r.captured.length === 1 && !('temperature' in r.captured[0])
+  && r.captured[0].max_tokens === 32768
   && r.capturedUrls[0].endsWith('/chat/completions'));
+
+r = await scenario({
+  route: (m) => (m === 'kimi-k2.7-code'
+    ? reply(200, okBody(m, '', { finish: 'length', reasoning: 'PRIVATE KIMI REASONING' }))
+    : reply(200, okBody(m, `# review by ${m}`))),
+});
+const kimiFallbackBody = r.posted.find((b) => b.includes('ai-pr-review-bot:kimi-k2.7-code'));
+check('safety: reasoning-only Kimi response falls back',
+  r.captured.some((c) => c.model === 'qwen3.7-max') && kimiFallbackBody.includes('由备用模型'));
+check('safety: Kimi private reasoning is never posted',
+  !r.posted.some((b) => b.includes('PRIVATE KIMI REASONING')));
 
 // ------------------------------------------------------------------ 3. upstream outage -> fallback
 r = await scenario({ route: (m) => (m === 'kimi-k2.7-code' ? reply(503, FAILOVER_503) : reply(200, okBody(m, `# review by ${m}`))) });

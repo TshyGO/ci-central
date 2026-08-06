@@ -267,7 +267,7 @@ jobs:
               return model === 'grok-4.5' ? 'responses' : 'chat/completions';
             }
 
-            const NO_TEMPERATURE_MODELS = new Set(['kimi-k3', 'kimi-k2.7-code']);
+            const FIXED_SAMPLING_KIMI_MODELS = new Set(['kimi-k3', 'kimi-k2.7-code']);
 
             function basePayload(model) {
               const messages = [
@@ -286,11 +286,14 @@ jobs:
                 model,
                 messages,
                 stream: false,
-                max_tokens: 16384,
+                // On a 100k-character PR, Kimi K2.7 consumed the full 16k completion in
+                // reasoning before emitting final content. Give only these Kimi models enough
+                // room to finish; every other model retains the established 16k cap.
+                max_tokens: FIXED_SAMPLING_KIMI_MODELS.has(model) ? 32768 : 16384,
               };
               // Moonshot locks sampling for these Kimi models and documents that clients must
               // omit temperature. Every other Chat Completions model keeps the proven 0.2.
-              if (!NO_TEMPERATURE_MODELS.has(model)) payload.temperature = 0.2;
+              if (!FIXED_SAMPLING_KIMI_MODELS.has(model)) payload.temperature = 0.2;
               return payload;
             }
 
@@ -406,7 +409,13 @@ jobs:
               const finishReason = choice?.finish_reason;
               const reasoning = message?.reasoning_content || '';
               const content = stripThinking(message?.content);
-              let review = content || stripThinking(reasoning);
+              // Kimi can exhaust max_tokens while still reasoning and return no final content.
+              // Never publish its private reasoning as a review: an empty review makes the
+              // caller continue to the configured fallback instead. Preserve the legacy
+              // reasoning fallback for other providers whose final text may live there.
+              let review = content || (FIXED_SAMPLING_KIMI_MODELS.has(model)
+                ? ''
+                : stripThinking(reasoning));
               console.log(`[${model}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
               if (review && finishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';

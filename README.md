@@ -14,25 +14,19 @@
         │  secrets: 显式映射两个 PR Agent 仓库级 secret
         ▼
 ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓库)
-        │  默认调 /chat/completions；Grok 4.5 单独调 /responses
+        │  统一调 OpenAI 兼容的 /chat/completions
         ▼
-供应商:OpenCode Go (https://opencode.ai/zen/go/v1)
-        模型:glm-5.2 + kimi-k3 + grok-4.5,各自带 fallback
+供应商:阿里云 Model Studio compatible-mode
+        模型:glm-5.2 + qwen3.8-max + deepseek-v4-pro
 ```
 
 每个模型出一条独立评论(评论头 `<!-- ai-pr-review-bot:<model> -->`),三条并行发。
 
-### OpenCode Go 模型协议兼容
+### Model Studio 模型协议
 
-- `kimi-k3` 是默认且明确要求的 Kimi reviewer。Moonshot 要求 K3 完全省略 `temperature`；workflow 按该契约发送。`kimi-k2.6` 只作为 K3 上游故障时的第一备用，`qwen3.7-max` 是第二备用。
-- K3 是慢速深度推理模型：为保证它在 GitHub Actions 的 5 分钟请求窗口内由本模型完成，K3 会收到完整文件名列表、1000 字符 patch 样本、精简 PR 摘要和 8192 completion token，定位为高层风险复核。K2.6/K2.7 的 Kimi 上下文上限仍为 50000；GLM/Grok 继续获得完整 `diff_char_budget`（默认 100000）。若 Kimi 只有 `reasoning_content`、没有最终 `content`，workflow 不会把私有推理当 review 发布，而是转到明确标注的 fallback。
-- `grok-4.5` 使用 `/responses` 和 `max_output_tokens`。2026-08-06 的实际 PR 日志显示其 `/chat/completions` 路径持续返回 503 `Endpoint is unavailable`；xAI 当前官方 Grok 4.5 示例以及 models.dev 的 `@ai-sdk/openai` 映射均指向 Responses 协议。
-- 其余模型仍使用 `/chat/completions`、`messages`、`max_tokens`，请求形状没有变化。
-
-### ⚠️ 选模型看的是「上游」,不是模型本身
-
-OpenCode Go 只是个网关,背后转发给若干第三方上游。**一个上游挂了,它下面挂的所有模型会同时返回 503 `failover_exhausted`。**
-2026-07 出现过两次多小时宕机(07-02、07-06→07-07),原因就是当时的第二个模型 `qwen3.7-max` 唯一的上游 `Console Go` 躺了。
+- `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro` 统一使用 `/chat/completions`、`messages`、`max_tokens` 与 `temperature: 0.2`。
+- workflow 只发布 `choices[].message.content`。`reasoning_content` 仅用于日志长度统计，绝不会写入 PR 评论；模型未返回最终内容时将尝试已配置的 fallback。
+- 三条备用链均局限于这三个已验证模型，因此可以缓解单模型瞬时失败，但不能覆盖整个 Model Studio 端点不可用。
 
 当前供应商为阿里云 Model Studio 的 OpenAI 兼容端点。2026-08-11 已对其 `/models` 和 Chat Completions 做真实验证，默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro`。
 

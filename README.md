@@ -34,35 +34,9 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 OpenCode Go 只是个网关,背后转发给若干第三方上游。**一个上游挂了,它下面挂的所有模型会同时返回 503 `failover_exhausted`。**
 2026-07 出现过两次多小时宕机(07-02、07-06→07-07),原因就是当时的第二个模型 `qwen3.7-max` 唯一的上游 `Console Go` 躺了。
 
-已实测的归属(2026-07-23 重测):
+当前供应商为阿里云 Model Studio 的 OpenAI 兼容端点。2026-08-11 已对其 `/models` 和 Chat Completions 做真实验证，默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro`。
 
-| 上游 | 模型 |
-|---|---|
-| **`Console Go`**(不稳定) | `glm-5.2`、`kimi-k3`、`grok-4.5`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`qwen3.7-max`、`minimax-m2.7`、`minimax-m2.5`、`hy3` |
-| `Alibaba` | `qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
-| `MiniMax` | `minimax-m3`(会把 `<think>` 写进 `content`,workflow 里已剥离) |
-
-**归属会被网关悄悄改掉**:2026-07-08 时 `glm-5.2` 在 `fireworks`/`frank`、`kimi-k2.6` 在 `moonshotai`,现在两个都被挪到了 `Console Go`。上面这张表只是快照,改模型前重测一遍。
-
-**`models` 里的模型和它的 `fallbacks` 必须落在不同上游**,否则 fallback 形同虚设。
-
-> ⚠️ 现在三个主模型 `glm-5.2` / `kimi-k3` / `grok-4.5` **全在 `Console Go`** —— 网关上只有它供这三个 id,没得选。
->
-> **只有 `glm-5.2` 的 fallback(`minimax-m3`)跨出了 Console Go**。K3 依次回落到 `kimi-k2.6`、`qwen3.7-max`，Grok 回落到 `qwen3.7-max`；这些仍在 Console Go，主要覆盖单模型故障，不覆盖整个 Console Go 宕机。
->
-> K3 保持主模型身份。K2.6 曾在 NebulaLab PR #418/#424/#446 成功生成完整 review，因此仅在 K3 请求确实失败时承接同系列 fallback；评论会明确标注实际服务模型，不会把 K2.6 冒充 K3。
->
-> `qwen3.8-max` 已于 2026-08-06 出现在 OpenCode Go `/models`；当前仍保留已验证的 `qwen3.7-max` fallback，若要升级需另做真实请求验证。
-
-重新测归属的办法——故意发一个非法参数,读错误里的 provider 名:
-
-```bash
-curl -sS "$BASE/chat/completions" -H "authorization: Bearer $KEY" \
-  -d '{"model":"<id>","messages":[{"role":"user","content":"hi"}],"temperature":99}'
-# → {"error":{"message":"Error from provider (Console Go): ..."}}
-```
-
-平时也不用猜:每次 review 的 job 日志里都有 `[<model>] upstream=<实际上游>`。
+三个模型都使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。每条备用链仅使用上述三个已验证模型，主要覆盖单模型暂时不可用；它们共享一个端点，不能替代供应商级灾备。
 
 **密钥/地址(secret)来源:**
 
@@ -87,18 +61,17 @@ on:
   workflow_call:
     inputs:
       models:
-        default: "glm-5.2,kimi-k3,grok-4.5"      # ← 改这里(逗号分隔,多个并行)
+        default: "glm-5.2,qwen3.8-max,deepseek-v4-pro" # ← 改这里(逗号分隔,多个并行)
       model_labels:
-        default: '{"glm-5.2":"GLM-5.2","kimi-k3":"Kimi-K3","kimi-k2.6":"Kimi-K2.6","grok-4.5":"Grok-4.5", ...}'   # ← 顺手改显示名
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro"}' # ← 顺手改显示名
       fallbacks:
-        # ↓ 原则上必须换上游!当前 Kimi/Grok 两条是知情破例(见上方 ⚠️)
-        default: '{"glm-5.2":["minimax-m3"],"kimi-k3":["kimi-k2.6","qwen3.7-max"],"grok-4.5":["qwen3.7-max"]}'
+        default: '{"glm-5.2":["deepseek-v4-pro"],"qwen3.8-max":["glm-5.2"],"deepseek-v4-pro":["qwen3.8-max"]}'
 ```
 
-改之前**先查上游归属**(见上文表格),别把主模型和它的 fallback 放在同一个上游。合并到 `main` 后,所有业务仓库下次审查自动用新模型。可用模型列表:
+改之前先查询供应商模型列表，并对候选模型做最小 Chat Completions 实测。合并到 `main` 后，所有业务仓库下次审查自动用新模型：
 
 ```bash
-curl -s https://opencode.ai/zen/go/v1/models -H "Authorization: Bearer <KEY>" | jq '.data[].id'
+curl -s "$BASE/models" -H "Authorization: Bearer $KEY" | jq '.data[].id'
 ```
 
 > 个别仓库想用不同模型,可在它的瘦身 caller 里 `with: { models: "..." }` 覆盖,不影响其它仓库。

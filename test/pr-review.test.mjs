@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const raw = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-review.yml'), 'utf8').split('\n');
+const workflowText = raw.join('\n');
 const start = raw.findIndex((line) => line.trim() === 'script: |');
 if (start < 0) throw new Error('script block not found');
 const lines = [];
@@ -22,9 +23,9 @@ const pull = { number: 42, title: 'Test', user: { login: 'octocat' }, base: { re
 const context = { payload: { pull_request: { number: 42, head: { sha: 'deadbeef' } } }, repo: { owner: 'TshyGO', repo: 'Example' }, serverUrl: 'https://github.com', runId: 1 };
 const env = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/', GOOGLE_AI_API_KEY: 'google-test-key',
-  PR_REVIEW_MODELS: 'glm-5.2,qwen3.8-max,deepseek-v4-pro,gemini-3.6-flash',
-  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.6-flash":"Gemini-3.6-Flash"}',
-  PR_REVIEW_FALLBACKS: '{"glm-5.2":["deepseek-v4-pro"],"qwen3.8-max":["glm-5.2"],"deepseek-v4-pro":["qwen3.8-max"]}',
+  PR_REVIEW_MODELS: 'glm-5.2,qwen3.8-max,gemini-3.6-flash',
+  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.6-flash":"Gemini-3.6-Flash"}',
+  PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}',
   PR_REVIEW_DIFF_BUDGET: '100000',
 };
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
@@ -65,22 +66,29 @@ async function scenario(route, overrides = {}) {
 const checks = [];
 const check = (name, condition) => { checks.push(condition); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 
+check(
+  'workflow defaults contain exactly the three intended reviewers',
+  workflowText.includes('default: "glm-5.2,qwen3.8-max,gemini-3.6-flash"')
+    && workflowText.includes('default: \'{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}\'')
+    && !workflowText.toLowerCase().includes('deepseek'),
+);
+
 let r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : result(model, `# review ${model}`)));
-check('four configured primaries are called', r.captured.map((x) => x.model).sort().join(',') === 'deepseek-v4-pro,gemini-3.6-flash,glm-5.2,qwen3.8-max');
+check('three configured primaries are called', r.captured.map((x) => x.model).sort().join(',') === 'gemini-3.6-flash,glm-5.2,qwen3.8-max');
 check('Model Studio models use standard chat completions', r.urls.filter((url) => !url.includes('generativelanguage.googleapis.com')).every((url) => url.endsWith('/chat/completions')));
 const studioBodies = r.captured.filter((x) => x.model !== 'gemini-3.6-flash').map((x) => x.body);
 check('Model Studio payload contract is uniform', studioBodies.every((body) => body.messages?.length === 2 && body.stream === false && body.max_tokens === 16384 && body.temperature === 0.2));
 const geminiCall = r.captured.find((x) => x.model === 'gemini-3.6-flash');
 check('Gemini uses generateContent and its native payload', geminiCall && r.urls.find((url) => url.includes('generativelanguage.googleapis.com')).endsWith('/models/gemini-3.6-flash:generateContent') && geminiCall.body.systemInstruction?.parts?.length === 1 && geminiCall.body.contents?.[0]?.parts?.length === 1 && geminiCall.body.generationConfig?.maxOutputTokens === 16384 && !('temperature' in geminiCall.body.generationConfig) && geminiCall.headers['x-goog-api-key'] === 'google-test-key');
-check('one comment per model', r.posted.length === 4);
+check('one comment per model', r.posted.length === 3);
 check('reasoning never reaches a PR comment', !r.posted.some((body) => body.includes('private thinking')));
 check('Gemini thought parts never reach a PR comment', !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
-check('labels use the new configured names', r.posted.some((body) => body.includes('Qwen3.8-Max')) && r.posted.some((body) => body.includes('DeepSeek-V4-Pro')));
+check('labels use the configured names', r.posted.some((body) => body.includes('GLM-5.2')) && r.posted.some((body) => body.includes('Qwen3.8-Max')) && r.posted.some((body) => body.includes('Gemini-3.6-Flash')));
 
 r = await scenario((model) => model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : reply(200, model === 'gemini-3.6-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
 check('transient primary failure retries three times', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3);
-check('configured fallback is used after primary failure', r.captured.some((entry) => entry.model === 'deepseek-v4-pro'));
-check('fallback review is marked as degraded', r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by deepseek-v4-pro')));
+check('configured fallback is used after primary failure', r.captured.filter((entry) => entry.model === 'qwen3.8-max').length >= 2);
+check('fallback review is marked as degraded', r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by qwen3.8-max')));
 
 r = await scenario((model, body) => model === 'qwen3.8-max' && 'temperature' in body
   ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}')
@@ -88,9 +96,9 @@ r = await scenario((model, body) => model === 'qwen3.8-max' && 'temperature' in 
 const qwenAttempts = r.captured.filter((entry) => entry.model === 'qwen3.8-max').map((entry) => entry.body);
 check('optional-field rejection retries without the field', qwenAttempts.length === 2 && !('temperature' in qwenAttempts[1]));
 
-r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult('# review') : result(model, model === 'deepseek-v4-pro' ? '' : '# review')));
+r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult('# review') : result(model, model === 'qwen3.8-max' ? '' : '# review')));
 check('empty final content does not publish reasoning', !r.posted.some((body) => body.includes('private thinking')));
-check('empty final content moves to its configured fallback', r.captured.filter((entry) => entry.model === 'qwen3.8-max').length >= 2);
+check('empty final content moves to its configured fallback', r.captured.filter((entry) => entry.model === 'glm-5.2').length >= 2 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by glm-5.2')));
 
 r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult('', { finish: 'MAX_TOKENS' }) : result(model, '# review')));
 check('Gemini empty output posts a diagnostic rather than leaking hidden data', r.posted.some((body) => body.includes('gemini-3.6-flash') && body.includes('AI review was not generated')) && !r.posted.some((body) => body.includes('private thinking')));

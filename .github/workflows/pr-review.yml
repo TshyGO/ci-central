@@ -6,7 +6,7 @@ name: Reusable AI PR Review
 # PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY / PR_AGENT_GOOGLE_AI_KEY.
 #
 # Current provider: Alibaba Cloud Model Studio compatible-mode endpoint, verified 2026-08-11.
-# Its live /models list includes the three Model Studio defaults below. They all use the standard OpenAI
+# Its live /models list includes the two Model Studio defaults below. They both use the standard OpenAI
 # Chat Completions protocol and return final review text in choices[].message.content.
 # Gemini 3.6 Flash uses Google AI Studio's generateContent protocol. The job never publishes
 # provider reasoning, even when it is present in a response.
@@ -18,17 +18,17 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,qwen3.8-max,deepseek-v4-pro,gemini-3.6-flash"
+        default: "glm-5.2,qwen3.8-max,gemini-3.6-flash"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.6-flash":"Gemini-3.6-Flash"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.6-flash":"Gemini-3.6-Flash"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing.
         type: string
         required: false
-        default: '{"glm-5.2":["deepseek-v4-pro"],"qwen3.8-max":["glm-5.2"],"deepseek-v4-pro":["qwen3.8-max"]}'
+        default: '{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}'
       diff_char_budget:
         description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
         type: number

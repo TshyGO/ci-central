@@ -3,12 +3,13 @@ name: Reusable AI PR Review
 # Centralized AI PR review used across repos via `uses:`.
 # Swap provider/model in ONE place: change the `models` default below
 # (or pass `with: models`), and update the org secrets
-# PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY.
+# PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY / PR_AGENT_GOOGLE_AI_KEY.
 #
 # Current provider: Alibaba Cloud Model Studio compatible-mode endpoint, verified 2026-08-11.
-# Its live /models list includes all three defaults below. They all use the standard OpenAI
+# Its live /models list includes the three Model Studio defaults below. They all use the standard OpenAI
 # Chat Completions protocol and return final review text in choices[].message.content.
-# The job never publishes reasoning_content, even when the provider returns it.
+# Gemini 3.6 Flash uses Google AI Studio's generateContent protocol. The job never publishes
+# provider reasoning, even when it is present in a response.
 
 on:
   workflow_call:
@@ -17,12 +18,12 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,qwen3.8-max,deepseek-v4-pro"
+        default: "glm-5.2,qwen3.8-max,deepseek-v4-pro,gemini-3.6-flash"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.6-flash":"Gemini-3.6-Flash"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing.
         type: string
@@ -38,6 +39,8 @@ on:
         required: true
       PR_AGENT_OPENAI_API_BASE:
         required: true
+      PR_AGENT_GOOGLE_AI_KEY:
+        required: false
 
 jobs:
   ai-pr-review:
@@ -56,6 +59,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
           OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
+          GOOGLE_AI_API_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
           PR_REVIEW_MODELS: ${{ inputs.models }}
           PR_REVIEW_MODEL_LABELS: ${{ inputs.model_labels }}
           PR_REVIEW_FALLBACKS: ${{ inputs.fallbacks }}
@@ -194,6 +198,7 @@ jobs:
             if (models.length === 0) {
               throw new Error('PR_REVIEW_MODELS must list at least one model id.');
             }
+            const GOOGLE_MODELS = new Set(['gemini-3.6-flash']);
             const parseJsonEnv = (name) => {
               try {
                 return JSON.parse(process.env[name] || '{}');
@@ -204,6 +209,13 @@ jobs:
             };
             const MODEL_LABELS = parseJsonEnv('PR_REVIEW_MODEL_LABELS');
             const FALLBACKS = parseJsonEnv('PR_REVIEW_FALLBACKS');
+            const configuredModels = [
+              ...models,
+              ...Object.values(FALLBACKS).flatMap((chain) => Array.isArray(chain) ? chain : []),
+            ];
+            if (configuredModels.some((model) => GOOGLE_MODELS.has(model)) && !process.env.GOOGLE_AI_API_KEY) {
+              throw new Error('PR_AGENT_GOOGLE_AI_KEY is required when gemini-3.6-flash is configured.');
+            }
             const maxAttempts = 3;
             // A healthy response with heavy reasoning has been observed at ~270s, so give one
             // attempt 5 minutes. But an upstream can also accept the connection and then hang
@@ -248,6 +260,14 @@ jobs:
               };
             }
 
+            function googlePayload() {
+              return {
+                systemInstruction: { parts: [{ text: system }] },
+                contents: [{ role: 'user', parts: [{ text: user }] }],
+                generationConfig: { maxOutputTokens: 16384, temperature: 0.2 },
+              };
+            }
+
             async function callOnce(model, payload, deadline) {
               const requestBody = JSON.stringify(payload);
               let response;
@@ -268,16 +288,25 @@ jobs:
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remaining));
                 try {
-                  response = await fetch(`${baseUrl}/chat/completions`, {
+                  const isGoogle = GOOGLE_MODELS.has(model);
+                  const endpoint = isGoogle
+                    ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
+                    : `${baseUrl}/chat/completions`;
+                  response = await fetch(endpoint, {
                     method: 'POST',
                     signal: controller.signal,
-                    headers: {
+                    headers: isGoogle ? {
+                      'x-goog-api-key': process.env.GOOGLE_AI_API_KEY,
+                      'content-type': 'application/json',
+                      accept: 'application/json',
+                      'user-agent': 'GitHubActions-AI-PR-Review',
+                    } : {
                       authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
                       'content-type': 'application/json',
                       accept: 'application/json',
                       'user-agent': 'GitHubActions-AI-PR-Review',
                     },
-                    body: requestBody,
+                    body: isGoogle ? JSON.stringify(googlePayload()) : requestBody,
                   });
                   responseText = await response.text();
                 } catch (error) {
@@ -290,7 +319,7 @@ jobs:
                 if (response?.ok) break;
                 const status = response?.status ?? 'request failed';
                 const diag = (responseText || requestError || '').slice(0, 1000);
-                console.log(`[${model}] api=chat/completions attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
+                console.log(`[${model}] api=${GOOGLE_MODELS.has(model) ? 'generateContent' : 'chat/completions'} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
                 // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
                 // request/auth problems that will not fix themselves on retry.
                 const retriable = !response || response.status >= 500 || response.status === 429;
@@ -314,6 +343,9 @@ jobs:
               // in bounded time and the fallback still gets its own full window.
               const deadline = Date.now() + MODEL_BUDGET_MS;
               const payload = basePayload(model);
+              if (GOOGLE_MODELS.has(model)) {
+                return callOnce(model, payload, deadline);
+              }
               for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
                 const result = await callOnce(model, payload, deadline);
                 if (result.response?.status !== 400) return result;
@@ -329,6 +361,18 @@ jobs:
 
             function extractReview(model, responseText) {
               const payload = JSON.parse(responseText);
+              if (GOOGLE_MODELS.has(model)) {
+                const candidate = payload?.candidates?.[0];
+                const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+                const content = stripThinking(parts.map((part) => part?.text || '').join('\n'));
+                const finishReason = candidate?.finishReason;
+                console.log(`[${model}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
+                let review = content;
+                if (review && finishReason && finishReason !== 'STOP') {
+                  review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
+                }
+                return { review, reasoningLength: 0 };
+              }
               const choice = payload?.choices?.[0];
               const message = choice?.message;
               const finishReason = choice?.finish_reason;

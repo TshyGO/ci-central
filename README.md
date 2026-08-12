@@ -11,16 +11,16 @@
 ```
 业务仓库 (.github/workflows/ai-pr-review.yml)   ← 瘦身 caller,~10 行
         │  uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
-        │  secrets: 显式映射两个 PR Agent 仓库级 secret
+        │  secrets: 显式映射 Model Studio 与 Google AI Studio 的 PR Agent secret
         ▼
 ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓库)
-        │  统一调 OpenAI 兼容的 /chat/completions
-        ▼
-供应商:阿里云 Model Studio compatible-mode
-        模型:glm-5.2 + qwen3.8-max + deepseek-v4-pro
+        ├─ 阿里云 Model Studio: /chat/completions
+        │    glm-5.2 + qwen3.8-max + deepseek-v4-pro
+        └─ Google AI Studio: generateContent
+             gemini-3.6-flash
 ```
 
-每个模型出一条独立评论(评论头 `<!-- ai-pr-review-bot:<model> -->`),三条并行发。
+每个模型出一条独立评论(评论头 `<!-- ai-pr-review-bot:<model> -->`),四条并行发。
 
 ### Model Studio 模型协议
 
@@ -28,19 +28,25 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 - workflow 只发布 `choices[].message.content`。`reasoning_content` 仅用于日志长度统计，绝不会写入 PR 评论；模型未返回最终内容时将尝试已配置的 fallback。
 - 三条备用链均局限于这三个已验证模型，因此可以缓解单模型瞬时失败，但不能覆盖整个 Model Studio 端点不可用。
 
-当前供应商为阿里云 Model Studio 的 OpenAI 兼容端点。2026-08-11 已对其 `/models` 和 Chat Completions 做真实验证，默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro`。
+### Google AI Studio 模型协议
 
-三个模型都使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。每条备用链仅使用上述三个已验证模型，主要覆盖单模型暂时不可用；它们共享一个端点，不能替代供应商级灾备。
+- `gemini-3.6-flash` 使用 Google AI Studio 原生 `v1beta/models/gemini-3.6-flash:generateContent`，认证头为 `x-goog-api-key`，不是 OpenAI 兼容协议。
+- 它需要调用仓库传入 `PR_AGENT_GOOGLE_AI_KEY`。该 secret 只在默认模型列表包含 Gemini 时才是必需的；只调用 Model Studio 模型的仓库无需配置它。
+- workflow 仅读取 Gemini `candidates[0].content.parts[].text`，不发布任何 provider reasoning 或内部字段。
+
+当前供应商包括阿里云 Model Studio 的 OpenAI 兼容端点和 Google AI Studio。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证；2026-08-12 已对 Google AI Studio 的 `gemini-3.6-flash:generateContent` 做真实验证。默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro`、`gemini-3.6-flash`。
+
+三个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。每条备用链仅使用这三个 Model Studio 模型，主要覆盖单模型暂时不可用；它们共享一个端点，不能替代供应商级灾备。
 
 **密钥/地址(secret)来源:**
 
 | 仓库 | secret 来源 |
 |---|---|
-| NebulaLab | 仓库级 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY` |
+| NebulaLab | 仓库级 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY` / `PR_AGENT_GOOGLE_AI_KEY` |
 | NebulaLab-Docs | 仓库级同名 secret |
 | NebulaLab-Plugins | 仓库级同名 secret |
 
-> 所有仓库均位于 `TshyGO` 个人账号下。调用方必须显式映射两个 secret，避免依赖组织级 secret 或跨仓继承行为。
+> 所有仓库均位于 `TshyGO` 个人账号下。调用方必须显式映射所需的三个 secret，避免依赖组织级 secret 或跨仓继承行为。
 
 ---
 
@@ -55,14 +61,14 @@ on:
   workflow_call:
     inputs:
       models:
-        default: "glm-5.2,qwen3.8-max,deepseek-v4-pro" # ← 改这里(逗号分隔,多个并行)
+        default: "glm-5.2,qwen3.8-max,deepseek-v4-pro,gemini-3.6-flash" # ← 改这里(逗号分隔,多个并行)
       model_labels:
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro"}' # ← 顺手改显示名
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.6-flash":"Gemini-3.6-Flash"}' # ← 顺手改显示名
       fallbacks:
         default: '{"glm-5.2":["deepseek-v4-pro"],"qwen3.8-max":["glm-5.2"],"deepseek-v4-pro":["qwen3.8-max"]}'
 ```
 
-改之前先查询供应商模型列表，并对候选模型做最小 Chat Completions 实测。合并到 `main` 后，所有业务仓库下次审查自动用新模型：
+改之前先查询供应商模型列表，并对候选模型做最小真实请求验证。合并到 `main` 后，所有业务仓库下次审查自动用新模型：
 
 ```bash
 curl -s "$BASE/models" -H "Authorization: Bearer $KEY" | jq '.data[].id'
@@ -78,7 +84,7 @@ curl -s "$BASE/models" -H "Authorization: Bearer $KEY" | jq '.data[].id'
 
 ### 2. 换供应商 / 换 key(改 2 处)
 
-新供应商需是 **OpenAI 兼容**(`/chat/completions`,返回 `choices[].message.content`;思考链放 `reasoning_content`)。
+新增 OpenAI 兼容供应商使用 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY`。Google AI Studio 使用单独的 `PR_AGENT_GOOGLE_AI_KEY`，不能填入 OpenAI key。
 
 ```bash
 # 隐藏输入一次，再通过 stdin 写入三个调用仓库
@@ -101,7 +107,7 @@ unset NEW_BASE NEW_KEY
 
 1. 在 `TshyGO` 账号下创建或转入仓库。
 2. 加文件 `.github/workflows/ai-pr-review.yml`,内容见下方"瘦身 caller 模板"。
-3. 在调用仓库设置 `PR_AGENT_OPENAI_API_BASE` 和 `PR_AGENT_OPENAI_KEY` 两个仓库级 secret。
+3. 在调用仓库设置 `PR_AGENT_OPENAI_API_BASE`、`PR_AGENT_OPENAI_KEY` 和（启用 Gemini 时）`PR_AGENT_GOOGLE_AI_KEY` 仓库级 secret。
 
 <details><summary>瘦身 caller 模板</summary>
 
@@ -136,6 +142,7 @@ jobs:
     secrets:
       PR_AGENT_OPENAI_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
       PR_AGENT_OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
+      PR_AGENT_GOOGLE_AI_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
 ```
 </details>
 

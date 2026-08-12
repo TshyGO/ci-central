@@ -33,8 +33,11 @@ const result = (model, content, { reasoning = 'private thinking', finish = 'stop
   choices: [{ finish_reason: finish, message: { content, reasoning_content: reasoning } }],
   usage: { prompt_tokens: 1 },
 });
-const geminiResult = (content, { finish = 'STOP' } = {}) => JSON.stringify({
-  candidates: [{ finishReason: finish, content: { parts: [{ text: content }] } }],
+const geminiResult = (content, { finish = 'STOP', thought = '' } = {}) => JSON.stringify({
+  candidates: [{ finishReason: finish, content: { parts: [
+    ...(thought ? [{ thought: true, text: thought }] : []),
+    { text: content },
+  ] } }],
   usageMetadata: { promptTokenCount: 1 },
 });
 
@@ -62,15 +65,16 @@ async function scenario(route, overrides = {}) {
 const checks = [];
 const check = (name, condition) => { checks.push(condition); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 
-let r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
+let r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : result(model, `# review ${model}`)));
 check('four configured primaries are called', r.captured.map((x) => x.model).sort().join(',') === 'deepseek-v4-pro,gemini-3.6-flash,glm-5.2,qwen3.8-max');
 check('Model Studio models use standard chat completions', r.urls.filter((url) => !url.includes('generativelanguage.googleapis.com')).every((url) => url.endsWith('/chat/completions')));
 const studioBodies = r.captured.filter((x) => x.model !== 'gemini-3.6-flash').map((x) => x.body);
 check('Model Studio payload contract is uniform', studioBodies.every((body) => body.messages?.length === 2 && body.stream === false && body.max_tokens === 16384 && body.temperature === 0.2));
 const geminiCall = r.captured.find((x) => x.model === 'gemini-3.6-flash');
-check('Gemini uses generateContent and its native payload', geminiCall && r.urls.find((url) => url.includes('generativelanguage.googleapis.com')).endsWith('/models/gemini-3.6-flash:generateContent') && geminiCall.body.systemInstruction?.parts?.length === 1 && geminiCall.body.contents?.[0]?.parts?.length === 1 && geminiCall.headers['x-goog-api-key'] === 'google-test-key');
+check('Gemini uses generateContent and its native payload', geminiCall && r.urls.find((url) => url.includes('generativelanguage.googleapis.com')).endsWith('/models/gemini-3.6-flash:generateContent') && geminiCall.body.systemInstruction?.parts?.length === 1 && geminiCall.body.contents?.[0]?.parts?.length === 1 && geminiCall.body.generationConfig?.maxOutputTokens === 16384 && !('temperature' in geminiCall.body.generationConfig) && geminiCall.headers['x-goog-api-key'] === 'google-test-key');
 check('one comment per model', r.posted.length === 4);
 check('reasoning never reaches a PR comment', !r.posted.some((body) => body.includes('private thinking')));
+check('Gemini thought parts never reach a PR comment', !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
 check('labels use the new configured names', r.posted.some((body) => body.includes('Qwen3.8-Max')) && r.posted.some((body) => body.includes('DeepSeek-V4-Pro')));
 
 r = await scenario((model) => model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : reply(200, model === 'gemini-3.6-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
@@ -96,5 +100,10 @@ check('Gemini non-STOP output is marked incomplete', r.posted.some((body) => bod
 
 r = await scenario((model) => reply(200, model === 'gemini-3.6-flash' ? geminiResult('# review') : result(model, '# review')), { GOOGLE_AI_API_KEY: '' });
 check('Gemini requires its separate secret', /PR_AGENT_GOOGLE_AI_KEY is required/.test(r.error?.message || ''));
+
+r = await scenario((model) => reply(200, geminiResult('# Gemini-only review')), {
+  PR_REVIEW_MODELS: 'gemini-3.6-flash', PR_REVIEW_FALLBACKS: '{}', OPENAI_API_KEY: '', OPENAI_API_BASE: '',
+});
+check('Gemini-only configuration does not require Model Studio credentials', r.error === undefined && r.posted.length === 1 && r.posted[0].includes('# Gemini-only review'));
 
 if (checks.some((x) => !x)) process.exitCode = 1;

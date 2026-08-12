@@ -69,10 +69,6 @@ jobs:
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;
             const { owner, repo } = context.repo;
 
-            if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE) {
-              throw new Error('PR_AGENT_OPENAI_KEY and PR_AGENT_OPENAI_API_BASE secrets are required.');
-            }
-
             const { data: pull } = await github.rest.pulls.get({
               owner,
               repo,
@@ -190,7 +186,6 @@ jobs:
             ].join('\n');
             const user = buildUser(diffPack.text);
 
-            const baseUrl = process.env.OPENAI_API_BASE.replace(/\/$/, '');
             const models = (process.env.PR_REVIEW_MODELS || '')
               .split(',')
               .map((m) => m.trim())
@@ -199,6 +194,11 @@ jobs:
               throw new Error('PR_REVIEW_MODELS must list at least one model id.');
             }
             const GOOGLE_MODELS = new Set(['gemini-3.6-flash']);
+            const requiresOpenAI = models.some((model) => !GOOGLE_MODELS.has(model));
+            if (requiresOpenAI && (!process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE)) {
+              throw new Error('PR_AGENT_OPENAI_KEY and PR_AGENT_OPENAI_API_BASE secrets are required for Model Studio models.');
+            }
+            const baseUrl = requiresOpenAI ? process.env.OPENAI_API_BASE.replace(/\/$/, '') : '';
             const parseJsonEnv = (name) => {
               try {
                 return JSON.parse(process.env[name] || '{}');
@@ -264,7 +264,7 @@ jobs:
               return {
                 systemInstruction: { parts: [{ text: system }] },
                 contents: [{ role: 'user', parts: [{ text: user }] }],
-                generationConfig: { maxOutputTokens: 16384, temperature: 0.2 },
+                generationConfig: { maxOutputTokens: 16384 },
               };
             }
 
@@ -364,7 +364,10 @@ jobs:
               if (GOOGLE_MODELS.has(model)) {
                 const candidate = payload?.candidates?.[0];
                 const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
-                const content = stripThinking(parts.map((part) => part?.text || '').join('\n'));
+                const content = stripThinking(parts
+                  .filter((part) => part?.thought !== true)
+                  .map((part) => part?.text || '')
+                  .join('\n'));
                 const finishReason = candidate?.finishReason;
                 console.log(`[${model}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
                 let review = content;

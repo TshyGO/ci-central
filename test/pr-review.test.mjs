@@ -23,7 +23,7 @@ const pull = { number: 42, title: 'Test', user: { login: 'octocat' }, base: { re
 const context = { payload: { pull_request: { number: 42, head: { sha: 'deadbeef' } } }, repo: { owner: 'TshyGO', repo: 'Example' }, serverUrl: 'https://github.com', runId: 1 };
 const env = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/', GOOGLE_AI_API_KEY: 'google-test-key',
-  PR_REVIEW_MODELS: 'glm-5.2',
+  PR_REVIEW_MODELS: 'glm-5.2,gemini-3.7-flash',
   PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}',
   PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}',
   PR_REVIEW_DIFF_BUDGET: '100000',
@@ -67,43 +67,54 @@ const checks = [];
 const check = (name, condition) => { checks.push(condition); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 
 check(
-  'workflow defaults contain one primary and two ordered fallbacks',
-  workflowText.includes('default: "glm-5.2"')
+  'workflow defaults contain one Alibaba primary, two ordered fallbacks, and independent Gemini',
+  workflowText.includes('default: "glm-5.2,gemini-3.7-flash"')
     && workflowText.includes('default: \'{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}\''),
 );
 
 let r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : result(model, `# review ${model}`)));
-check('healthy default calls only GLM-5.2', r.captured.map((x) => x.model).join(',') === 'glm-5.2');
+check('healthy default calls GLM and independent Gemini', r.captured.map((x) => x.model).sort().join(',') === 'gemini-3.7-flash,glm-5.2');
 check('Model Studio models use standard chat completions', r.urls.filter((url) => !url.includes('generativelanguage.googleapis.com')).every((url) => url.endsWith('/chat/completions')));
 const studioBodies = r.captured.filter((x) => x.model !== 'gemini-3.7-flash').map((x) => x.body);
 check('Model Studio payload contract is uniform', studioBodies.every((body) => body.messages?.length === 2 && body.stream === false && body.max_tokens === 16384 && body.temperature === 0.2));
-check('healthy default posts exactly one comment', r.posted.length === 1);
+check('healthy default posts one Alibaba comment and one Gemini comment', r.posted.length === 2
+  && r.posted.filter((body) => body.includes('<!-- ai-pr-review-bot:glm-5.2 -->')).length === 1
+  && r.posted.filter((body) => body.includes('<!-- ai-pr-review-bot:gemini-3.7-flash -->')).length === 1);
 check('reasoning never reaches a PR comment', !r.posted.some((body) => body.includes('private thinking')));
-check('healthy default uses the GLM label', r.posted[0]?.includes('GLM-5.2'));
+check('Gemini thought parts never reach a PR comment', !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
+check('healthy default uses GLM and Gemini labels', r.posted.some((body) => body.includes('GLM-5.2')) && r.posted.some((body) => body.includes('Gemini-3.7-Flash')));
 
-r = await scenario((model) => model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : reply(200, result(model, `# review ${model}`)));
+r = await scenario((model) => model === 'glm-5.2'
+  ? reply(503, '{"error":"unavailable"}')
+  : reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
 check('transient primary failure retries three times', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3);
 check('Qwen is used only after GLM fails', r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 1 && !r.captured.some((entry) => entry.model === 'deepseek-v4-pro'));
 check('fallback review is marked as degraded', r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by qwen3.8-max')));
-check('fallback still posts exactly one comment', r.posted.length === 1);
+check('Alibaba fallback still posts one lane comment beside Gemini', r.posted.length === 2
+  && r.posted.filter((body) => body.includes('<!-- ai-pr-review-bot:glm-5.2 -->')).length === 1
+  && r.posted.filter((body) => body.includes('<!-- ai-pr-review-bot:gemini-3.7-flash -->')).length === 1);
 
 r = await scenario((model) => ['glm-5.2', 'qwen3.8-max'].includes(model)
   ? reply(503, '{"error":"unavailable"}')
-  : reply(200, result(model, `# review ${model}`)));
+  : reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
 check('DeepSeek runs only after GLM and Qwen both fail', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3
   && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 3
   && r.captured.filter((entry) => entry.model === 'deepseek-v4-pro').length === 1);
-check('second fallback is marked as degraded', r.posted.length === 1 && r.posted[0].includes('glm-5.2 unavailable -> served by deepseek-v4-pro'));
+check('second fallback is marked as degraded without replacing Gemini', r.posted.length === 2
+  && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by deepseek-v4-pro'))
+  && r.posted.some((body) => body.includes('<!-- ai-pr-review-bot:gemini-3.7-flash -->')));
 
 r = await scenario((model, body) => model === 'glm-5.2'
   ? reply(503, '{"error":"unavailable"}')
   : model === 'qwen3.8-max' && 'temperature' in body
     ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}')
-    : reply(200, result(model, '# review')));
+    : reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')));
 const qwenAttempts = r.captured.filter((entry) => entry.model === 'qwen3.8-max').map((entry) => entry.body);
 check('optional-field rejection retries without the field', qwenAttempts.length === 2 && !('temperature' in qwenAttempts[1]));
 
-r = await scenario((model) => reply(200, result(model, model === 'glm-5.2' ? '' : '# review')));
+r = await scenario((model) => reply(200, model === 'gemini-3.7-flash'
+  ? geminiResult('# review')
+  : result(model, model === 'glm-5.2' ? '' : '# review')));
 check('empty final content does not publish reasoning', !r.posted.some((body) => body.includes('private thinking')));
 check('empty primary content moves forward to Qwen', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 1
   && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 1

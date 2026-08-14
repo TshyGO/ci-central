@@ -5,11 +5,11 @@ name: Reusable AI PR Review
 # (or pass `with: models`), and update the org secrets
 # PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY / PR_AGENT_GOOGLE_AI_KEY.
 #
-# Current default: one GLM-5.2 review, with Qwen3.8-Max and DeepSeek-V4-Pro tried
-# sequentially only when the preceding model fails. All three use Alibaba Cloud Model
-# Studio's OpenAI-compatible Chat Completions protocol, verified 2026-08-11.
-# Gemini 3.7 Flash remains available to explicit callers through Google AI Studio's
-# generateContent protocol. The job never publishes provider reasoning.
+# Current default: one Alibaba Cloud lane and one independent Google lane. The Alibaba
+# lane uses GLM-5.2 as its only primary, with Qwen3.8-Max and DeepSeek-V4-Pro tried
+# sequentially only when the preceding model fails. Gemini 3.7 Flash remains an
+# independent primary through Google AI Studio's generateContent protocol.
+# The job never publishes provider reasoning.
 
 on:
   workflow_call:
@@ -18,7 +18,7 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2"
+        default: "glm-5.2,gemini-3.7-flash"
       model_labels:
         description: JSON map of model id -> display label.
         type: string

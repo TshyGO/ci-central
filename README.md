@@ -16,19 +16,21 @@
 ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓库)
         ├─ 阿里云 Model Studio: /chat/completions
         │    glm-5.2（阿里云唯一主模型）
-        │      └─ 失败才试 qwen3.8-max
-        │           └─ 再失败才试 deepseek-v4-pro
+        │      └─ 模型级故障才试 qwen3.8-max
         └─ Google AI Studio: generateContent
              gemini-3.7-flash（独立主模型）
 ```
 
-健康状态发布两条评论：阿里云通道一条 GLM-5.2 评论，以及独立 Google 通道一条 Gemini 评论。Qwen 和 DeepSeek 只作为阿里云通道的顺序备用，不会并行审查，也不会额外发布阿里云评论。
+健康状态发布两条评论：阿里云通道一条 GLM-5.2 评论，以及独立 Google 通道一条 Gemini 评论。Qwen 只作为阿里云通道的模型级备用，不会并行审查，也不会额外发布阿里云评论。
 
 ### Model Studio 模型协议
 
-- `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro` 统一使用 `/chat/completions`、`messages`、`max_tokens` 与 `temperature: 0.2`。
+- `glm-5.2`、`qwen3.8-max` 统一使用 `/chat/completions`、`messages`、`max_tokens` 与 `temperature: 0.2`。
 - workflow 只发布 `choices[].message.content`。`reasoning_content` 仅用于日志长度统计，绝不会写入 PR 评论；模型未返回最终内容时将尝试已配置的 fallback。
-- 默认备用链只有一个方向：`glm-5.2 → qwen3.8-max → deepseek-v4-pro`。工作流会拒绝“某个模型既是并行主模型、又出现在 fallback 链”这类重复配置。
+- 默认备用链只有一个方向：`glm-5.2 → qwen3.8-max`。工作流会拒绝“某个模型既是并行主模型、又出现在 fallback 链”这类重复配置。
+- 额度耗尽、认证失败、网关验证页和持续网络不可达属于整条 Model Studio 通道的共享故障；这类错误不会继续向同一端点发送完整 PR 上下文。普通模型限流、5xx、超时和空最终正文仍按原策略重试或进入 Qwen fallback，保留审核可用性。
+- workflow 在上下文收集前和模型调用前各核对一次 PR head。只要事件已过期或收集期间出现新 push，就在发送任何模型请求前退出；两条主审线的完整 diff、100k 字符预算和 16k 输出上限保持不变。
+- reusable job 自己也按“仓库 + 事件类型 + PR 号”启用 `cancel-in-progress`，即使某个瘦身 caller 忘记配置 concurrency，连续 push 也只保留最新自动审核；手动 `/review` 与 push 仍使用不同并发组。
 
 ### Google AI Studio 模型协议
 
@@ -36,9 +38,9 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 - 它需要调用仓库传入 `PR_AGENT_GOOGLE_AI_KEY`。该 secret 只在默认模型列表包含 Gemini 时才是必需的；只调用 Model Studio 模型的仓库无需配置它。
 - workflow 仅读取 Gemini `candidates[0].content.parts[].text`，不发布任何 provider reasoning 或内部字段。
 
-当前默认包含两个独立通道。阿里云 Model Studio 通道的唯一主模型为 `glm-5.2`，备用顺序为 `qwen3.8-max`、`deepseek-v4-pro`；Google AI Studio 通道继续独立运行 `gemini-3.7-flash`。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证。
+当前默认包含两个独立通道。阿里云 Model Studio 通道的唯一主模型为 `glm-5.2`，备用模型为 `qwen3.8-max`；Google AI Studio 通道继续独立运行 `gemini-3.7-flash`。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证。
 
-三个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。Qwen 和 DeepSeek 只覆盖阿里云通道内的单模型暂时不可用；三者共享一个端点，不能替代供应商级灾备。Gemini 使用独立 Google 端点，不参与阿里云 fallback 链。
+两个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。Qwen 只覆盖阿里云通道内的单模型暂时不可用；两者共享一个端点和套餐，不能替代供应商级灾备。Gemini 使用独立 Google 端点，不参与阿里云 fallback 链。
 
 **密钥/地址(secret)来源:**
 
@@ -65,9 +67,9 @@ on:
       models:
         default: "glm-5.2,gemini-3.7-flash" # ← 阿里云单主模型 + 独立 Gemini
       model_labels:
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}'
       fallbacks:
-        default: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}'
+        default: '{"glm-5.2":["qwen3.8-max"]}'
 ```
 
 改之前先查询供应商模型列表，并对候选模型做最小真实请求验证。合并到 `main` 后，所有业务仓库下次审查自动用新模型：
@@ -165,4 +167,6 @@ jobs:
 - **别加 `enable_thinking: true`**。它曾经能用(当时 `glm-5.2` 走 `frank` 上游),网关把 `glm-5.2` 换到 Fireworks 之后直接 400:`Extra inputs are not permitted, field: 'enable_thinking'`。而且**根本不需要**——会思考的模型不带这个字段照样返回 `reasoning_content`(实测 glm-5.2 28266 字、qwen3.7-plus 24417 字)。同理,任何"可选参数"都可能被下一个上游拒绝,`callModel()` 会按名字摘掉被拒字段重试一次。
 - **上游会在你不知情时被换掉**。同一个模型 id,今天是 `frank/GLM-5.2`,明天是 `accounts/fireworks/models/glm-5p2`,请求契约跟着变。所以请求体只带各家都认的字段,并且靠 job 日志里的 `upstream=` 追踪实际由谁服务。
 - **上游会「假死」**(TCP 连上但一直不回包),不只是报 5xx。所以每个模型有一个 `MODEL_BUDGET_MS`(~6 分钟)的**总时长上限**:单次尝试封顶 `requestTimeoutMs`(5 分钟,够最重的思考响应 ~270s),预算耗尽就放弃该模型转 fallback,重试的退避永不睡过预算线。job 上还有 `timeout-minutes: 20` 兜底。**别再把这些值往大调**——曾经把单次超时抬到 480s×4 次,撞上上游假死时一个 job 空转了 26 分钟。想验证:测试里 `clockPerFetch` 用假时钟把预算路径跑通,不需要真等。
+- **共享错误要短路整条阿里通道**：套餐额度耗尽、认证失败、HTML 验证页，以及连续三次 `fetch failed`/DNS/TLS/拒绝连接都不是换模型能解决的问题。保持 Gemini 独立运行，但不要把同一份完整 PR 上下文继续发给同端点 Qwen。
+- **不要删掉调用前的两次 head 检查**：caller 的 concurrency 只能尽力取消正在执行的旧 run；如果旧请求已经发出，token 无法追回。脚本自己的 preflight + pre-dispatch 检查保证过期 run 在模型请求前退出。
 - **改完先跑测试**:`node test/pr-review.test.mjs`。它把 `pr-review.yml` 里那段内联 `script:` 原样抠出来,配 mock 的 GitHub API 和 stub 的 `fetch` 执行,覆盖降级链、剥 `<think>`、字段自愈、diff 打包/截断、发评论失败等路径。不需要任何密钥,PR 上自动跑(见 `.github/workflows/test.yml`)。

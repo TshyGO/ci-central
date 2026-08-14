@@ -6,8 +6,8 @@ name: Reusable AI PR Review
 # PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY / PR_AGENT_GOOGLE_AI_KEY.
 #
 # Current default: one Alibaba Cloud lane and one independent Google lane. The Alibaba
-# lane uses GLM-5.2 as its only primary, with Qwen3.8-Max and DeepSeek-V4-Pro tried
-# sequentially only when the preceding model fails. Gemini 3.7 Flash remains an
+# lane uses GLM-5.2 as its only primary, with Qwen3.8-Max tried only when GLM fails.
+# Gemini 3.7 Flash remains an
 # independent primary through Google AI Studio's generateContent protocol.
 # The job never publishes provider reasoning.
 
@@ -23,12 +23,12 @@ on:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing.
         type: string
         required: false
-        default: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}'
+        default: '{"glm-5.2":["qwen3.8-max"]}'
       diff_char_budget:
         description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
         type: number
@@ -44,6 +44,11 @@ on:
 
 jobs:
   ai-pr-review:
+    # Enforce latest-commit-wins centrally even when a thin caller forgot to enable
+    # cancellation. Keep manual /review comments isolated from pull_request pushes.
+    concurrency:
+      group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     # Backstop only. The script bounds each model with MODEL_BUDGET_MS (~6 min) and runs
     # models in parallel, so a real run finishes in a few minutes; this just guarantees a
@@ -74,6 +79,15 @@ jobs:
               repo,
               pull_number: pullNumber,
             });
+
+            // A newer push may already have superseded this pull_request event before the
+            // reusable job starts. Never spend model tokens reviewing a stale commit.
+            const eventHeadSha = context.payload.pull_request?.head?.sha;
+            const reviewHeadSha = pull.head.sha;
+            if (eventHeadSha && eventHeadSha !== reviewHeadSha) {
+              console.log(`Skip stale review before context collection: event=${eventHeadSha.slice(0, 7)} current=${reviewHeadSha.slice(0, 7)}.`);
+              return;
+            }
 
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner,
@@ -163,6 +177,7 @@ jobs:
               'First read the linked issue background (if provided) to understand what is being fixed and why, then judge whether the PR actually addresses it.',
               'Review the pull request for correctness, security, maintainability, and CI/configuration risks.',
               'Return concise Markdown in Chinese.',
+              'Always reserve enough output budget for the final Markdown review; never spend the entire response on hidden reasoning without a final answer.',
               'If there are no actionable issues, say that clearly and mention residual risks.',
             ].join(' ');
 
@@ -284,12 +299,43 @@ jobs:
               };
             }
 
+            function classifyFailure(response, responseText, requestError) {
+              const status = response?.status;
+              const rawText = `${responseText || ''}\n${requestError || ''}`;
+              const text = rawText.toLowerCase();
+              const quotaExhausted = status === 429 && (
+                text.includes('insufficient_quota')
+                || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
+                || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
+                || /quota[^\n]*reset at/i.test(text)
+              );
+              const authenticationFailed = status === 401 || (
+                status === 403
+                && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text)
+              );
+              const gatewayBlocked = /^\s*(<!doctype html|<html\b)/i.test(responseText || '')
+                || (!response?.ok && text.includes('验证失败'));
+              const endpointUnavailable = !response && (
+                /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text)
+              );
+
+              if (quotaExhausted) return { kind: 'quota-exhausted', stopRetries: true, stopFallbacks: true };
+              if (authenticationFailed) return { kind: 'authentication-failed', stopRetries: true, stopFallbacks: true };
+              if (gatewayBlocked) return { kind: 'gateway-blocked', stopRetries: true, stopFallbacks: true };
+              if (endpointUnavailable) return { kind: 'endpoint-unavailable', stopRetries: false, stopFallbacks: true };
+              return { kind: 'model-or-upstream-failure', stopRetries: false, stopFallbacks: false };
+            }
+
             async function callOnce(model, payload, deadline) {
               const requestBody = JSON.stringify(payload);
               let response;
               let responseText = '';
               let requestError = '';
+              let failureKind = '';
+              let stopFallbacks = false;
+              let attempts = 0;
               for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                attempts = attempt;
                 response = undefined;
                 responseText = '';
                 requestError = '';
@@ -332,14 +378,17 @@ jobs:
                 } finally {
                   clearTimeout(timeout);
                 }
-                if (response?.ok) break;
+                const failure = classifyFailure(response, responseText, requestError);
+                if (response?.ok && failure.kind !== 'gateway-blocked') break;
                 const status = response?.status ?? 'request failed';
                 const diag = (responseText || requestError || '').slice(0, 1000);
                 console.log(`[${model}] api=${GOOGLE_MODELS.has(model) ? 'generateContent' : 'chat/completions'} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
+                failureKind = failure.kind;
+                stopFallbacks = failure.stopFallbacks;
                 // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
                 // request/auth problems that will not fix themselves on retry.
                 const retriable = !response || response.status >= 500 || response.status === 429;
-                if (!retriable || attempt === maxAttempts) break;
+                if (failure.stopRetries || !retriable || attempt === maxAttempts) break;
                 // Exponential backoff with jitter (~3s, ~9s): rides out short upstream blips.
                 // Skip the wait entirely if it would eat into the budget — better to spend the
                 // remaining time on a real attempt (or on the fallback) than on sleeping.
@@ -347,7 +396,10 @@ jobs:
                 if (Date.now() + backoff >= deadline) break;
                 await new Promise((resolve) => setTimeout(resolve, backoff));
               }
-              return { response, responseText, requestError };
+              if (response?.ok && !failureKind) {
+                return { response, responseText, requestError, attempts, failureKind: '', stopFallbacks: false };
+              }
+              return { response, responseText, requestError, attempts, failureKind, stopFallbacks };
             }
 
             // The gateway silently re-routes a model between upstreams, and upstreams disagree
@@ -415,12 +467,15 @@ jobs:
               let lastResponse;
               let lastResponseText = '';
               let lastRequestError = '';
+              let lastFailureKind = '';
+              let stoppedSharedLane = false;
 
               for (const model of chain) {
-                const { response, responseText, requestError } = await callModel(model);
+                const { response, responseText, requestError, attempts, failureKind, stopFallbacks } = await callModel(model);
                 lastResponse = response;
                 lastResponseText = responseText;
                 lastRequestError = requestError;
+                lastFailureKind = failureKind;
                 if (response?.ok) {
                   try {
                     const { review, reasoningLength } = extractReview(model, responseText);
@@ -432,17 +487,25 @@ jobs:
                     console.log(`[${model}] parse error: ${error?.message || error}`);
                   }
                 }
-                tried.push(`${model} -> HTTP ${response?.status ?? 'request failed'}`);
+                tried.push(`${model} -> HTTP ${response?.status ?? 'request failed'} (${attempts ?? 0} attempt(s))`);
+                if (stopFallbacks && model !== chain[chain.length - 1]) {
+                  stoppedSharedLane = true;
+                  console.log(`[${primary}] ${failureKind} affects the shared Model Studio lane; skipping same-endpoint fallback requests.`);
+                  break;
+                }
                 if (model !== chain[chain.length - 1]) {
                   console.log(`[${primary}] falling back to the next model in the chain.`);
                 }
               }
 
               const failText = (lastResponseText || lastRequestError || '').trim();
-              const gatewayBlocked = failText.includes('验证失败') || failText.includes('<!DOCTYPE html>');
+              const gatewayBlocked = lastFailureKind === 'gateway-blocked';
               const upstreamExhausted = failText.includes('failover_exhausted');
               const status = lastResponse?.status ?? 'request failed';
               const isServerSide = typeof status === 'number' && status >= 500;
+              const stoppedSummary = stoppedSharedLane
+                ? `The failure applies to the shared Model Studio endpoint, so same-endpoint fallbacks were skipped to avoid duplicate requests. Reason: ${lastFailureKind}.`
+                : `Review attempts did not produce a usable response. Tried: ${tried.join('; ')}.`;
               const fence = '```';
               const snippet = failText.replace(/`/g, "'").slice(0, 600);
               const review = [
@@ -450,7 +513,7 @@ jobs:
                 '',
                 gatewayBlocked
                   ? 'GitHub Actions reached the configured API endpoint, but the gateway returned an HTML verification page instead of JSON.'
-                  : `Every model in the chain failed after ${maxAttempts} attempt(s) each. Tried: ${tried.join('; ')}.`,
+                  : stoppedSummary,
                 '',
                 snippet
                   ? `<details><summary>Upstream response (truncated)</summary>\n\n${fence}\n${snippet}\n${fence}\n</details>`
@@ -458,6 +521,12 @@ jobs:
                 '',
                 gatewayBlocked
                   ? 'Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner.'
+                  : lastFailureKind === 'quota-exhausted'
+                    ? 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.'
+                    : lastFailureKind === 'authentication-failed'
+                      ? 'Action needed: repair the shared Model Studio API key or authentication configuration.'
+                      : lastFailureKind === 'endpoint-unavailable'
+                        ? 'Action needed: the configured Model Studio endpoint remained unreachable after retries. Same-endpoint model fallbacks cannot bypass this network failure.'
                   : upstreamExhausted
                     ? 'Action needed: `failover_exhausted` means the gateway ran out of healthy upstreams for every model in the chain — a provider-side outage, not a problem with this repo, the key, or the model name. It usually clears on its own; if it persists, point `models`/`fallbacks` at ids on a different upstream (see the mapping at the top of pr-review.yml).'
                     : isServerSide
@@ -468,7 +537,20 @@ jobs:
               return { primary, servedBy: null, review, reasoningLength: 0, degraded: false };
             }
 
-            const headSha = (context.payload.pull_request?.head?.sha ?? context.sha ?? '').slice(0, 7);
+            // Context collection can take long enough for another push to land. Re-read the
+            // head immediately before dispatch so neither full-context reviewer spends tokens
+            // on a commit that is no longer current.
+            const { data: latestPull } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            if (latestPull.head.sha !== reviewHeadSha || (latestPull.state && latestPull.state !== 'open')) {
+              console.log(`Skip stale review before model dispatch: prepared=${reviewHeadSha.slice(0, 7)} current=${latestPull.head.sha.slice(0, 7)} state=${latestPull.state || 'unknown'}.`);
+              return;
+            }
+
+            const headSha = reviewHeadSha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const labelOf = (model) => MODEL_LABELS[model] || model;
 

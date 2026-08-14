@@ -17,7 +17,7 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
         ├─ 阿里云 Model Studio: /chat/completions
         │    glm-5.2 + qwen3.8-max
         └─ Google AI Studio: generateContent
-             gemini-3.6-flash
+             gemini-3.7-flash
 ```
 
 每个模型出一条独立评论(评论头 `<!-- ai-pr-review-bot:<model> -->`),三条并行发。
@@ -30,11 +30,11 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 
 ### Google AI Studio 模型协议
 
-- `gemini-3.6-flash` 使用 Google AI Studio 原生 `v1beta/models/gemini-3.6-flash:generateContent`，认证头为 `x-goog-api-key`，不是 OpenAI 兼容协议。
+- `gemini-3.7-flash` 使用 Google AI Studio 原生 `v1beta/models/gemini-3.7-flash:generateContent`，认证头为 `x-goog-api-key`，不是 OpenAI 兼容协议。
 - 它需要调用仓库传入 `PR_AGENT_GOOGLE_AI_KEY`。该 secret 只在默认模型列表包含 Gemini 时才是必需的；只调用 Model Studio 模型的仓库无需配置它。
 - workflow 仅读取 Gemini `candidates[0].content.parts[].text`，不发布任何 provider reasoning 或内部字段。
 
-当前供应商包括阿里云 Model Studio 的 OpenAI 兼容端点和 Google AI Studio。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证；2026-08-12 已对 Google AI Studio 的 `gemini-3.6-flash:generateContent` 做真实验证。默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`gemini-3.6-flash`。
+当前供应商包括阿里云 Model Studio 的 OpenAI 兼容端点和 Google AI Studio。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证；2026-08-12 已对当时使用的 Google AI Studio `gemini-3.6-flash:generateContent` 做真实验证。当前默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`gemini-3.7-flash`。
 
 两个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。GLM 与 Qwen 互为备用，主要覆盖单模型暂时不可用；它们共享一个端点，不能替代供应商级灾备。
 
@@ -61,9 +61,9 @@ on:
   workflow_call:
     inputs:
       models:
-        default: "glm-5.2,qwen3.8-max,gemini-3.6-flash" # ← 改这里(逗号分隔,多个并行)
+        default: "glm-5.2,qwen3.8-max,gemini-3.7-flash" # ← 改这里(逗号分隔,多个并行)
       model_labels:
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.6-flash":"Gemini-3.6-Flash"}' # ← 顺手改显示名
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}' # ← 顺手改显示名
       fallbacks:
         default: '{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}'
 ```

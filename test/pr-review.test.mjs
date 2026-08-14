@@ -23,9 +23,9 @@ const pull = { number: 42, title: 'Test', user: { login: 'octocat' }, base: { re
 const context = { payload: { pull_request: { number: 42, head: { sha: 'deadbeef' } } }, repo: { owner: 'TshyGO', repo: 'Example' }, serverUrl: 'https://github.com', runId: 1 };
 const env = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/', GOOGLE_AI_API_KEY: 'google-test-key',
-  PR_REVIEW_MODELS: 'glm-5.2,qwen3.8-max,gemini-3.7-flash',
-  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}',
-  PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}',
+  PR_REVIEW_MODELS: 'glm-5.2',
+  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}',
+  PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}',
   PR_REVIEW_DIFF_BUDGET: '100000',
 };
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
@@ -67,51 +67,79 @@ const checks = [];
 const check = (name, condition) => { checks.push(condition); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 
 check(
-  'workflow defaults contain exactly the three intended reviewers',
-  workflowText.includes('default: "glm-5.2,qwen3.8-max,gemini-3.7-flash"')
-    && workflowText.includes('default: \'{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}\'')
-    && !workflowText.toLowerCase().includes('deepseek'),
+  'workflow defaults contain one primary and two ordered fallbacks',
+  workflowText.includes('default: "glm-5.2"')
+    && workflowText.includes('default: \'{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}\''),
 );
 
 let r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : result(model, `# review ${model}`)));
-check('three configured primaries are called', r.captured.map((x) => x.model).sort().join(',') === 'gemini-3.7-flash,glm-5.2,qwen3.8-max');
+check('healthy default calls only GLM-5.2', r.captured.map((x) => x.model).join(',') === 'glm-5.2');
 check('Model Studio models use standard chat completions', r.urls.filter((url) => !url.includes('generativelanguage.googleapis.com')).every((url) => url.endsWith('/chat/completions')));
 const studioBodies = r.captured.filter((x) => x.model !== 'gemini-3.7-flash').map((x) => x.body);
 check('Model Studio payload contract is uniform', studioBodies.every((body) => body.messages?.length === 2 && body.stream === false && body.max_tokens === 16384 && body.temperature === 0.2));
-const geminiCall = r.captured.find((x) => x.model === 'gemini-3.7-flash');
-check('Gemini uses generateContent and its native payload', geminiCall && r.urls.find((url) => url.includes('generativelanguage.googleapis.com')).endsWith('/models/gemini-3.7-flash:generateContent') && geminiCall.body.systemInstruction?.parts?.length === 1 && geminiCall.body.contents?.[0]?.parts?.length === 1 && geminiCall.body.generationConfig?.maxOutputTokens === 16384 && !('temperature' in geminiCall.body.generationConfig) && geminiCall.headers['x-goog-api-key'] === 'google-test-key');
-check('one comment per model', r.posted.length === 3);
+check('healthy default posts exactly one comment', r.posted.length === 1);
 check('reasoning never reaches a PR comment', !r.posted.some((body) => body.includes('private thinking')));
-check('Gemini thought parts never reach a PR comment', !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
-check('labels use the configured names', r.posted.some((body) => body.includes('GLM-5.2')) && r.posted.some((body) => body.includes('Qwen3.8-Max')) && r.posted.some((body) => body.includes('Gemini-3.7-Flash')));
+check('healthy default uses the GLM label', r.posted[0]?.includes('GLM-5.2'));
 
-r = await scenario((model) => model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
+r = await scenario((model) => model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : reply(200, result(model, `# review ${model}`)));
 check('transient primary failure retries three times', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3);
-check('configured fallback is used after primary failure', r.captured.filter((entry) => entry.model === 'qwen3.8-max').length >= 2);
+check('Qwen is used only after GLM fails', r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 1 && !r.captured.some((entry) => entry.model === 'deepseek-v4-pro'));
 check('fallback review is marked as degraded', r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by qwen3.8-max')));
+check('fallback still posts exactly one comment', r.posted.length === 1);
 
-r = await scenario((model, body) => model === 'qwen3.8-max' && 'temperature' in body
-  ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}')
-  : reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')));
+r = await scenario((model) => ['glm-5.2', 'qwen3.8-max'].includes(model)
+  ? reply(503, '{"error":"unavailable"}')
+  : reply(200, result(model, `# review ${model}`)));
+check('DeepSeek runs only after GLM and Qwen both fail', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3
+  && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 3
+  && r.captured.filter((entry) => entry.model === 'deepseek-v4-pro').length === 1);
+check('second fallback is marked as degraded', r.posted.length === 1 && r.posted[0].includes('glm-5.2 unavailable -> served by deepseek-v4-pro'));
+
+r = await scenario((model, body) => model === 'glm-5.2'
+  ? reply(503, '{"error":"unavailable"}')
+  : model === 'qwen3.8-max' && 'temperature' in body
+    ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}')
+    : reply(200, result(model, '# review')));
 const qwenAttempts = r.captured.filter((entry) => entry.model === 'qwen3.8-max').map((entry) => entry.body);
 check('optional-field rejection retries without the field', qwenAttempts.length === 2 && !('temperature' in qwenAttempts[1]));
 
-r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, model === 'qwen3.8-max' ? '' : '# review')));
+r = await scenario((model) => reply(200, result(model, model === 'glm-5.2' ? '' : '# review')));
 check('empty final content does not publish reasoning', !r.posted.some((body) => body.includes('private thinking')));
-check('empty final content moves to its configured fallback', r.captured.filter((entry) => entry.model === 'glm-5.2').length >= 2 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by glm-5.2')));
+check('empty primary content moves forward to Qwen', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 1
+  && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 1
+  && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by qwen3.8-max')));
 
-r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('', { finish: 'MAX_TOKENS' }) : result(model, '# review')));
+r = await scenario((model) => reply(200, result(model, '# review')), {
+  PR_REVIEW_MODELS: 'glm-5.2,qwen3.8-max',
+});
+check('a configured primary cannot also be a fallback', /cannot run in parallel and also serve as a fallback/.test(r.error?.message || '') && r.captured.length === 0);
+
+r = await scenario((model) => reply(200, result(model, '# review')), {
+  PR_REVIEW_MODELS: 'qwen3.8-max',
+});
+check('an unused fallback chain does not block an explicit primary override', r.error === undefined
+  && r.captured.length === 1 && r.captured[0].model === 'qwen3.8-max' && r.posted.length === 1);
+
+r = await scenario((model) => reply(200, geminiResult('', { finish: 'MAX_TOKENS' })), {
+  PR_REVIEW_MODELS: 'gemini-3.7-flash', PR_REVIEW_FALLBACKS: '{}',
+});
 check('Gemini empty output posts a diagnostic rather than leaking hidden data', r.posted.some((body) => body.includes('gemini-3.7-flash') && body.includes('AI review was not generated')) && !r.posted.some((body) => body.includes('private thinking')));
 
-r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# partial', { finish: 'MAX_TOKENS' }) : result(model, '# review')));
+r = await scenario((model) => reply(200, geminiResult('# partial', { finish: 'MAX_TOKENS' })), {
+  PR_REVIEW_MODELS: 'gemini-3.7-flash', PR_REVIEW_FALLBACKS: '{}',
+});
 check('Gemini non-STOP output is marked incomplete', r.posted.some((body) => body.includes('# partial') && body.includes('模型输出未完整结束')));
 
-r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')), { GOOGLE_AI_API_KEY: '' });
+r = await scenario((model) => reply(200, geminiResult('# review')), {
+  PR_REVIEW_MODELS: 'gemini-3.7-flash', PR_REVIEW_FALLBACKS: '{}', GOOGLE_AI_API_KEY: '',
+});
 check('Gemini requires its separate secret', /PR_AGENT_GOOGLE_AI_KEY is required/.test(r.error?.message || ''));
 
 r = await scenario((model) => reply(200, geminiResult('# Gemini-only review')), {
   PR_REVIEW_MODELS: 'gemini-3.7-flash', PR_REVIEW_FALLBACKS: '{}', OPENAI_API_KEY: '', OPENAI_API_BASE: '',
 });
 check('Gemini-only configuration does not require Model Studio credentials', r.error === undefined && r.posted.length === 1 && r.posted[0].includes('# Gemini-only review'));
+const geminiCall = r.captured.find((x) => x.model === 'gemini-3.7-flash');
+check('explicit Gemini uses generateContent and its native payload', geminiCall && r.urls.find((url) => url.includes('generativelanguage.googleapis.com')).endsWith('/models/gemini-3.7-flash:generateContent') && geminiCall.body.systemInstruction?.parts?.length === 1 && geminiCall.body.contents?.[0]?.parts?.length === 1 && geminiCall.body.generationConfig?.maxOutputTokens === 16384 && !('temperature' in geminiCall.body.generationConfig) && geminiCall.headers['x-goog-api-key'] === 'google-test-key');
 
 if (checks.some((x) => !x)) process.exitCode = 1;

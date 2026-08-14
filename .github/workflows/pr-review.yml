@@ -5,11 +5,11 @@ name: Reusable AI PR Review
 # (or pass `with: models`), and update the org secrets
 # PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY / PR_AGENT_GOOGLE_AI_KEY.
 #
-# Current provider: Alibaba Cloud Model Studio compatible-mode endpoint, verified 2026-08-11.
-# Its live /models list includes the two Model Studio defaults below. They both use the standard OpenAI
-# Chat Completions protocol and return final review text in choices[].message.content.
-# Gemini 3.7 Flash uses Google AI Studio's generateContent protocol. The job never publishes
-# provider reasoning, even when it is present in a response.
+# Current default: one Alibaba Cloud lane and one independent Google lane. The Alibaba
+# lane uses GLM-5.2 as its only primary, with Qwen3.8-Max and DeepSeek-V4-Pro tried
+# sequentially only when the preceding model fails. Gemini 3.7 Flash remains an
+# independent primary through Google AI Studio's generateContent protocol.
+# The job never publishes provider reasoning.
 
 on:
   workflow_call:
@@ -18,17 +18,17 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,qwen3.8-max,gemini-3.7-flash"
+        default: "glm-5.2,gemini-3.7-flash"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing.
         type: string
         required: false
-        default: '{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}'
+        default: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}'
       diff_char_budget:
         description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
         type: number
@@ -209,9 +209,25 @@ jobs:
             };
             const MODEL_LABELS = parseJsonEnv('PR_REVIEW_MODEL_LABELS');
             const FALLBACKS = parseJsonEnv('PR_REVIEW_FALLBACKS');
+            const primaryModels = new Set(models);
+            const activeFallbacks = [];
+            for (const primary of models) {
+              const chain = FALLBACKS[primary] ?? [];
+              if (!Array.isArray(chain)) {
+                throw new Error(`Fallback chain for ${primary} must be an array.`);
+              }
+              const duplicatePrimary = chain.find((model) => primaryModels.has(model));
+              if (duplicatePrimary) {
+                throw new Error(
+                  `Fallback chain for ${primary} includes configured primary ${duplicatePrimary}; `
+                  + 'a model cannot run in parallel and also serve as a fallback.'
+                );
+              }
+              activeFallbacks.push(...chain);
+            }
             const configuredModels = [
               ...models,
-              ...Object.values(FALLBACKS).flatMap((chain) => Array.isArray(chain) ? chain : []),
+              ...activeFallbacks,
             ];
             if (configuredModels.some((model) => GOOGLE_MODELS.has(model)) && !process.env.GOOGLE_AI_API_KEY) {
               throw new Error('PR_AGENT_GOOGLE_AI_KEY is required when gemini-3.7-flash is configured.');

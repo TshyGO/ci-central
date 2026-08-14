@@ -1,6 +1,6 @@
 # ci-central
 
-集中化的可复用 CI workflow。目前提供 **AI PR Review**(多模型并行审查 PR,中文输出,支持 thinking)。
+集中化的可复用 CI workflow。目前提供 **AI PR Review**（阿里云单主模型顺序回退 + 独立 Gemini、中文输出、支持 thinking）。
 
 各业务仓库不再各自维护审查逻辑,只放一个十几行的"瘦身调用",指向这里的 `.github/workflows/pr-review.yml`。**换供应商 / 换模型 / 改 prompt 时,绝大多数情况只改这一个仓库。**
 
@@ -15,18 +15,20 @@
         ▼
 ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓库)
         ├─ 阿里云 Model Studio: /chat/completions
-        │    glm-5.2 + qwen3.8-max
+        │    glm-5.2（阿里云唯一主模型）
+        │      └─ 失败才试 qwen3.8-max
+        │           └─ 再失败才试 deepseek-v4-pro
         └─ Google AI Studio: generateContent
-             gemini-3.7-flash
+             gemini-3.7-flash（独立主模型）
 ```
 
-每个模型出一条独立评论(评论头 `<!-- ai-pr-review-bot:<model> -->`),三条并行发。
+健康状态发布两条评论：阿里云通道一条 GLM-5.2 评论，以及独立 Google 通道一条 Gemini 评论。Qwen 和 DeepSeek 只作为阿里云通道的顺序备用，不会并行审查，也不会额外发布阿里云评论。
 
 ### Model Studio 模型协议
 
-- `glm-5.2`、`qwen3.8-max` 统一使用 `/chat/completions`、`messages`、`max_tokens` 与 `temperature: 0.2`。
+- `glm-5.2`、`qwen3.8-max`、`deepseek-v4-pro` 统一使用 `/chat/completions`、`messages`、`max_tokens` 与 `temperature: 0.2`。
 - workflow 只发布 `choices[].message.content`。`reasoning_content` 仅用于日志长度统计，绝不会写入 PR 评论；模型未返回最终内容时将尝试已配置的 fallback。
-- 两条备用链让 GLM 与 Qwen 互为备用，因此可以缓解单模型瞬时失败，但不能覆盖整个 Model Studio 端点不可用。
+- 默认备用链只有一个方向：`glm-5.2 → qwen3.8-max → deepseek-v4-pro`。工作流会拒绝“某个模型既是并行主模型、又出现在 fallback 链”这类重复配置。
 
 ### Google AI Studio 模型协议
 
@@ -34,9 +36,9 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 - 它需要调用仓库传入 `PR_AGENT_GOOGLE_AI_KEY`。该 secret 只在默认模型列表包含 Gemini 时才是必需的；只调用 Model Studio 模型的仓库无需配置它。
 - workflow 仅读取 Gemini `candidates[0].content.parts[].text`，不发布任何 provider reasoning 或内部字段。
 
-当前供应商包括阿里云 Model Studio 的 OpenAI 兼容端点和 Google AI Studio。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证；2026-08-12 已对当时使用的 Google AI Studio `gemini-3.6-flash:generateContent` 做真实验证。当前默认并行审查模型为 `glm-5.2`、`qwen3.8-max`、`gemini-3.7-flash`。
+当前默认包含两个独立通道。阿里云 Model Studio 通道的唯一主模型为 `glm-5.2`，备用顺序为 `qwen3.8-max`、`deepseek-v4-pro`；Google AI Studio 通道继续独立运行 `gemini-3.7-flash`。2026-08-11 已对 Model Studio `/models` 和 Chat Completions 做真实验证。
 
-两个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。GLM 与 Qwen 互为备用，主要覆盖单模型暂时不可用；它们共享一个端点，不能替代供应商级灾备。
+三个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。Qwen 和 DeepSeek 只覆盖阿里云通道内的单模型暂时不可用；三者共享一个端点，不能替代供应商级灾备。Gemini 使用独立 Google 端点，不参与阿里云 fallback 链。
 
 **密钥/地址(secret)来源:**
 
@@ -46,7 +48,7 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 | NebulaLab-Docs | 仓库级同名 secret |
 | NebulaLab-Plugins | 仓库级同名 secret |
 
-> 所有仓库均位于 `TshyGO` 个人账号下。调用方必须显式映射所需的三个 secret，避免依赖组织级 secret 或跨仓继承行为。
+> 所有仓库均位于 `TshyGO` 个人账号下。调用方必须显式映射 Model Studio 的两个 secret 和独立 Gemini 所需的 `PR_AGENT_GOOGLE_AI_KEY`。
 
 ---
 
@@ -61,11 +63,11 @@ on:
   workflow_call:
     inputs:
       models:
-        default: "glm-5.2,qwen3.8-max,gemini-3.7-flash" # ← 改这里(逗号分隔,多个并行)
+        default: "glm-5.2,gemini-3.7-flash" # ← 阿里云单主模型 + 独立 Gemini
       model_labels:
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}' # ← 顺手改显示名
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}'
       fallbacks:
-        default: '{"glm-5.2":["qwen3.8-max"],"qwen3.8-max":["glm-5.2"]}'
+        default: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}'
 ```
 
 改之前先查询供应商模型列表，并对候选模型做最小真实请求验证。合并到 `main` 后，所有业务仓库下次审查自动用新模型：

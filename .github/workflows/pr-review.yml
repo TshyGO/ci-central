@@ -8,7 +8,7 @@ name: Reusable AI PR Review
 # Current provider: Alibaba Cloud Model Studio compatible-mode endpoint, verified 2026-08-11.
 # Its live /models list includes the two Model Studio defaults below. They both use the standard OpenAI
 # Chat Completions protocol and return final review text in choices[].message.content.
-# Gemini 3.6 Flash uses Google AI Studio's generateContent protocol. The job never publishes
+# Gemini 3.7 Flash uses Google AI Studio's generateContent protocol. The job never publishes
 # provider reasoning, even when it is present in a response.
 
 on:
@@ -18,12 +18,12 @@ on:
         description: Comma-separated model ids to run in parallel.
         type: string
         required: false
-        default: "glm-5.2,qwen3.8-max,gemini-3.6-flash"
+        default: "glm-5.2,qwen3.8-max,gemini-3.7-flash"
       model_labels:
         description: JSON map of model id -> display label.
         type: string
         required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.6-flash":"Gemini-3.6-Flash"}'
+        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}'
       fallbacks:
         description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing.
         type: string
@@ -193,7 +193,7 @@ jobs:
             if (models.length === 0) {
               throw new Error('PR_REVIEW_MODELS must list at least one model id.');
             }
-            const GOOGLE_MODELS = new Set(['gemini-3.6-flash']);
+            const GOOGLE_MODELS = new Set(['gemini-3.7-flash']);
             const requiresOpenAI = models.some((model) => !GOOGLE_MODELS.has(model));
             if (requiresOpenAI && (!process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE)) {
               throw new Error('PR_AGENT_OPENAI_KEY and PR_AGENT_OPENAI_API_BASE secrets are required for Model Studio models.');
@@ -214,7 +214,7 @@ jobs:
               ...Object.values(FALLBACKS).flatMap((chain) => Array.isArray(chain) ? chain : []),
             ];
             if (configuredModels.some((model) => GOOGLE_MODELS.has(model)) && !process.env.GOOGLE_AI_API_KEY) {
-              throw new Error('PR_AGENT_GOOGLE_AI_KEY is required when gemini-3.6-flash is configured.');
+              throw new Error('PR_AGENT_GOOGLE_AI_KEY is required when gemini-3.7-flash is configured.');
             }
             const maxAttempts = 3;
             // A healthy response with heavy reasoning has been observed at ~270s, so give one

@@ -173,6 +173,10 @@ r = await scenario(() => { throw new Error('model should not run'); }, {}, { pul
 check('head changed during context collection makes zero model calls', r.captured.length === 0 && r.pullGets === 2
   && r.logs.some((line) => line.includes('Skip stale review before model dispatch')));
 
+r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')), {}, { pulls: [pull, pull, newerPull] });
+check('head changed during model execution publishes no stale comments', r.captured.length === 2 && r.posted.length === 0 && r.pullGets === 3
+  && r.logs.some((line) => line.includes('Skip stale review before comment publishing')));
+
 const manualContext = { ...context, payload: { issue: { number: 42 } }, sha: 'defaultbranch' };
 r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')), {}, { context: manualContext });
 check('manual review comments report the PR head instead of the default branch SHA', r.posted.length === 2

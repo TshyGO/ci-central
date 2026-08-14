@@ -557,6 +557,18 @@ jobs:
             // Run every configured model in parallel, then post one comment per model.
             const settled = await Promise.allSettled(models.map((model) => requestReview(model)));
 
+            // Model calls can outlive the commit they reviewed. Do not attach completed
+            // results to a newer head (or to a PR that was closed while they were running).
+            const { data: publishPull } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            if (publishPull.head.sha !== reviewHeadSha || publishPull.state !== 'open') {
+              console.log(`Skip stale review before comment publishing: reviewed=${reviewHeadSha.slice(0, 7)} current=${publishPull.head.sha.slice(0, 7)} state=${publishPull.state || 'unknown'}.`);
+              return;
+            }
+
             let posted = 0;
             for (let i = 0; i < settled.length; i++) {
               const primary = models[i];

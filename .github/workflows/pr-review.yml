@@ -48,9 +48,24 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Resolve reusable workflow ref
+        id: workflow-ref
+        shell: bash
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out matching central configuration
+        uses: actions/checkout@v5
+        with:
+          repository: TshyGO/ci-central
+          ref: ${{ steps.workflow-ref.outputs.ref }}
+          path: .ci-central
+          sparse-checkout: review-action
+
       - name: Resolve repository review configuration
         id: review-config
-        uses: TshyGO/ci-central/review-action@main
+        uses: ./.ci-central/review-action
         with:
           repository: ${{ github.repository }}
 
@@ -84,6 +99,9 @@ jobs:
             }
             const lanes = reviewConfig.lanes;
             const reviewPolicy = reviewConfig.review_policy || {};
+            if (typeof reviewPolicy.system_prompt !== 'string' || !reviewPolicy.system_prompt.trim()) {
+              throw new Error('Central PR review config is missing review_policy.system_prompt.');
+            }
             const laneCredentials = {
               A: {
                 apiKey: process.env.LANE_A_KEY || process.env.LEGACY_OPENAI_KEY,
@@ -99,7 +117,10 @@ jobs:
               },
             };
             for (const lane of lanes) {
-              const chain = [lane.primary, ...(Array.isArray(lane.fallbacks) ? lane.fallbacks : [])];
+              if (!Array.isArray(lane.fallbacks)) {
+                throw new Error(`Lane ${lane.id} fallbacks must be an array.`);
+              }
+              const chain = [lane.primary, ...lane.fallbacks];
               if (!lane.primary || chain.some((model) => !model?.id || !model?.label)) {
                 throw new Error(`Lane ${lane.id} has an invalid primary or fallback model.`);
               }
@@ -289,9 +310,10 @@ jobs:
             }
 
             function googlePayload(model) {
+              const throttled = model.context_profile === 'kimi-k3-throttled';
               return {
-                systemInstruction: { parts: [{ text: system }] },
-                contents: [{ role: 'user', parts: [{ text: user }] }],
+                systemInstruction: { parts: [{ text: throttled ? kimiK3System : system }] },
+                contents: [{ role: 'user', parts: [{ text: throttled ? kimiK3User : user }] }],
                 generationConfig: { maxOutputTokens: model.max_output_tokens },
               };
             }
@@ -325,7 +347,9 @@ jobs:
 
             async function callOnce(lane, model, payload, deadline) {
               const modelId = model.id;
-              const requestBody = JSON.stringify(payload);
+              const requestBody = JSON.stringify(
+                lane.protocol === 'google-generate-content' ? googlePayload(model) : payload
+              );
               let response;
               let responseText = '';
               let requestError = '';
@@ -367,7 +391,7 @@ jobs:
                       accept: 'application/json',
                       'user-agent': 'GitHubActions-AI-PR-Review',
                     },
-                    body: isGoogle ? JSON.stringify(googlePayload(model)) : requestBody,
+                    body: requestBody,
                   });
                   responseText = await response.text();
                 } catch (error) {
@@ -409,10 +433,10 @@ jobs:
               // model in a fallback chain gets a fresh budget, so a hung primary is abandoned
               // in bounded time and the fallback still gets its own full window.
               const deadline = Date.now() + MODEL_BUDGET_MS;
-              const payload = basePayload(model);
               if (lane.protocol === 'google-generate-content') {
-                return callOnce(lane, model, payload, deadline);
+                return callOnce(lane, model, null, deadline);
               }
+              const payload = basePayload(model);
               for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
                 const result = await callOnce(lane, model, payload, deadline);
                 if (result.response?.status !== 400) return result;
@@ -587,6 +611,7 @@ jobs:
             }
 
             let posted = 0;
+            let reviewed = 0;
             for (let i = 0; i < settled.length; i++) {
               const lane = lanes[i];
               const primary = lane.primary;
@@ -618,6 +643,7 @@ jobs:
                   body,
                 });
                 posted++;
+                if (servedBy) reviewed++;
                 console.log(`Created AI PR Review comment ${createdComment.id} for Lane ${lane.id}.`);
               } catch (error) {
                 // One failed comment must not swallow the others.
@@ -626,4 +652,7 @@ jobs:
             }
             if (posted === 0) {
               throw new Error('No AI PR Review comment could be posted for any configured model.');
+            }
+            if (reviewed === 0) {
+              throw new Error('Every lane produced a diagnostic only; no model review was generated.');
             }

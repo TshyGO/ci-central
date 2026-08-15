@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $configName = $Repository.Replace('/', '__') + '.json'
-$configPath = Join-Path $PSScriptRoot "..\review-action\config\repositories\$configName"
+$configPath = Join-Path $PSScriptRoot '..' 'review-action' 'config' 'repositories' $configName
 if (-not (Test-Path -LiteralPath $configPath)) { throw "No central config exists for $Repository." }
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $laneConfig = @($config.lanes | Where-Object id -EQ $Lane)

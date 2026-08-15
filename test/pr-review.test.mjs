@@ -91,8 +91,11 @@ const check = (name, condition) => { checks.push(Boolean(condition)); console.lo
 const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : chatResult(model, `# review ${model}`));
 
 check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
-check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('TshyGO/ci-central/review-action@main')
+check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
+check('config resolver is checked out at the reusable workflow ref', workflowText.includes('WORKFLOW_REF: ${{ github.workflow_ref }}')
+  && workflowText.includes('ref: ${{ steps.workflow-ref.outputs.ref }}')
+  && !workflowText.includes('TshyGO/ci-central/review-action@main'));
 check('legacy provider slots are marked as a temporary migration bridge', workflowText.includes('Temporary migration bridge. Remove after every caller maps the fixed Lane slots.'));
 check('reusable job centrally cancels superseded reviews', workflowText.includes('cancel-in-progress: true'));
 
@@ -160,12 +163,37 @@ protocolConfig.lanes[1].fallbacks = [];
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(protocolConfig) });
 check('protocol is bound to lane rather than inferred from model id', r.captured.some(({ lane, model, url }) => lane === 'B' && model === 'gemini-3.7-flash' && url.endsWith('/chat/completions')));
 
+const throttledGoogleConfig = structuredClone(centralConfig);
+throttledGoogleConfig.lanes[2].primary = { ...throttledGoogleConfig.lanes[2].primary, context_profile: 'kimi-k3-throttled', max_output_tokens: 8192 };
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(throttledGoogleConfig) });
+const throttledGoogle = r.captured.find(({ lane }) => lane === 'C')?.body;
+check('Google protocol honors the configured throttled context profile', throttledGoogle?.generationConfig.maxOutputTokens === 8192
+  && throttledGoogle.systemInstruction.parts[0].text.includes('high-confidence')
+  && throttledGoogle.contents[0].parts[0].text.includes('All changed file names:'));
+
+const missingPromptConfig = structuredClone(centralConfig);
+delete missingPromptConfig.review_policy.system_prompt;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(missingPromptConfig) });
+check('workflow defense rejects a missing system prompt before model calls', /system_prompt/.test(r.error?.message || '') && r.captured.length === 0);
+
+const missingFallbacksConfig = structuredClone(centralConfig);
+delete missingFallbacksConfig.lanes[0].fallbacks;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(missingFallbacksConfig) });
+check('workflow defense rejects a missing fallback array before model calls', /fallbacks must be an array/.test(r.error?.message || '') && r.captured.length === 0);
+
 r = await scenario(healthy, { LANE_B_KEY: '' });
 check('an unprovisioned lane emits one diagnostic without blocking healthy lanes', r.error === undefined
   && r.captured.length === 2
   && !r.captured.some(({ lane }) => lane === 'B')
   && r.posted.length === 3
   && r.posted.some((body) => body.includes('PR_AGENT_LANE_B_KEY')));
+
+r = await scenario(healthy, {
+  LANE_A_KEY: '', LANE_A_API_BASE: '', LANE_B_KEY: '', LANE_B_API_BASE: '', LANE_C_KEY: '', LANE_C_API_BASE: '',
+  LEGACY_OPENAI_KEY: '', LEGACY_OPENAI_API_BASE: '', LEGACY_TENCENT_KEY: '', LEGACY_TENCENT_API_BASE: '', LEGACY_GOOGLE_AI_KEY: '',
+});
+check('diagnostic-only execution fails the job after preserving lane diagnostics', /no model review was generated/.test(r.error?.message || '')
+  && r.captured.length === 0 && r.posted.length === 3);
 
 const newerPull = { ...pull, head: { ...pull.head, sha: 'cafebabe' } };
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [newerPull] });

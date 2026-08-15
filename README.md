@@ -80,6 +80,8 @@ PR_AGENT_LANE_C_API_BASE
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
+reusable workflow 会从 `github.workflow_ref` 解析调用它的 branch、tag 或 commit，并检出同一版本的 `review-action` 与仓库 JSON，避免 workflow 固定在旧版本时却误用 `main` 的新配置。
+
 ## 精度与节流保证
 
 - reusable job 按仓库、事件类型和 PR 号启用 `cancel-in-progress: true`。
@@ -89,6 +91,7 @@ PR_AGENT_LANE_C_API_BASE
 - Qwen、GLM、Gemini 保留完整审核上下文和 16384 输出上限。
 - Kimi 只在 Qwen 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
+- 未配置或失败的 Lane 会发布诊断；如果所有 Lane 都只有诊断而没有真实模型 review，job 明确失败。
 
 ## 运维命令
 

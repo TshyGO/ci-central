@@ -44,7 +44,7 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 
 工作流也支持腾讯 Token Plan 的 OpenAI 兼容接口。`model_providers` 为每个模型指定 `alibaba`、`tencent` 或 `google`；运行时会拒绝跨供应商 fallback，防止密钥、端点和套餐故障被错误地当成模型级降级。腾讯通道使用调用仓库的 `PR_AGENT_TENCENT_API_BASE` / `PR_AGENT_TENCENT_KEY`。
 
-Kimi K3 作为 fallback 时沿用经过验证的节流契约：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。它只在阿里主模型失败后调用，不增加健康路径消耗。
+Kimi K3 作为 fallback 时沿用经过验证的节流契约：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。它所属的供应商由 `model_providers` 显式决定；在 NebulaLab 的目标配置中映射为 `alibaba`，只在阿里主模型失败后调用，不增加健康路径消耗。
 
 **密钥/地址(secret)来源:**
 
@@ -84,7 +84,7 @@ on:
 curl -s "$BASE/models" -H "Authorization: Bearer $KEY" | jq '.data[].id'
 ```
 
-> 个别仓库想用不同模型,可在它的瘦身 caller 里 `with: { models: "..." }` 覆盖,不影响其它仓库。
+> 个别仓库想用不同模型，可在它的瘦身 caller 里覆盖 `models`，但必须同时传入覆盖列表中每个主模型和 fallback 模型的 `model_providers` 映射；否则工作流会在发送请求前失败。该覆盖不影响其它仓库。
 
 ### 1b. diff 预算
 
@@ -117,7 +117,7 @@ unset NEW_BASE NEW_KEY
 
 1. 在 `TshyGO` 账号下创建或转入仓库。
 2. 加文件 `.github/workflows/ai-pr-review.yml`,内容见下方"瘦身 caller 模板"。
-3. 在调用仓库设置 `PR_AGENT_OPENAI_API_BASE`、`PR_AGENT_OPENAI_KEY` 和（启用 Gemini 时）`PR_AGENT_GOOGLE_AI_KEY` 仓库级 secret。
+3. 在调用仓库设置所启用供应商的仓库级 secret：阿里为 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY`，Google 为 `PR_AGENT_GOOGLE_AI_KEY`，腾讯为 `PR_AGENT_TENCENT_API_BASE` / `PR_AGENT_TENCENT_KEY`。
 
 <details><summary>瘦身 caller 模板</summary>
 

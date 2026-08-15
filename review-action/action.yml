@@ -1,0 +1,12 @@
+name: Resolve PR review repository configuration
+description: Select and validate the central Lane configuration for github.repository.
+inputs:
+  repository:
+    description: Repository in OWNER/NAME form.
+    required: true
+outputs:
+  config:
+    description: Validated, minified repository review configuration.
+runs:
+  using: node20
+  main: dist/index.js

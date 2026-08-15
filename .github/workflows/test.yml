@@ -2,8 +2,8 @@ name: Test
 
 # pr-review.yml carries its review logic as an inline `script:`, which nothing type-checks.
 # test/pr-review.test.mjs extracts that exact script and exercises it against a mocked
-# GitHub API and a stubbed fetch, so a broken retry/fallback/packing path is caught here
-# rather than on someone else's pull request.
+# GitHub API and a stubbed fetch. review-config.test.mjs validates repository selection,
+# Lane isolation, and the bundled resolver used by callers.
 
 on:
   push:
@@ -18,4 +18,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - run: node test/review-config.test.mjs
       - run: node test/pr-review.test.mjs

@@ -1,53 +1,34 @@
 name: Reusable AI PR Review
 
-# Centralized AI PR review used across repos via `uses:`.
-# Swap provider/model in ONE place: change the `models` default below
-# (or pass `with: models`), and update the caller repository secrets.
-#
-# Current default: one Alibaba Cloud lane and one independent Google lane. The Alibaba
-# lane uses GLM-5.2 as its only primary, with Qwen3.8-Max tried only when GLM fails.
-# Gemini 3.7 Flash remains an
-# independent primary through Google AI Studio's generateContent protocol.
-# The job never publishes provider reasoning.
+# Centralized AI PR review used across repos via `uses:`. Repository policy is resolved
+# from review-action/config/repositories/<owner>__<repo>.json. Callers expose only the
+# fixed Lane A/B/C credential slots and never select models, providers, or fallbacks.
 
 on:
   workflow_call:
-    inputs:
-      models:
-        description: Comma-separated model ids to run in parallel.
-        type: string
-        required: false
-        default: "glm-5.2,gemini-3.7-flash"
-      model_labels:
-        description: JSON map of model id -> display label.
-        type: string
-        required: false
-        default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}'
-      fallbacks:
-        description: JSON map of model id -> ordered fallback model ids, tried when the primary keeps failing.
-        type: string
-        required: false
-        default: '{"glm-5.2":["qwen3.8-max"]}'
-      model_providers:
-        description: JSON map of model id -> provider id. A fallback must use the same provider as its primary.
-        type: string
-        required: false
-        default: '{"glm-5.2":"alibaba","qwen3.8-max":"alibaba","gemini-3.7-flash":"google"}'
-      diff_char_budget:
-        description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
-        type: number
-        required: false
-        default: 100000
     secrets:
+      PR_AGENT_LANE_A_KEY:
+        required: false
+      PR_AGENT_LANE_A_API_BASE:
+        required: false
+      PR_AGENT_LANE_B_KEY:
+        required: false
+      PR_AGENT_LANE_B_API_BASE:
+        required: false
+      PR_AGENT_LANE_C_KEY:
+        required: false
+      PR_AGENT_LANE_C_API_BASE:
+        required: false
+      # Temporary migration bridge. Remove after every caller maps the fixed Lane slots.
       PR_AGENT_OPENAI_KEY:
-        required: true
+        required: false
       PR_AGENT_OPENAI_API_BASE:
-        required: true
-      PR_AGENT_GOOGLE_AI_KEY:
         required: false
       PR_AGENT_TENCENT_KEY:
         required: false
       PR_AGENT_TENCENT_API_BASE:
+        required: false
+      PR_AGENT_GOOGLE_AI_KEY:
         required: false
 
 jobs:
@@ -59,7 +40,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     # Backstop only. The script bounds each model with MODEL_BUDGET_MS (~6 min) and runs
-    # models in parallel, so a real run finishes in a few minutes; this just guarantees a
+    # lanes in parallel, so a real run finishes in a few minutes; this just guarantees a
     # hung upstream can never hold a runner the way one 26-minute job did.
     timeout-minutes: 20
     permissions:
@@ -67,23 +48,65 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Resolve repository review configuration
+        id: review-config
+        uses: TshyGO/ci-central/review-action@main
+        with:
+          repository: ${{ github.repository }}
+
       - name: Review pull request
         uses: actions/github-script@v8
         env:
-          OPENAI_API_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
-          OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
-          GOOGLE_AI_API_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
-          TENCENT_API_KEY: ${{ secrets.PR_AGENT_TENCENT_KEY }}
-          TENCENT_API_BASE: ${{ secrets.PR_AGENT_TENCENT_API_BASE }}
-          PR_REVIEW_MODELS: ${{ inputs.models }}
-          PR_REVIEW_MODEL_LABELS: ${{ inputs.model_labels }}
-          PR_REVIEW_FALLBACKS: ${{ inputs.fallbacks }}
-          PR_REVIEW_MODEL_PROVIDERS: ${{ inputs.model_providers }}
-          PR_REVIEW_DIFF_BUDGET: ${{ inputs.diff_char_budget }}
+          LANE_A_KEY: ${{ secrets.PR_AGENT_LANE_A_KEY }}
+          LANE_A_API_BASE: ${{ secrets.PR_AGENT_LANE_A_API_BASE }}
+          LANE_B_KEY: ${{ secrets.PR_AGENT_LANE_B_KEY }}
+          LANE_B_API_BASE: ${{ secrets.PR_AGENT_LANE_B_API_BASE }}
+          LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
+          LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
+          LEGACY_OPENAI_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
+          LEGACY_OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
+          LEGACY_TENCENT_KEY: ${{ secrets.PR_AGENT_TENCENT_KEY }}
+          LEGACY_TENCENT_API_BASE: ${{ secrets.PR_AGENT_TENCENT_API_BASE }}
+          LEGACY_GOOGLE_AI_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
+          PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
         with:
           script: |
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;
             const { owner, repo } = context.repo;
+            let reviewConfig;
+            try {
+              reviewConfig = JSON.parse(process.env.PR_REVIEW_CONFIG || '');
+            } catch (error) {
+              throw new Error(`Central PR review config is invalid JSON: ${error.message}`);
+            }
+            if (reviewConfig.repository !== `${owner}/${repo}` || !Array.isArray(reviewConfig.lanes) || reviewConfig.lanes.length === 0) {
+              throw new Error(`Central PR review config does not match ${owner}/${repo}.`);
+            }
+            const lanes = reviewConfig.lanes;
+            const reviewPolicy = reviewConfig.review_policy || {};
+            const laneCredentials = {
+              A: {
+                apiKey: process.env.LANE_A_KEY || process.env.LEGACY_OPENAI_KEY,
+                baseUrl: (process.env.LANE_A_API_BASE || process.env.LEGACY_OPENAI_API_BASE || '').replace(/\/$/, ''),
+              },
+              B: {
+                apiKey: process.env.LANE_B_KEY || process.env.LEGACY_TENCENT_KEY,
+                baseUrl: (process.env.LANE_B_API_BASE || process.env.LEGACY_TENCENT_API_BASE || '').replace(/\/$/, ''),
+              },
+              C: {
+                apiKey: process.env.LANE_C_KEY || process.env.LEGACY_GOOGLE_AI_KEY,
+                baseUrl: (process.env.LANE_C_API_BASE || (process.env.LEGACY_GOOGLE_AI_KEY ? 'https://generativelanguage.googleapis.com/v1beta' : '')).replace(/\/$/, ''),
+              },
+            };
+            for (const lane of lanes) {
+              const chain = [lane.primary, ...(Array.isArray(lane.fallbacks) ? lane.fallbacks : [])];
+              if (!lane.primary || chain.some((model) => !model?.id || !model?.label)) {
+                throw new Error(`Lane ${lane.id} has an invalid primary or fallback model.`);
+              }
+              if (new Set(chain.map((model) => model.id)).size !== chain.length) {
+                throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
+              }
+            }
 
             const { data: pull } = await github.rest.pulls.get({
               owner,
@@ -134,7 +157,7 @@ jobs:
             // Pack whole file patches until the budget is spent, so a review never sees a
             // patch cut off mid-hunk. Tests go last: when something has to be dropped it
             // should be the tests, not the source they cover.
-            const DIFF_BUDGET = Math.max(4000, Number(process.env.PR_REVIEW_DIFF_BUDGET) || 100000);
+            const DIFF_BUDGET = Math.max(4000, Number(reviewPolicy.diff_char_budget) || 100000);
             const SEPARATOR = '\n\n---\n\n';
             const TRUNCATION_NOTE = '\n[... patch truncated to fit the diff budget ...]';
             const isTestFile = (name) => /(^|\/)(tests?|__tests__|__mocks__)\//.test(name)
@@ -186,18 +209,10 @@ jobs:
             // Kimi K3 is useful as a last-resort reviewer but can spend a large context and
             // completion budget entirely on reasoning. Preserve the proven bounded prompt:
             // complete file inventory plus a small representative patch sample.
-            const KIMI_K3_MODEL = 'kimi-k3';
             const kimiK3Pack = packDiff(1000);
             const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join('\n');
 
-            const system = [
-              'You are an experienced code reviewer.',
-              'First read the linked issue background (if provided) to understand what is being fixed and why, then judge whether the PR actually addresses it.',
-              'Review the pull request for correctness, security, maintainability, and CI/configuration risks.',
-              'Return concise Markdown in Chinese.',
-              'Always reserve enough output budget for the final Markdown review; never spend the entire response on hidden reasoning without a final answer.',
-              'If there are no actionable issues, say that clearly and mention residual risks.',
-            ].join(' ');
+            const system = reviewPolicy.system_prompt;
             const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
 
             const buildUser = (diffText, options = {}) => [
@@ -225,98 +240,16 @@ jobs:
               fileList,
             });
 
-            const models = (process.env.PR_REVIEW_MODELS || '')
-              .split(',')
-              .map((m) => m.trim())
-              .filter(Boolean);
-            if (models.length === 0) {
-              throw new Error('PR_REVIEW_MODELS must list at least one model id.');
-            }
-            const parseJsonEnv = (name) => {
-              try {
-                return JSON.parse(process.env[name] || '{}');
-              } catch (error) {
-                console.log(`Invalid ${name} JSON, ignoring it: ${error.message}`);
-                return {};
-              }
-            };
-            const MODEL_LABELS = parseJsonEnv('PR_REVIEW_MODEL_LABELS');
-            const FALLBACKS = parseJsonEnv('PR_REVIEW_FALLBACKS');
-            const MODEL_PROVIDERS = parseJsonEnv('PR_REVIEW_MODEL_PROVIDERS');
-            const GOOGLE_MODELS = new Set(['gemini-3.7-flash']);
-            const ALLOWED_PROVIDERS = new Set(['alibaba', 'tencent', 'google']);
-            const providerOf = (model) => MODEL_PROVIDERS[model];
-            if (new Set(models).size !== models.length) {
-              throw new Error('PR_REVIEW_MODELS must not contain duplicate model ids.');
-            }
-            const primaryModels = new Set(models);
-            const activeFallbacks = [];
-            for (const primary of models) {
-              const chain = FALLBACKS[primary] ?? [];
-              if (!Array.isArray(chain)) {
-                throw new Error(`Fallback chain for ${primary} must be an array.`);
-              }
-              const duplicatePrimary = chain.find((model) => primaryModels.has(model));
-              if (duplicatePrimary) {
-                throw new Error(
-                  `Fallback chain for ${primary} includes configured primary ${duplicatePrimary}; `
-                  + 'a model cannot run in parallel and also serve as a fallback.'
-                );
-              }
-              const primaryProvider = providerOf(primary);
-              if (!primaryProvider || !ALLOWED_PROVIDERS.has(primaryProvider)) {
-                throw new Error(`Model ${primary} must map to a supported provider in PR_REVIEW_MODEL_PROVIDERS.`);
-              }
-              const crossProvider = chain.find((model) => providerOf(model) !== primaryProvider);
-              if (crossProvider) {
-                throw new Error(
-                  `Fallback ${crossProvider} for ${primary} crosses providers `
-                  + `(${primaryProvider} -> ${providerOf(crossProvider) || 'unmapped'}); provider failover chains must stay isolated.`
-                );
-              }
-              activeFallbacks.push(...chain);
-            }
-            const configuredModels = [
-              ...models,
-              ...activeFallbacks,
-            ];
-            for (const model of configuredModels) {
-              const provider = providerOf(model);
-              if (!provider || !ALLOWED_PROVIDERS.has(provider)) {
-                throw new Error(`Model ${model} must map to a supported provider in PR_REVIEW_MODEL_PROVIDERS.`);
-              }
-              if ((provider === 'google') !== GOOGLE_MODELS.has(model)) {
-                throw new Error(`Model ${model} has a provider/protocol mismatch: ${provider}.`);
-              }
-            }
-            const configuredProviders = new Set(configuredModels.map(providerOf));
-            if (configuredProviders.has('alibaba') && (!process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE)) {
-              throw new Error('PR_AGENT_OPENAI_KEY and PR_AGENT_OPENAI_API_BASE are required for Alibaba models.');
-            }
-            if (configuredProviders.has('tencent') && (!process.env.TENCENT_API_KEY || !process.env.TENCENT_API_BASE)) {
-              throw new Error('PR_AGENT_TENCENT_KEY and PR_AGENT_TENCENT_API_BASE are required for Tencent models.');
-            }
-            if (configuredProviders.has('google') && !process.env.GOOGLE_AI_API_KEY) {
-              throw new Error('PR_AGENT_GOOGLE_AI_KEY is required for Google models.');
-            }
-            const PROVIDER_CONFIG = {
-              alibaba: {
-                baseUrl: (process.env.OPENAI_API_BASE || '').replace(/\/$/, ''),
-                apiKey: process.env.OPENAI_API_KEY,
-              },
-              tencent: {
-                baseUrl: (process.env.TENCENT_API_BASE || '').replace(/\/$/, ''),
-                apiKey: process.env.TENCENT_API_KEY,
-              },
-            };
-            const maxAttempts = 3;
+            // Model ids are scoped to a lane, never globally. The same model id may be routed
+            // through two providers without changing credentials or fallback ownership.
+            const maxAttempts = Number(reviewPolicy.max_attempts) || 3;
             // A healthy response with heavy reasoning has been observed at ~270s, so give one
             // attempt 5 minutes. But an upstream can also accept the connection and then hang
             // without replying; MODEL_BUDGET_MS is a hard wall-clock cap so retries + the
             // field-repair loop can never run away (the regression that let one job spin for
             // 26 minutes was a 480s timeout x 4 attempts x a fallback chain).
-            const requestTimeoutMs = 300000;
-            const MODEL_BUDGET_MS = 360000;
+            const requestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
+            const MODEL_BUDGET_MS = Number(reviewPolicy.model_budget_ms) || 360000;
 
             // Some upstreams (e.g. MiniMax) inline their chain-of-thought into `content`
             // instead of `reasoning_content`. Never let that reach the PR comment.
@@ -340,26 +273,26 @@ jobs:
             ];
 
             function basePayload(model) {
+              const throttled = model.context_profile === 'kimi-k3-throttled';
               const messages = [
-                { role: 'system', content: model === KIMI_K3_MODEL ? kimiK3System : system },
-                { role: 'user', content: model === KIMI_K3_MODEL ? kimiK3User : user },
+                { role: 'system', content: throttled ? kimiK3System : system },
+                { role: 'user', content: throttled ? kimiK3User : user },
               ];
               const payload = {
-                model,
+                model: model.id,
                 messages,
                 stream: false,
-                max_tokens: model === KIMI_K3_MODEL ? 8192 : 16384,
+                max_tokens: model.max_output_tokens,
               };
-              // Kimi K3 uses fixed sampling and rejects caller-supplied temperature.
-              if (model !== KIMI_K3_MODEL) payload.temperature = 0.2;
+              if (Number.isFinite(model.temperature)) payload.temperature = model.temperature;
               return payload;
             }
 
-            function googlePayload() {
+            function googlePayload(model) {
               return {
                 systemInstruction: { parts: [{ text: system }] },
                 contents: [{ role: 'user', parts: [{ text: user }] }],
-                generationConfig: { maxOutputTokens: 16384 },
+                generationConfig: { maxOutputTokens: model.max_output_tokens },
               };
             }
 
@@ -390,7 +323,8 @@ jobs:
               return { kind: 'model-or-upstream-failure', stopRetries: false, stopFallbacks: false };
             }
 
-            async function callOnce(model, payload, deadline) {
+            async function callOnce(lane, model, payload, deadline) {
+              const modelId = model.id;
               const requestBody = JSON.stringify(payload);
               let response;
               let responseText = '';
@@ -407,34 +341,33 @@ jobs:
                 // whatever time is left, and give up rather than starting an attempt with none.
                 const remaining = deadline - Date.now();
                 if (remaining <= 0) {
-                  requestError = `Gave up on ${model} after its ${MODEL_BUDGET_MS / 1000}s budget was exhausted (upstream likely hung).`;
-                  console.log(`[${model}] attempt ${attempt}/${maxAttempts} skipped: model budget exhausted`);
+                  requestError = `Gave up on ${modelId} after its ${MODEL_BUDGET_MS / 1000}s budget was exhausted (upstream likely hung).`;
+                  console.log(`[Lane ${lane.id}/${modelId}] attempt ${attempt}/${maxAttempts} skipped: model budget exhausted`);
                   break;
                 }
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remaining));
                 try {
-                  const provider = providerOf(model);
-                  const isGoogle = provider === 'google';
-                  const providerConfig = PROVIDER_CONFIG[provider];
+                  const credentials = laneCredentials[lane.id];
+                  const isGoogle = lane.protocol === 'google-generate-content';
                   const endpoint = isGoogle
-                    ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
-                    : `${providerConfig.baseUrl}/chat/completions`;
+                    ? `${credentials.baseUrl}/models/${encodeURIComponent(modelId)}:generateContent`
+                    : `${credentials.baseUrl}/chat/completions`;
                   response = await fetch(endpoint, {
                     method: 'POST',
                     signal: controller.signal,
                     headers: isGoogle ? {
-                      'x-goog-api-key': process.env.GOOGLE_AI_API_KEY,
+                      'x-goog-api-key': credentials.apiKey,
                       'content-type': 'application/json',
                       accept: 'application/json',
                       'user-agent': 'GitHubActions-AI-PR-Review',
                     } : {
-                      authorization: `Bearer ${providerConfig.apiKey}`,
+                      authorization: `Bearer ${credentials.apiKey}`,
                       'content-type': 'application/json',
                       accept: 'application/json',
                       'user-agent': 'GitHubActions-AI-PR-Review',
                     },
-                    body: isGoogle ? JSON.stringify(googlePayload()) : requestBody,
+                    body: isGoogle ? JSON.stringify(googlePayload(model)) : requestBody,
                   });
                   responseText = await response.text();
                 } catch (error) {
@@ -448,7 +381,7 @@ jobs:
                 if (response?.ok && failure.kind !== 'gateway-blocked') break;
                 const status = response?.status ?? 'request failed';
                 const diag = (responseText || requestError || '').slice(0, 1000);
-                console.log(`[${model}] provider=${providerOf(model)} api=${GOOGLE_MODELS.has(model) ? 'generateContent' : 'chat/completions'} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
+                console.log(`[Lane ${lane.id}/${modelId}] provider=${lane.provider} protocol=${lane.protocol} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
                 failureKind = failure.kind;
                 stopFallbacks = failure.stopFallbacks;
                 // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
@@ -471,31 +404,31 @@ jobs:
             // The gateway silently re-routes a model between upstreams, and upstreams disagree
             // about which optional fields exist. When one rejects a field by name, drop it and
             // retry rather than losing the whole review.
-            async function callModel(model) {
+            async function callModel(lane, model) {
               // One budget per model covers all its attempts and field-repair retries. Each
               // model in a fallback chain gets a fresh budget, so a hung primary is abandoned
               // in bounded time and the fallback still gets its own full window.
               const deadline = Date.now() + MODEL_BUDGET_MS;
               const payload = basePayload(model);
-              if (GOOGLE_MODELS.has(model)) {
-                return callOnce(model, payload, deadline);
+              if (lane.protocol === 'google-generate-content') {
+                return callOnce(lane, model, payload, deadline);
               }
               for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
-                const result = await callOnce(model, payload, deadline);
+                const result = await callOnce(lane, model, payload, deadline);
                 if (result.response?.status !== 400) return result;
                 const text = result.responseText || '';
                 const matched = EXTRA_FIELD_REJECTED.map((re) => re.exec(text)).find(Boolean);
                 const field = matched?.[1];
                 if (!field || !DROPPABLE_FIELDS.has(field) || !(field in payload)) return result;
-                console.log(`[${model}] upstream rejected optional field '${field}'; dropping it and retrying.`);
+                console.log(`[Lane ${lane.id}/${model.id}] upstream rejected optional field '${field}'; dropping it and retrying.`);
                 delete payload[field];
               }
-              return callOnce(model, payload, deadline);
+              return callOnce(lane, model, payload, deadline);
             }
 
-            function extractReview(model, responseText) {
+            function extractReview(lane, model, responseText) {
               const payload = JSON.parse(responseText);
-              if (GOOGLE_MODELS.has(model)) {
+              if (lane.protocol === 'google-generate-content') {
                 const candidate = payload?.candidates?.[0];
                 const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
                 const content = stripThinking(parts
@@ -503,7 +436,7 @@ jobs:
                   .map((part) => part?.text || '')
                   .join('\n'));
                 const finishReason = candidate?.finishReason;
-                console.log(`[${model}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
+                console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
                 let review = content;
                 if (review && finishReason && finishReason !== 'STOP') {
                   review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
@@ -518,7 +451,7 @@ jobs:
               // Never publish provider reasoning as a review. An empty final response makes
               // the caller continue to its configured fallback instead.
               let review = content;
-              console.log(`[${model}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
+              console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
               if (review && finishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }
@@ -527,8 +460,27 @@ jobs:
 
             // Try the primary model, then same-provider fallbacks. Shared provider failures
             // short-circuit the lane so the full context is not resent to the same endpoint.
-            async function requestReview(primary) {
-              const chain = [primary, ...(Array.isArray(FALLBACKS[primary]) ? FALLBACKS[primary] : [])];
+            async function requestReview(lane) {
+              const primary = lane.primary;
+              const chain = [primary, ...lane.fallbacks];
+              const credentials = laneCredentials[lane.id];
+              if (!credentials?.apiKey || !credentials?.baseUrl) {
+                console.log(`[Lane ${lane.id}] fixed credential slots are not available; skipping model requests for this lane.`);
+                return {
+                  lane,
+                  primary,
+                  servedBy: null,
+                  reasoningLength: 0,
+                  degraded: false,
+                  review: [
+                    '> AI review was not generated.',
+                    '',
+                    `Lane ${lane.id} is not provisioned.`,
+                    '',
+                    `Action needed: set PR_AGENT_LANE_${lane.id}_KEY and PR_AGENT_LANE_${lane.id}_API_BASE in the caller repository.`,
+                  ].join('\n'),
+                };
+              }
               const tried = [];
               let lastResponse;
               let lastResponseText = '';
@@ -537,30 +489,30 @@ jobs:
               let stoppedSharedLane = false;
 
               for (const model of chain) {
-                const { response, responseText, requestError, attempts, failureKind, stopFallbacks } = await callModel(model);
+                const { response, responseText, requestError, attempts, failureKind, stopFallbacks } = await callModel(lane, model);
                 lastResponse = response;
                 lastResponseText = responseText;
                 lastRequestError = requestError;
                 lastFailureKind = failureKind;
                 if (response?.ok) {
                   try {
-                    const { review, reasoningLength } = extractReview(model, responseText);
+                    const { review, reasoningLength } = extractReview(lane, model, responseText);
                     if (review) {
-                      return { primary, servedBy: model, review, reasoningLength, degraded: model !== primary };
+                      return { lane, primary, servedBy: model, review, reasoningLength, degraded: model !== primary };
                     }
-                    console.log(`[${model}] response parsed but contained no review text.`);
+                    console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
                   } catch (error) {
-                    console.log(`[${model}] parse error: ${error?.message || error}`);
+                    console.log(`[Lane ${lane.id}/${model.id}] parse error: ${error?.message || error}`);
                   }
                 }
-                tried.push(`${model} -> HTTP ${response?.status ?? 'request failed'} (${attempts ?? 0} attempt(s))`);
+                tried.push(`${model.id} -> HTTP ${response?.status ?? 'request failed'} (${attempts ?? 0} attempt(s))`);
                 if (stopFallbacks && model !== chain[chain.length - 1]) {
                   stoppedSharedLane = true;
-                  console.log(`[${primary}] ${failureKind} affects the shared ${providerOf(primary)} lane; skipping same-provider fallback requests.`);
+                  console.log(`[Lane ${lane.id}/${primary.id}] ${failureKind} affects provider ${lane.provider}; skipping fallback requests in this lane.`);
                   break;
                 }
                 if (model !== chain[chain.length - 1]) {
-                  console.log(`[${primary}] falling back to the next model in the chain.`);
+                  console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
                 }
               }
 
@@ -570,7 +522,7 @@ jobs:
               const status = lastResponse?.status ?? 'request failed';
               const isServerSide = typeof status === 'number' && status >= 500;
               const stoppedSummary = stoppedSharedLane
-                ? `The failure applies to the shared ${providerOf(primary)} endpoint, so same-provider fallbacks were skipped to avoid duplicate requests. Reason: ${lastFailureKind}.`
+                ? `The failure applies to the shared Lane ${lane.id} ${lane.provider} endpoint, so this lane's fallbacks were skipped to avoid duplicate requests. Reason: ${lastFailureKind}.`
                 : `Review attempts did not produce a usable response. Tried: ${tried.join('; ')}.`;
               const fence = '```';
               const snippet = failText.replace(/`/g, "'").slice(0, 600);
@@ -590,17 +542,17 @@ jobs:
                   : lastFailureKind === 'quota-exhausted'
                     ? 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.'
                     : lastFailureKind === 'authentication-failed'
-                      ? `Action needed: repair the shared ${providerOf(primary)} API key or authentication configuration.`
+                      ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.`
                       : lastFailureKind === 'endpoint-unavailable'
-                        ? 'Action needed: the configured Model Studio endpoint remained unreachable after retries. Same-endpoint model fallbacks cannot bypass this network failure.'
+                        ? `Action needed: Lane ${lane.id} endpoint remained unreachable after retries. Models sharing that Lane cannot bypass its network failure.`
                   : upstreamExhausted
-                    ? 'Action needed: `failover_exhausted` means the gateway ran out of healthy upstreams for every model in the chain — a provider-side outage, not a problem with this repo, the key, or the model name. It usually clears on its own; if it persists, point `models`/`fallbacks` at ids on a different upstream (see the mapping at the top of pr-review.yml).'
+                    ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.`
                     : isServerSide
                       ? 'Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above — most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage.'
                       : 'Action needed: inspect the upstream response above to identify the request or auth problem.',
               ].join('\n');
 
-              return { primary, servedBy: null, review, reasoningLength: 0, degraded: false };
+              return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false };
             }
 
             // Context collection can take long enough for another push to land. Re-read the
@@ -618,10 +570,9 @@ jobs:
 
             const headSha = reviewHeadSha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const labelOf = (model) => MODEL_LABELS[model] || model;
-
-            // Run every configured model in parallel, then post one comment per model.
-            const settled = await Promise.allSettled(models.map((model) => requestReview(model)));
+            // Run lanes independently in parallel. A healthy lane emits exactly one comment;
+            // fallbacks are sequential inside that lane and can never cross credentials.
+            const settled = await Promise.allSettled(lanes.map((lane) => requestReview(lane)));
 
             // Model calls can outlive the commit they reviewed. Do not attach completed
             // results to a newer head (or to a PR that was closed while they were running).
@@ -637,21 +588,22 @@ jobs:
 
             let posted = 0;
             for (let i = 0; i < settled.length; i++) {
-              const primary = models[i];
+              const lane = lanes[i];
+              const primary = lane.primary;
               if (settled[i].status === 'rejected') {
-                console.log(`[${primary}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
+                console.log(`[Lane ${lane.id}/${primary.id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
                 continue;
               }
               const { servedBy, review, reasoningLength, degraded } = settled[i].value;
               const modelLine = degraded
-                ? `Model: ${primary} unavailable -> served by ${servedBy}`
-                : `Model: ${servedBy ?? primary}`;
+                ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
+                : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
               const banner = degraded
-                ? [`> ℹ️ \`${labelOf(primary)}\` 当前不可用，本条 review 由备用模型 \`${labelOf(servedBy)}\` 生成。`, '']
+                ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 当前不可用，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`, '']
                 : [];
               const body = [
-                `<!-- ai-pr-review-bot:${primary} -->`,
-                `## AI PR Review · ${labelOf(primary)}`,
+                `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
+                `## AI PR Review · Lane ${lane.id} · ${primary.label}`,
                 '',
                 ...banner,
                 review,
@@ -666,10 +618,10 @@ jobs:
                   body,
                 });
                 posted++;
-                console.log(`Created AI PR Review comment ${createdComment.id} for ${primary}.`);
+                console.log(`Created AI PR Review comment ${createdComment.id} for Lane ${lane.id}.`);
               } catch (error) {
                 // One failed comment must not swallow the others.
-                console.log(`Failed to post comment for ${primary}: ${error?.message || error}`);
+                console.log(`Failed to post comment for Lane ${lane.id}: ${error?.message || error}`);
               }
             }
             if (posted === 0) {

@@ -34,10 +34,13 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 
 ```text
 review-action/config/repositories/
+├─ TshyGO__ci-central.json
 ├─ TshyGO__NebulaLab.json
 ├─ TshyGO__NebulaLab-Docs.json
 └─ TshyGO__NebulaLab-Plugins.json
 ```
+
+四个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。
 
 供应商、协议和 Secret 槽位绑定 Lane，不绑定模型 ID。同一个模型 ID 可以出现在不同 Lane，执行时仍使用各自 Lane 的地址和密钥。fallback 只能写在同一个 Lane 的 `fallbacks` 内，结构上不存在跨供应商 fallback。
 
@@ -65,7 +68,7 @@ PR_AGENT_LANE_C_API_BASE
 
 ### 一次性迁移兼容层
 
-在三个 caller 全部切换到固定 Lane 槽位前，reusable workflow 暂时声明旧的 `PR_AGENT_OPENAI_*`、`PR_AGENT_TENCENT_*` 和 `PR_AGENT_GOOGLE_AI_KEY`，仅在对应 Lane 新槽位为空时回退读取。缺少凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。所有 caller 和 Lane Secret 验证完成后，必须从中央 workflow 删除这组旧声明和 `LEGACY_*` 环境映射；仓库 JSON 和最终 caller 不得引用它们。
+在四个 caller 全部切换到固定 Lane 槽位前，reusable workflow 暂时声明旧的 `PR_AGENT_OPENAI_*`、`PR_AGENT_TENCENT_*` 和 `PR_AGENT_GOOGLE_AI_KEY`，仅在对应 Lane 新槽位为空时回退读取。缺少凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。所有 caller 和 Lane Secret 验证完成后，必须从中央 workflow 删除这组旧声明和 `LEGACY_*` 环境映射；仓库 JSON 和最终 caller 不得引用它们。
 
 ## 配置契约
 

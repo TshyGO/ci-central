@@ -13,7 +13,7 @@ const actionPath = path.join(here, '..', 'review-action');
 const source = require(path.join(actionPath, 'src', 'index.js'));
 const bundled = require(path.join(actionPath, 'dist', 'index.js'));
 
-const repositories = ['TshyGO/NebulaLab', 'TshyGO/NebulaLab-Docs', 'TshyGO/NebulaLab-Plugins'];
+const repositories = ['TshyGO/ci-central', 'TshyGO/NebulaLab', 'TshyGO/NebulaLab-Docs', 'TshyGO/NebulaLab-Plugins'];
 for (const repository of repositories) {
   const fromSource = source.loadConfig(repository, actionPath);
   const fromBundle = bundled.loadConfig(repository, actionPath);

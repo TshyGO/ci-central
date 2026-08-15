@@ -48,18 +48,11 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - name: Resolve reusable workflow ref
-        id: workflow-ref
-        shell: bash
-        env:
-          WORKFLOW_REF: ${{ github.workflow_ref }}
-        run: echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
-
       - name: Check out matching central configuration
         uses: actions/checkout@v5
         with:
           repository: TshyGO/ci-central
-          ref: ${{ steps.workflow-ref.outputs.ref }}
+          ref: ${{ github.job_workflow_sha }}
           path: .ci-central
           sparse-checkout: review-action
 

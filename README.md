@@ -85,7 +85,7 @@ PR_AGENT_LANE_C_API_BASE
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 会从 `github.workflow_ref` 解析调用它的 branch、tag 或 commit，并检出同一版本的 `review-action` 与仓库 JSON，避免 workflow 固定在旧版本时却误用 `main` 的新配置。
+reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable job 的同一提交，从而让 `review-action` 与仓库 JSON 精确匹配工作流版本，也不会误把业务仓的 PR ref 当成 `ci-central` ref。
 
 ## 精度与节流保证
 

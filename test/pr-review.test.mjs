@@ -93,8 +93,8 @@ const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# r
 check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
-check('config resolver is checked out at the reusable workflow ref', workflowText.includes('WORKFLOW_REF: ${{ github.workflow_ref }}')
-  && workflowText.includes('ref: ${{ steps.workflow-ref.outputs.ref }}')
+check('config resolver is checked out at the reusable workflow commit', workflowText.includes('ref: ${{ github.job_workflow_sha }}')
+  && !workflowText.includes('github.workflow_ref')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
 check('legacy provider slots are marked as a temporary migration bridge', workflowText.includes('Temporary migration bridge. Remove after every caller maps the fixed Lane slots.'));
 check('reusable job centrally cancels superseded reviews', workflowText.includes('cancel-in-progress: true'));

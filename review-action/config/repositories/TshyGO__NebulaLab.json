@@ -42,7 +42,7 @@
       },
       "fallbacks": [
         {
-          "id": "deepseek/deepseek-v4-pro",
+          "id": "deepseek-v4-pro-202606",
           "label": "DeepSeek-V4-Pro",
           "context_profile": "full",
           "max_output_tokens": 16384,

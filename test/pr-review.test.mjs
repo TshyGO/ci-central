@@ -101,7 +101,7 @@ check('reusable job centrally cancels superseded reviews', workflowText.includes
 
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.2,C:gemini-3.7-flash');
-check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['kimi-k3', 'deepseek/deepseek-v4-pro'].includes(model)));
+check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['kimi-k3', 'deepseek-v4-pro-202606'].includes(model)));
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('reasoning and Gemini thought parts never reach comments', !r.posted.some((body) => body.includes('private thinking') || body.includes('PRIVATE GEMINI THOUGHT')));
@@ -129,8 +129,8 @@ check('Kimi still yields one Lane A comment', r.posted.filter((body) => body.inc
 
 r = await scenario((call) => call.model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back only to DeepSeek', r.captured.filter(({ model }) => model === 'glm-5.2').length === 3
-  && r.captured.filter(({ model }) => model === 'deepseek/deepseek-v4-pro').length === 1
-  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek/deepseek-v4-pro'));
+  && r.captured.filter(({ model }) => model === 'deepseek-v4-pro-202606').length === 1
+  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-202606'));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure short-circuits only its provider lane', r.captured.filter(({ lane }) => lane === 'A').length === 1

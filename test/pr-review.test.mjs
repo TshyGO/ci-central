@@ -52,6 +52,11 @@ function laneForUrl(url) {
 
 async function scenario(route, overrides = {}, options = {}) {
   const posted = [], captured = [], logs = [];
+  const comments = (options.comments || []).map((comment, index) => ({
+    id: index + 1,
+    user: { login: 'github-actions[bot]' },
+    ...comment,
+  }));
   const pulls = options.pulls || [pull];
   let pullGets = 0;
   const github = {
@@ -59,14 +64,29 @@ async function scenario(route, overrides = {}, options = {}) {
       pulls: { get: async () => ({ data: pulls[Math.min(pullGets++, pulls.length - 1)] }), listFiles: 'files', listCommits: 'commits' },
       issues: {
         get: async () => { throw new Error('not found'); },
+        listComments: 'comments',
         createComment: async ({ body }) => {
           if (options.rejectComment?.(body)) throw new Error('comment rejected');
           posted.push(body);
-          return { data: { id: posted.length } };
+          const comment = { id: comments.length + 1, user: { login: 'github-actions[bot]' }, body };
+          comments.push(comment);
+          return { data: comment };
+        },
+        updateComment: async ({ comment_id, body }) => {
+          if (options.rejectComment?.(body)) throw new Error('comment rejected');
+          const comment = comments.find(({ id }) => id === comment_id);
+          if (!comment) throw new Error('comment not found');
+          comment.body = body;
+          posted.push(body);
+          return { data: comment };
+        },
+        deleteComment: async ({ comment_id }) => {
+          const index = comments.findIndex(({ id }) => id === comment_id);
+          if (index >= 0) comments.splice(index, 1);
         },
       },
     },
-    paginate: async (which) => which === 'files' ? files : [{ commit: { message: 'test' } }],
+    paginate: async (which) => which === 'files' ? files : which === 'comments' ? comments : [{ commit: { message: 'test' } }],
   };
   const fetch = async (url, request) => {
     const body = JSON.parse(request.body);
@@ -83,7 +103,7 @@ async function scenario(route, overrides = {}, options = {}) {
   } catch (caught) {
     error = caught;
   }
-  return { posted, captured, logs, error, pullGets };
+  return { posted, captured, comments, logs, error, pullGets };
 }
 
 const checks = [];
@@ -104,6 +124,14 @@ check('healthy path calls exactly the three configured lane primaries', r.captur
 check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['kimi-k3', 'deepseek-v4-pro-202606'].includes(model)));
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
+const duplicateComments = [
+  { id: 10, body: '<!-- ai-pr-review-bot:lane-A -->\nold diagnostic' },
+  { id: 11, body: '<!-- ai-pr-review-bot:lane-A -->\nnewer diagnostic' },
+  { id: 12, body: '<!-- ai-pr-review-bot:lane-B -->\nold review' },
+];
+r = await scenario(healthy, {}, { comments: duplicateComments });
+check('reruns update one stable comment per lane and remove prior duplicates', r.posted.length === 3
+  && ['A', 'B', 'C'].every((lane) => r.comments.filter(({ body }) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('reasoning and Gemini thought parts never reach comments', !r.posted.some((body) => body.includes('private thinking') || body.includes('PRIVATE GEMINI THOUGHT')));
 check('full-context primaries preserve input and output budgets', r.captured.filter(({ lane }) => lane !== 'C').every(({ body }) => body.messages[1].content.includes('Changed files and patches:') && body.max_tokens === 16384)
   && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 16384);

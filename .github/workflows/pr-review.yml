@@ -605,6 +605,12 @@ jobs:
 
             let posted = 0;
             let reviewed = 0;
+            const existingComments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pullNumber,
+              per_page: 100,
+            });
             for (let i = 0; i < settled.length; i++) {
               const lane = lanes[i];
               const primary = lane.primary;
@@ -629,15 +635,36 @@ jobs:
                 `<sub>${modelLine} · Thinking: ${reasoningLength ? `${reasoningLength} chars` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
               ].join('\n');
               try {
-                const { data: createdComment } = await github.rest.issues.createComment({
-                  owner,
-                  repo,
-                  issue_number: pullNumber,
-                  body,
-                });
+                const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
+                const priorLaneComments = existingComments.filter((comment) =>
+                  comment.user?.login === 'github-actions[bot]' && comment.body?.includes(marker));
+                const currentComment = priorLaneComments.at(-1);
+                let publishedComment;
+                if (currentComment) {
+                  ({ data: publishedComment } = await github.rest.issues.updateComment({
+                    owner,
+                    repo,
+                    comment_id: currentComment.id,
+                    body,
+                  }));
+                } else {
+                  ({ data: publishedComment } = await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: pullNumber,
+                    body,
+                  }));
+                }
+                for (const duplicate of priorLaneComments.slice(0, -1)) {
+                  try {
+                    await github.rest.issues.deleteComment({ owner, repo, comment_id: duplicate.id });
+                  } catch (cleanupError) {
+                    console.log(`Failed to remove duplicate Lane ${lane.id} comment ${duplicate.id}: ${cleanupError?.message || cleanupError}`);
+                  }
+                }
                 posted++;
                 if (servedBy) reviewed++;
-                console.log(`Created AI PR Review comment ${createdComment.id} for Lane ${lane.id}.`);
+                console.log(`${currentComment ? 'Updated' : 'Created'} AI PR Review comment ${publishedComment.id} for Lane ${lane.id}.`);
               } catch (error) {
                 // One failed comment must not swallow the others.
                 console.log(`Failed to post comment for Lane ${lane.id}: ${error?.message || error}`);

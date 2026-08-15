@@ -1,6 +1,6 @@
 # ci-central
 
-集中化的可复用 CI workflow。目前提供 **AI PR Review**（阿里云单主模型顺序回退 + 独立 Gemini、中文输出、支持 thinking）。
+集中化的可复用 CI workflow。目前提供 **AI PR Review**（供应商隔离的主备链、中文输出、支持 thinking）。
 
 各业务仓库不再各自维护审查逻辑,只放一个十几行的"瘦身调用",指向这里的 `.github/workflows/pr-review.yml`。**换供应商 / 换模型 / 改 prompt 时,绝大多数情况只改这一个仓库。**
 
@@ -11,7 +11,7 @@
 ```
 业务仓库 (.github/workflows/ai-pr-review.yml)   ← 瘦身 caller,~10 行
         │  uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
-        │  secrets: 显式映射 Model Studio 与 Google AI Studio 的 PR Agent secret
+        │  secrets: 显式映射各供应商的 PR Agent secret
         ▼
 ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓库)
         ├─ 阿里云 Model Studio: /chat/completions
@@ -42,15 +42,19 @@ ci-central/.github/workflows/pr-review.yml     ← 真正的审查逻辑(本仓�
 
 两个 Model Studio 模型使用标准 `/chat/completions` 协议；workflow 只发布 `choices[].message.content`，即使供应商返回 `reasoning_content` 也不会写入 PR 评论。Qwen 只覆盖阿里云通道内的单模型暂时不可用；两者共享一个端点和套餐，不能替代供应商级灾备。Gemini 使用独立 Google 端点，不参与阿里云 fallback 链。
 
+工作流也支持腾讯 Token Plan 的 OpenAI 兼容接口。`model_providers` 为每个模型指定 `alibaba`、`tencent` 或 `google`；运行时会拒绝跨供应商 fallback，防止密钥、端点和套餐故障被错误地当成模型级降级。腾讯通道使用调用仓库的 `PR_AGENT_TENCENT_API_BASE` / `PR_AGENT_TENCENT_KEY`。
+
+Kimi K3 作为 fallback 时沿用经过验证的节流契约：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。它所属的供应商由 `model_providers` 显式决定；在 NebulaLab 的目标配置中映射为 `alibaba`，只在阿里主模型失败后调用，不增加健康路径消耗。
+
 **密钥/地址(secret)来源:**
 
 | 仓库 | secret 来源 |
 |---|---|
-| NebulaLab | 仓库级 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY` / `PR_AGENT_GOOGLE_AI_KEY` |
+| NebulaLab | 仓库级 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY` / `PR_AGENT_GOOGLE_AI_KEY` / `PR_AGENT_TENCENT_API_BASE` / `PR_AGENT_TENCENT_KEY` |
 | NebulaLab-Docs | 仓库级同名 secret |
 | NebulaLab-Plugins | 仓库级同名 secret |
 
-> 所有仓库均位于 `TshyGO` 个人账号下。调用方必须显式映射 Model Studio 的两个 secret 和独立 Gemini 所需的 `PR_AGENT_GOOGLE_AI_KEY`。
+> 所有仓库均位于 `TshyGO` 个人账号下。调用方只映射自己启用的供应商 secret；中央仓库不保存业务仓库密钥。
 
 ---
 
@@ -70,6 +74,8 @@ on:
         default: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}'
       fallbacks:
         default: '{"glm-5.2":["qwen3.8-max"]}'
+      model_providers:
+        default: '{"glm-5.2":"alibaba","qwen3.8-max":"alibaba","gemini-3.7-flash":"google"}'
 ```
 
 改之前先查询供应商模型列表，并对候选模型做最小真实请求验证。合并到 `main` 后，所有业务仓库下次审查自动用新模型：
@@ -78,7 +84,7 @@ on:
 curl -s "$BASE/models" -H "Authorization: Bearer $KEY" | jq '.data[].id'
 ```
 
-> 个别仓库想用不同模型,可在它的瘦身 caller 里 `with: { models: "..." }` 覆盖,不影响其它仓库。
+> 个别仓库想用不同模型，可在它的瘦身 caller 里覆盖 `models`，但必须同时传入覆盖列表中每个主模型和 fallback 模型的 `model_providers` 映射；否则工作流会在发送请求前失败。该覆盖不影响其它仓库。
 
 ### 1b. diff 预算
 
@@ -88,7 +94,7 @@ curl -s "$BASE/models" -H "Authorization: Bearer $KEY" | jq '.data[].id'
 
 ### 2. 换供应商 / 换 key(改 2 处)
 
-新增 OpenAI 兼容供应商使用 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY`。Google AI Studio 使用单独的 `PR_AGENT_GOOGLE_AI_KEY`，不能填入 OpenAI key。
+阿里通道使用 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY`，腾讯通道使用 `PR_AGENT_TENCENT_API_BASE` / `PR_AGENT_TENCENT_KEY`。Google AI Studio 使用单独的 `PR_AGENT_GOOGLE_AI_KEY`。不同供应商的 key 不得混用。
 
 ```bash
 # 隐藏输入一次，再通过 stdin 写入三个调用仓库
@@ -111,7 +117,7 @@ unset NEW_BASE NEW_KEY
 
 1. 在 `TshyGO` 账号下创建或转入仓库。
 2. 加文件 `.github/workflows/ai-pr-review.yml`,内容见下方"瘦身 caller 模板"。
-3. 在调用仓库设置 `PR_AGENT_OPENAI_API_BASE`、`PR_AGENT_OPENAI_KEY` 和（启用 Gemini 时）`PR_AGENT_GOOGLE_AI_KEY` 仓库级 secret。
+3. 在调用仓库设置所启用供应商的仓库级 secret：阿里为 `PR_AGENT_OPENAI_API_BASE` / `PR_AGENT_OPENAI_KEY`，Google 为 `PR_AGENT_GOOGLE_AI_KEY`，腾讯为 `PR_AGENT_TENCENT_API_BASE` / `PR_AGENT_TENCENT_KEY`。
 
 <details><summary>瘦身 caller 模板</summary>
 
@@ -147,6 +153,8 @@ jobs:
       PR_AGENT_OPENAI_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
       PR_AGENT_OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
       PR_AGENT_GOOGLE_AI_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
+      PR_AGENT_TENCENT_KEY: ${{ secrets.PR_AGENT_TENCENT_KEY }}
+      PR_AGENT_TENCENT_API_BASE: ${{ secrets.PR_AGENT_TENCENT_API_BASE }}
 ```
 </details>
 
@@ -168,5 +176,6 @@ jobs:
 - **上游会在你不知情时被换掉**。同一个模型 id,今天是 `frank/GLM-5.2`,明天是 `accounts/fireworks/models/glm-5p2`,请求契约跟着变。所以请求体只带各家都认的字段,并且靠 job 日志里的 `upstream=` 追踪实际由谁服务。
 - **上游会「假死」**(TCP 连上但一直不回包),不只是报 5xx。所以每个模型有一个 `MODEL_BUDGET_MS`(~6 分钟)的**总时长上限**:单次尝试封顶 `requestTimeoutMs`(5 分钟,够最重的思考响应 ~270s),预算耗尽就放弃该模型转 fallback,重试的退避永不睡过预算线。job 上还有 `timeout-minutes: 20` 兜底。**别再把这些值往大调**——曾经把单次超时抬到 480s×4 次,撞上上游假死时一个 job 空转了 26 分钟。想验证:测试里 `clockPerFetch` 用假时钟把预算路径跑通,不需要真等。
 - **共享错误要短路整条阿里通道**：套餐额度耗尽、认证失败、HTML 验证页，以及连续三次 `fetch failed`/DNS/TLS/拒绝连接都不是换模型能解决的问题。保持 Gemini 独立运行，但不要把同一份完整 PR 上下文继续发给同端点 Qwen。
+- **fallback 不得跨供应商**：`model_providers` 是强制边界。阿里模型只回退到阿里，腾讯模型只回退到腾讯；供应商共享故障会短路该通道，不会把完整上下文重复发给同端点的备用模型。
 - **不要删掉三阶段 head 检查**：caller 的 concurrency 只能尽力取消正在执行的旧 run；如果旧请求已经发出，token 无法追回。脚本自己的 preflight + pre-dispatch 检查保证过期 run 在模型请求前退出，pre-publish 检查保证运行中 push 后的旧结果不会发布到新 head。
 - **改完先跑测试**:`node test/pr-review.test.mjs`。它把 `pr-review.yml` 里那段内联 `script:` 原样抠出来,配 mock 的 GitHub API 和 stub 的 `fetch` 执行,覆盖降级链、剥 `<think>`、字段自愈、diff 打包/截断、发评论失败等路径。不需要任何密钥,PR 上自动跑(见 `.github/workflows/test.yml`)。

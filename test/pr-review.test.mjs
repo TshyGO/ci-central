@@ -23,9 +23,11 @@ const pull = { number: 42, title: 'Test', state: 'open', user: { login: 'octocat
 const context = { payload: { pull_request: { number: 42, head: { sha: 'deadbeef' } } }, repo: { owner: 'TshyGO', repo: 'Example' }, serverUrl: 'https://github.com', runId: 1 };
 const env = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/', GOOGLE_AI_API_KEY: 'google-test-key',
+  TENCENT_API_KEY: 'tencent-test-key', TENCENT_API_BASE: 'https://tencent.example.test/plan/v3/',
   PR_REVIEW_MODELS: 'glm-5.2,gemini-3.7-flash',
   PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}',
   PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max"]}',
+  PR_REVIEW_MODEL_PROVIDERS: '{"glm-5.2":"alibaba","qwen3.8-max":"alibaba","gemini-3.7-flash":"google"}',
   PR_REVIEW_DIFF_BUDGET: '100000',
 };
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
@@ -121,7 +123,7 @@ r = await scenario((model) => model === 'glm-5.2'
   : reply(200, geminiResult('# Gemini review')));
 check('plan-wide quota exhaustion is attempted only once', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 1);
 check('plan-wide quota exhaustion skips same-plan Qwen fallback', !r.captured.some((entry) => entry.model === 'qwen3.8-max')
-  && r.logs.some((line) => line.includes('quota-exhausted') && line.includes('skipping same-endpoint fallback')));
+  && r.logs.some((line) => line.includes('quota-exhausted') && line.includes('skipping same-provider fallback')));
 check('quota failure still preserves independent Gemini review', r.posted.length === 2
   && r.posted.some((body) => body.includes('# Gemini review'))
   && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted')));
@@ -214,5 +216,47 @@ r = await scenario((model) => reply(200, geminiResult('# Gemini-only review')), 
 check('Gemini-only configuration does not require Model Studio credentials', r.error === undefined && r.posted.length === 1 && r.posted[0].includes('# Gemini-only review'));
 const geminiCall = r.captured.find((x) => x.model === 'gemini-3.7-flash');
 check('explicit Gemini uses generateContent and its native payload', geminiCall && r.urls.find((url) => url.includes('generativelanguage.googleapis.com')).endsWith('/models/gemini-3.7-flash:generateContent') && geminiCall.body.systemInstruction?.parts?.length === 1 && geminiCall.body.contents?.[0]?.parts?.length === 1 && geminiCall.body.generationConfig?.maxOutputTokens === 16384 && !('temperature' in geminiCall.body.generationConfig) && geminiCall.headers['x-goog-api-key'] === 'google-test-key');
+
+const providerOverrides = {
+  PR_REVIEW_MODELS: 'qwen3.8-max,glm-5.2',
+  PR_REVIEW_MODEL_LABELS: '{"qwen3.8-max":"Qwen3.8-Max","kimi-k3":"Kimi-K3","glm-5.2":"GLM-5.2","deepseek/deepseek-v4-pro":"DeepSeek-V4-Pro"}',
+  PR_REVIEW_FALLBACKS: '{"qwen3.8-max":["kimi-k3"],"glm-5.2":["deepseek/deepseek-v4-pro"]}',
+  PR_REVIEW_MODEL_PROVIDERS: '{"qwen3.8-max":"alibaba","kimi-k3":"alibaba","glm-5.2":"tencent","deepseek/deepseek-v4-pro":"tencent"}',
+};
+r = await scenario((model) => reply(200, result(model, `# review ${model}`)), providerOverrides);
+check('independent Alibaba and Tencent primaries use their own endpoints and credentials',
+  r.captured.length === 2
+    && r.urls.includes('https://example.test/v1/chat/completions')
+    && r.urls.includes('https://tencent.example.test/plan/v3/chat/completions')
+    && r.captured.find((x) => x.model === 'qwen3.8-max')?.headers.authorization === 'Bearer test-key'
+    && r.captured.find((x) => x.model === 'glm-5.2')?.headers.authorization === 'Bearer tencent-test-key');
+
+r = await scenario((model) => ['qwen3.8-max', 'glm-5.2'].includes(model)
+  ? reply(503, '{"error":"unavailable"}')
+  : reply(200, result(model, `# review ${model}`)), providerOverrides);
+check('each provider falls back only inside its own lane',
+  r.captured.some((x) => x.model === 'kimi-k3')
+    && r.captured.some((x) => x.model === 'deepseek/deepseek-v4-pro')
+    && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by kimi-k3'))
+    && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by deepseek/deepseek-v4-pro')));
+const kimiRequest = r.captured.find((x) => x.model === 'kimi-k3')?.body;
+check('Kimi K3 fallback uses its bounded prompt and fixed sampling contract',
+  kimiRequest?.max_tokens === 8192
+    && !('temperature' in kimiRequest)
+    && kimiRequest.messages?.[1]?.content.includes('All changed file names:'));
+
+r = await scenario((model) => reply(200, result(model, '# review')), {
+  ...providerOverrides,
+  PR_REVIEW_FALLBACKS: '{"qwen3.8-max":["deepseek/deepseek-v4-pro"]}',
+});
+check('cross-provider fallback configuration is rejected before model calls',
+  /crosses providers/.test(r.error?.message || '') && r.captured.length === 0);
+
+r = await scenario((model) => reply(200, result(model, '# review')), {
+  ...providerOverrides,
+  TENCENT_API_KEY: '',
+});
+check('Tencent lanes require their dedicated caller secret',
+  /PR_AGENT_TENCENT_KEY/.test(r.error?.message || '') && r.captured.length === 0);
 
 if (checks.some((x) => !x)) process.exitCode = 1;

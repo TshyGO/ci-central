@@ -2,8 +2,7 @@ name: Reusable AI PR Review
 
 # Centralized AI PR review used across repos via `uses:`.
 # Swap provider/model in ONE place: change the `models` default below
-# (or pass `with: models`), and update the org secrets
-# PR_AGENT_OPENAI_API_BASE / PR_AGENT_OPENAI_KEY / PR_AGENT_GOOGLE_AI_KEY.
+# (or pass `with: models`), and update the caller repository secrets.
 #
 # Current default: one Alibaba Cloud lane and one independent Google lane. The Alibaba
 # lane uses GLM-5.2 as its only primary, with Qwen3.8-Max tried only when GLM fails.
@@ -29,6 +28,11 @@ on:
         type: string
         required: false
         default: '{"glm-5.2":["qwen3.8-max"]}'
+      model_providers:
+        description: JSON map of model id -> provider id. A fallback must use the same provider as its primary.
+        type: string
+        required: false
+        default: '{"glm-5.2":"alibaba","qwen3.8-max":"alibaba","gemini-3.7-flash":"google"}'
       diff_char_budget:
         description: Max characters of patch text sent to the model. Whole files are packed in order; test files are packed last so they are dropped first.
         type: number
@@ -40,6 +44,10 @@ on:
       PR_AGENT_OPENAI_API_BASE:
         required: true
       PR_AGENT_GOOGLE_AI_KEY:
+        required: false
+      PR_AGENT_TENCENT_KEY:
+        required: false
+      PR_AGENT_TENCENT_API_BASE:
         required: false
 
 jobs:
@@ -65,9 +73,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
           OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
           GOOGLE_AI_API_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
+          TENCENT_API_KEY: ${{ secrets.PR_AGENT_TENCENT_KEY }}
+          TENCENT_API_BASE: ${{ secrets.PR_AGENT_TENCENT_API_BASE }}
           PR_REVIEW_MODELS: ${{ inputs.models }}
           PR_REVIEW_MODEL_LABELS: ${{ inputs.model_labels }}
           PR_REVIEW_FALLBACKS: ${{ inputs.fallbacks }}
+          PR_REVIEW_MODEL_PROVIDERS: ${{ inputs.model_providers }}
           PR_REVIEW_DIFF_BUDGET: ${{ inputs.diff_char_budget }}
         with:
           script: |
@@ -172,6 +183,13 @@ jobs:
             const diffPack = packDiff(DIFF_BUDGET);
             console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted.`);
 
+            // Kimi K3 is useful as a last-resort reviewer but can spend a large context and
+            // completion budget entirely on reasoning. Preserve the proven bounded prompt:
+            // complete file inventory plus a small representative patch sample.
+            const KIMI_K3_MODEL = 'kimi-k3';
+            const kimiK3Pack = packDiff(1000);
+            const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join('\n');
+
             const system = [
               'You are an experienced code reviewer.',
               'First read the linked issue background (if provided) to understand what is being fixed and why, then judge whether the PR actually addresses it.',
@@ -180,6 +198,7 @@ jobs:
               'Always reserve enough output budget for the final Markdown review; never spend the entire response on hidden reasoning without a final answer.',
               'If there are no actionable issues, say that clearly and mention residual risks.',
             ].join(' ');
+            const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
 
             const buildUser = (diffText, options = {}) => [
               `Repository: ${owner}/${repo}`,
@@ -200,6 +219,11 @@ jobs:
               diffText || '[No diff available]',
             ].join('\n');
             const user = buildUser(diffPack.text);
+            const kimiK3User = buildUser(kimiK3Pack.text, {
+              descriptionLimit: 2000,
+              issueText: issueContext.slice(0, 2000),
+              fileList,
+            });
 
             const models = (process.env.PR_REVIEW_MODELS || '')
               .split(',')
@@ -208,12 +232,6 @@ jobs:
             if (models.length === 0) {
               throw new Error('PR_REVIEW_MODELS must list at least one model id.');
             }
-            const GOOGLE_MODELS = new Set(['gemini-3.7-flash']);
-            const requiresOpenAI = models.some((model) => !GOOGLE_MODELS.has(model));
-            if (requiresOpenAI && (!process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE)) {
-              throw new Error('PR_AGENT_OPENAI_KEY and PR_AGENT_OPENAI_API_BASE secrets are required for Model Studio models.');
-            }
-            const baseUrl = requiresOpenAI ? process.env.OPENAI_API_BASE.replace(/\/$/, '') : '';
             const parseJsonEnv = (name) => {
               try {
                 return JSON.parse(process.env[name] || '{}');
@@ -224,6 +242,13 @@ jobs:
             };
             const MODEL_LABELS = parseJsonEnv('PR_REVIEW_MODEL_LABELS');
             const FALLBACKS = parseJsonEnv('PR_REVIEW_FALLBACKS');
+            const MODEL_PROVIDERS = parseJsonEnv('PR_REVIEW_MODEL_PROVIDERS');
+            const GOOGLE_MODELS = new Set(['gemini-3.7-flash']);
+            const ALLOWED_PROVIDERS = new Set(['alibaba', 'tencent', 'google']);
+            const providerOf = (model) => MODEL_PROVIDERS[model];
+            if (new Set(models).size !== models.length) {
+              throw new Error('PR_REVIEW_MODELS must not contain duplicate model ids.');
+            }
             const primaryModels = new Set(models);
             const activeFallbacks = [];
             for (const primary of models) {
@@ -238,15 +263,52 @@ jobs:
                   + 'a model cannot run in parallel and also serve as a fallback.'
                 );
               }
+              const primaryProvider = providerOf(primary);
+              if (!primaryProvider || !ALLOWED_PROVIDERS.has(primaryProvider)) {
+                throw new Error(`Model ${primary} must map to a supported provider in PR_REVIEW_MODEL_PROVIDERS.`);
+              }
+              const crossProvider = chain.find((model) => providerOf(model) !== primaryProvider);
+              if (crossProvider) {
+                throw new Error(
+                  `Fallback ${crossProvider} for ${primary} crosses providers `
+                  + `(${primaryProvider} -> ${providerOf(crossProvider) || 'unmapped'}); provider failover chains must stay isolated.`
+                );
+              }
               activeFallbacks.push(...chain);
             }
             const configuredModels = [
               ...models,
               ...activeFallbacks,
             ];
-            if (configuredModels.some((model) => GOOGLE_MODELS.has(model)) && !process.env.GOOGLE_AI_API_KEY) {
-              throw new Error('PR_AGENT_GOOGLE_AI_KEY is required when gemini-3.7-flash is configured.');
+            for (const model of configuredModels) {
+              const provider = providerOf(model);
+              if (!provider || !ALLOWED_PROVIDERS.has(provider)) {
+                throw new Error(`Model ${model} must map to a supported provider in PR_REVIEW_MODEL_PROVIDERS.`);
+              }
+              if ((provider === 'google') !== GOOGLE_MODELS.has(model)) {
+                throw new Error(`Model ${model} has a provider/protocol mismatch: ${provider}.`);
+              }
             }
+            const configuredProviders = new Set(configuredModels.map(providerOf));
+            if (configuredProviders.has('alibaba') && (!process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE)) {
+              throw new Error('PR_AGENT_OPENAI_KEY and PR_AGENT_OPENAI_API_BASE are required for Alibaba models.');
+            }
+            if (configuredProviders.has('tencent') && (!process.env.TENCENT_API_KEY || !process.env.TENCENT_API_BASE)) {
+              throw new Error('PR_AGENT_TENCENT_KEY and PR_AGENT_TENCENT_API_BASE are required for Tencent models.');
+            }
+            if (configuredProviders.has('google') && !process.env.GOOGLE_AI_API_KEY) {
+              throw new Error('PR_AGENT_GOOGLE_AI_KEY is required for Google models.');
+            }
+            const PROVIDER_CONFIG = {
+              alibaba: {
+                baseUrl: (process.env.OPENAI_API_BASE || '').replace(/\/$/, ''),
+                apiKey: process.env.OPENAI_API_KEY,
+              },
+              tencent: {
+                baseUrl: (process.env.TENCENT_API_BASE || '').replace(/\/$/, ''),
+                apiKey: process.env.TENCENT_API_KEY,
+              },
+            };
             const maxAttempts = 3;
             // A healthy response with heavy reasoning has been observed at ~270s, so give one
             // attempt 5 minutes. But an upstream can also accept the connection and then hang
@@ -279,16 +341,18 @@ jobs:
 
             function basePayload(model) {
               const messages = [
-                { role: 'system', content: system },
-                { role: 'user', content: user },
+                { role: 'system', content: model === KIMI_K3_MODEL ? kimiK3System : system },
+                { role: 'user', content: model === KIMI_K3_MODEL ? kimiK3User : user },
               ];
-              return {
+              const payload = {
                 model,
                 messages,
                 stream: false,
-                max_tokens: 16384,
-                temperature: 0.2,
+                max_tokens: model === KIMI_K3_MODEL ? 8192 : 16384,
               };
+              // Kimi K3 uses fixed sampling and rejects caller-supplied temperature.
+              if (model !== KIMI_K3_MODEL) payload.temperature = 0.2;
+              return payload;
             }
 
             function googlePayload() {
@@ -350,10 +414,12 @@ jobs:
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remaining));
                 try {
-                  const isGoogle = GOOGLE_MODELS.has(model);
+                  const provider = providerOf(model);
+                  const isGoogle = provider === 'google';
+                  const providerConfig = PROVIDER_CONFIG[provider];
                   const endpoint = isGoogle
                     ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
-                    : `${baseUrl}/chat/completions`;
+                    : `${providerConfig.baseUrl}/chat/completions`;
                   response = await fetch(endpoint, {
                     method: 'POST',
                     signal: controller.signal,
@@ -363,7 +429,7 @@ jobs:
                       accept: 'application/json',
                       'user-agent': 'GitHubActions-AI-PR-Review',
                     } : {
-                      authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                      authorization: `Bearer ${providerConfig.apiKey}`,
                       'content-type': 'application/json',
                       accept: 'application/json',
                       'user-agent': 'GitHubActions-AI-PR-Review',
@@ -382,7 +448,7 @@ jobs:
                 if (response?.ok && failure.kind !== 'gateway-blocked') break;
                 const status = response?.status ?? 'request failed';
                 const diag = (responseText || requestError || '').slice(0, 1000);
-                console.log(`[${model}] api=${GOOGLE_MODELS.has(model) ? 'generateContent' : 'chat/completions'} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
+                console.log(`[${model}] provider=${providerOf(model)} api=${GOOGLE_MODELS.has(model) ? 'generateContent' : 'chat/completions'} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
                 failureKind = failure.kind;
                 stopFallbacks = failure.stopFallbacks;
                 // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
@@ -459,8 +525,8 @@ jobs:
               return { review, reasoningLength: reasoning.length };
             }
 
-            // Try the primary model, then its fallbacks (which live on other upstreams).
-            // A single upstream outage should degrade the review, not delete it.
+            // Try the primary model, then same-provider fallbacks. Shared provider failures
+            // short-circuit the lane so the full context is not resent to the same endpoint.
             async function requestReview(primary) {
               const chain = [primary, ...(Array.isArray(FALLBACKS[primary]) ? FALLBACKS[primary] : [])];
               const tried = [];
@@ -490,7 +556,7 @@ jobs:
                 tried.push(`${model} -> HTTP ${response?.status ?? 'request failed'} (${attempts ?? 0} attempt(s))`);
                 if (stopFallbacks && model !== chain[chain.length - 1]) {
                   stoppedSharedLane = true;
-                  console.log(`[${primary}] ${failureKind} affects the shared Model Studio lane; skipping same-endpoint fallback requests.`);
+                  console.log(`[${primary}] ${failureKind} affects the shared ${providerOf(primary)} lane; skipping same-provider fallback requests.`);
                   break;
                 }
                 if (model !== chain[chain.length - 1]) {
@@ -504,7 +570,7 @@ jobs:
               const status = lastResponse?.status ?? 'request failed';
               const isServerSide = typeof status === 'number' && status >= 500;
               const stoppedSummary = stoppedSharedLane
-                ? `The failure applies to the shared Model Studio endpoint, so same-endpoint fallbacks were skipped to avoid duplicate requests. Reason: ${lastFailureKind}.`
+                ? `The failure applies to the shared ${providerOf(primary)} endpoint, so same-provider fallbacks were skipped to avoid duplicate requests. Reason: ${lastFailureKind}.`
                 : `Review attempts did not produce a usable response. Tried: ${tried.join('; ')}.`;
               const fence = '```';
               const snippet = failText.replace(/`/g, "'").slice(0, 600);
@@ -524,7 +590,7 @@ jobs:
                   : lastFailureKind === 'quota-exhausted'
                     ? 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.'
                     : lastFailureKind === 'authentication-failed'
-                      ? 'Action needed: repair the shared Model Studio API key or authentication configuration.'
+                      ? `Action needed: repair the shared ${providerOf(primary)} API key or authentication configuration.`
                       : lastFailureKind === 'endpoint-unavailable'
                         ? 'Action needed: the configured Model Studio endpoint remained unreachable after retries. Same-endpoint model fallbacks cannot bypass this network failure.'
                   : upstreamExhausted

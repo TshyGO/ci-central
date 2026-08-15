@@ -68,9 +68,9 @@ PR_AGENT_LANE_C_API_BASE
 
 密钥不写入配置、日志、命令参数或提交。脚本通过安全提示读取 Key，并从 stdin 交给 `gh secret set`。
 
-### 一次性迁移兼容层
+### Caller 迁移状态
 
-在四个 caller 全部切换到固定 Lane 槽位前，reusable workflow 暂时声明旧的 `PR_AGENT_OPENAI_*`、`PR_AGENT_TENCENT_*` 和 `PR_AGENT_GOOGLE_AI_KEY`，仅在对应 Lane 新槽位为空时回退读取。缺少凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。所有 caller 和 Lane Secret 验证完成后，必须从中央 workflow 删除这组旧声明和 `LEGACY_*` 环境映射；仓库 JSON 和最终 caller 不得引用它们。
+四个仓库 caller 已全部切换到固定 Lane A/B/C 槽位。reusable workflow 不再声明或读取任何旧供应商命名 Secret；缺少固定槽位凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。
 
 ## 配置契约
 

@@ -95,7 +95,7 @@ jobs:
               },
               C: {
                 apiKey: process.env.LANE_C_KEY || process.env.LEGACY_GOOGLE_AI_KEY,
-                baseUrl: (process.env.LANE_C_API_BASE || (process.env.LEGACY_GOOGLE_AI_KEY ? 'https://generativelanguage.googleapis.com/v1beta' : '')).replace(/\/$/, ''),
+                baseUrl: (process.env.LANE_C_API_BASE || ((process.env.LANE_C_KEY || process.env.LEGACY_GOOGLE_AI_KEY) ? 'https://generativelanguage.googleapis.com/v1beta' : '')).replace(/\/$/, ''),
               },
             };
             for (const lane of lanes) {

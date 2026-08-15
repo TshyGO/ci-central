@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "repository": "TshyGO/NebulaLab-Docs",
+  "review_policy": {
+    "system_prompt": "You are an experienced code reviewer. First read the linked issue background when provided, then judge whether the pull request addresses it. Review correctness, security, maintainability, documentation accuracy, and CI or configuration risks. Return concise Markdown in Chinese. Always reserve enough output budget for the final Markdown review and never expose hidden reasoning. If there are no actionable issues, say so clearly and mention residual risks.",
+    "diff_char_budget": 100000,
+    "request_timeout_ms": 300000,
+    "model_budget_ms": 360000,
+    "max_attempts": 3
+  },
+  "lanes": [
+    { "id": "A", "provider": "alibaba", "protocol": "openai-chat-completions", "primary": { "id": "qwen3.8-max", "label": "Qwen3.8-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [{ "id": "kimi-k3", "label": "Kimi-K3", "context_profile": "kimi-k3-throttled", "max_output_tokens": 8192 }] },
+    { "id": "B", "provider": "tencent", "protocol": "openai-chat-completions", "primary": { "id": "glm-5.2", "label": "GLM-5.2", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [{ "id": "deepseek/deepseek-v4-pro", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }] },
+    { "id": "C", "provider": "google", "protocol": "google-generate-content", "primary": { "id": "gemini-3.7-flash", "label": "Gemini-3.7-Flash", "context_profile": "full", "max_output_tokens": 16384 }, "fallbacks": [] }
+  ]
+}

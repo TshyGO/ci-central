@@ -1,0 +1,40 @@
+name: AI PR Review
+
+# Thin caller: all model/provider/retry policy lives in the reusable workflow.
+# This file only maps the six stable Lane credential slots.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: ai-pr-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-pr-review:
+    if: |
+      github.event.sender.type != 'Bot' &&
+      (
+        github.event_name == 'pull_request' ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request != null &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+          startsWith(github.event.comment.body, '/review')
+        )
+      )
+    uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    secrets:
+      PR_AGENT_LANE_A_KEY: ${{ secrets.PR_AGENT_LANE_A_KEY }}
+      PR_AGENT_LANE_A_API_BASE: ${{ secrets.PR_AGENT_LANE_A_API_BASE }}
+      PR_AGENT_LANE_B_KEY: ${{ secrets.PR_AGENT_LANE_B_KEY }}
+      PR_AGENT_LANE_B_API_BASE: ${{ secrets.PR_AGENT_LANE_B_API_BASE }}
+      PR_AGENT_LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
+      PR_AGENT_LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}

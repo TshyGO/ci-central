@@ -19,17 +19,6 @@ on:
         required: false
       PR_AGENT_LANE_C_API_BASE:
         required: false
-      # Temporary migration bridge. Remove after every caller maps the fixed Lane slots.
-      PR_AGENT_OPENAI_KEY:
-        required: false
-      PR_AGENT_OPENAI_API_BASE:
-        required: false
-      PR_AGENT_TENCENT_KEY:
-        required: false
-      PR_AGENT_TENCENT_API_BASE:
-        required: false
-      PR_AGENT_GOOGLE_AI_KEY:
-        required: false
 
 jobs:
   ai-pr-review:
@@ -71,11 +60,6 @@ jobs:
           LANE_B_API_BASE: ${{ secrets.PR_AGENT_LANE_B_API_BASE }}
           LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
           LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
-          LEGACY_OPENAI_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
-          LEGACY_OPENAI_API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
-          LEGACY_TENCENT_KEY: ${{ secrets.PR_AGENT_TENCENT_KEY }}
-          LEGACY_TENCENT_API_BASE: ${{ secrets.PR_AGENT_TENCENT_API_BASE }}
-          LEGACY_GOOGLE_AI_KEY: ${{ secrets.PR_AGENT_GOOGLE_AI_KEY }}
           PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
         with:
           script: |
@@ -97,16 +81,16 @@ jobs:
             }
             const laneCredentials = {
               A: {
-                apiKey: process.env.LANE_A_KEY || process.env.LEGACY_OPENAI_KEY,
-                baseUrl: (process.env.LANE_A_API_BASE || process.env.LEGACY_OPENAI_API_BASE || '').replace(/\/$/, ''),
+                apiKey: process.env.LANE_A_KEY,
+                baseUrl: (process.env.LANE_A_API_BASE || '').replace(/\/$/, ''),
               },
               B: {
-                apiKey: process.env.LANE_B_KEY || process.env.LEGACY_TENCENT_KEY,
-                baseUrl: (process.env.LANE_B_API_BASE || process.env.LEGACY_TENCENT_API_BASE || '').replace(/\/$/, ''),
+                apiKey: process.env.LANE_B_KEY,
+                baseUrl: (process.env.LANE_B_API_BASE || '').replace(/\/$/, ''),
               },
               C: {
-                apiKey: process.env.LANE_C_KEY || process.env.LEGACY_GOOGLE_AI_KEY,
-                baseUrl: (process.env.LANE_C_API_BASE || ((process.env.LANE_C_KEY || process.env.LEGACY_GOOGLE_AI_KEY) ? 'https://generativelanguage.googleapis.com/v1beta' : '')).replace(/\/$/, ''),
+                apiKey: process.env.LANE_C_KEY,
+                baseUrl: (process.env.LANE_C_API_BASE || (process.env.LANE_C_KEY ? 'https://generativelanguage.googleapis.com/v1beta' : '')).replace(/\/$/, ''),
               },
             };
             for (const lane of lanes) {

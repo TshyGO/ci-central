@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const raw = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-review.yml'), 'utf8').split('\n');
 const workflowText = raw.join('\n');
+const callerText = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-agent.yml'), 'utf8');
 const start = raw.findIndex((line) => line.trim() === 'script: |');
 if (start < 0) throw new Error('script block not found');
 const lines = [];
@@ -116,7 +117,13 @@ check('workflow resolves repository config and exposes only fixed lane slots', w
 check('config resolver is checked out at the reusable workflow commit', workflowText.includes('ref: ${{ github.job_workflow_sha }}')
   && !workflowText.includes('github.workflow_ref')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
-check('legacy provider slots are marked as a temporary migration bridge', workflowText.includes('Temporary migration bridge. Remove after every caller maps the fixed Lane slots.'));
+check('reusable workflow accepts only fixed Lane secret slots',
+  !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']
+    .some((name) => workflowText.includes(name)));
+check('central repository has the same thin six-slot caller', callerText.includes('uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main')
+  && ['A', 'B', 'C'].every((lane) => callerText.includes(`PR_AGENT_LANE_${lane}_KEY`) && callerText.includes(`PR_AGENT_LANE_${lane}_API_BASE`))
+  && callerText.includes('cancel-in-progress: true')
+  && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job centrally cancels superseded reviews', workflowText.includes('cancel-in-progress: true'));
 
 let r = await scenario(healthy);
@@ -139,15 +146,6 @@ check('protocol and credentials come from lanes', r.captured.find(({ lane }) => 
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
   && r.captured.find(({ lane }) => lane === 'C')?.headers['x-goog-api-key'] === 'lane-c-key');
-
-r = await scenario(healthy, {
-  LANE_A_KEY: '', LANE_A_API_BASE: '', LANE_C_KEY: '', LANE_C_API_BASE: '',
-  LEGACY_OPENAI_KEY: 'legacy-a-key', LEGACY_OPENAI_API_BASE: 'https://lane-a.example.test/v1',
-  LEGACY_GOOGLE_AI_KEY: 'legacy-c-key',
-});
-check('temporary legacy bridge keeps existing Alibaba and Google callers operational',
-  r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer legacy-a-key'
-    && r.captured.find(({ lane }) => lane === 'C')?.headers['x-goog-api-key'] === 'legacy-c-key');
 
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Kimi only after Qwen exhausts retries', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 3 && r.captured.filter(({ model }) => model === 'kimi-k3').length === 1);
@@ -218,7 +216,6 @@ check('an unprovisioned lane emits one diagnostic without blocking healthy lanes
 
 r = await scenario(healthy, {
   LANE_A_KEY: '', LANE_A_API_BASE: '', LANE_B_KEY: '', LANE_B_API_BASE: '', LANE_C_KEY: '', LANE_C_API_BASE: '',
-  LEGACY_OPENAI_KEY: '', LEGACY_OPENAI_API_BASE: '', LEGACY_TENCENT_KEY: '', LEGACY_TENCENT_API_BASE: '', LEGACY_GOOGLE_AI_KEY: '',
 });
 check('diagnostic-only execution fails the job after preserving lane diagnostics', /no model review was generated/.test(r.error?.message || '')
   && r.captured.length === 0 && r.posted.length === 3);

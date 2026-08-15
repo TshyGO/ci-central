@@ -19,13 +19,13 @@ const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'se
 
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
 const files = [patch('src/a.ts', 100), patch('tests/a.test.ts', 100)];
-const pull = { number: 42, title: 'Test', user: { login: 'octocat' }, base: { ref: 'main' }, head: { ref: 'feature' }, body: '' };
+const pull = { number: 42, title: 'Test', state: 'open', user: { login: 'octocat' }, base: { ref: 'main' }, head: { ref: 'feature', sha: 'deadbeef' }, body: '' };
 const context = { payload: { pull_request: { number: 42, head: { sha: 'deadbeef' } } }, repo: { owner: 'TshyGO', repo: 'Example' }, serverUrl: 'https://github.com', runId: 1 };
 const env = {
   OPENAI_API_KEY: 'test-key', OPENAI_API_BASE: 'https://example.test/v1/', GOOGLE_AI_API_KEY: 'google-test-key',
   PR_REVIEW_MODELS: 'glm-5.2,gemini-3.7-flash',
-  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","deepseek-v4-pro":"DeepSeek-V4-Pro","gemini-3.7-flash":"Gemini-3.7-Flash"}',
-  PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}',
+  PR_REVIEW_MODEL_LABELS: '{"glm-5.2":"GLM-5.2","qwen3.8-max":"Qwen3.8-Max","gemini-3.7-flash":"Gemini-3.7-Flash"}',
+  PR_REVIEW_FALLBACKS: '{"glm-5.2":["qwen3.8-max"]}',
   PR_REVIEW_DIFF_BUDGET: '100000',
 };
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
@@ -42,11 +42,17 @@ const geminiResult = (content, { finish = 'STOP', thought = '' } = {}) => JSON.s
   usageMetadata: { promptTokenCount: 1 },
 });
 
-async function scenario(route, overrides = {}) {
+async function scenario(route, overrides = {}, options = {}) {
   const posted = [], captured = [], urls = [], logs = [];
+  const pulls = options.pulls || [pull];
+  let pullGets = 0;
   const github = {
     rest: {
-      pulls: { get: async () => ({ data: pull }), listFiles: 'files', listCommits: 'commits' },
+      pulls: {
+        get: async () => ({ data: pulls[Math.min(pullGets++, pulls.length - 1)] }),
+        listFiles: 'files',
+        listCommits: 'commits',
+      },
       issues: { get: async () => { throw new Error('not found'); }, createComment: async ({ body }) => { posted.push(body); return { data: {} }; } },
     },
     paginate: async (which) => which === 'files' ? files : [{ commit: { message: 'test' } }],
@@ -58,19 +64,22 @@ async function scenario(route, overrides = {}) {
     return route(model, body);
   };
   let error;
-  try { await runScript(github, context, { env: { ...env, ...overrides } }, fetch, (fn) => setTimeout(fn, 0), clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }); }
+  try { await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn) => setTimeout(fn, 0), clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }); }
   catch (e) { error = e; }
-  return { posted, captured, urls, logs, error };
+  return { posted, captured, urls, logs, error, pullGets };
 }
 
 const checks = [];
 const check = (name, condition) => { checks.push(condition); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 
 check(
-  'workflow defaults contain one Alibaba primary, two ordered fallbacks, and independent Gemini',
+  'workflow defaults contain one Alibaba primary, one fallback, and independent Gemini',
   workflowText.includes('default: "glm-5.2,gemini-3.7-flash"')
-    && workflowText.includes('default: \'{"glm-5.2":["qwen3.8-max","deepseek-v4-pro"]}\''),
+    && workflowText.includes('default: \'{"glm-5.2":["qwen3.8-max"]}\'')
+    && !workflowText.includes('deepseek-v4-pro'),
 );
+check('reusable job centrally cancels superseded automatic reviews', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}')
+  && workflowText.includes('cancel-in-progress: true'));
 
 let r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : result(model, `# review ${model}`)));
 check('healthy default calls GLM and independent Gemini', r.captured.map((x) => x.model).sort().join(',') === 'gemini-3.7-flash,glm-5.2');
@@ -83,6 +92,10 @@ check('healthy default posts one Alibaba comment and one Gemini comment', r.post
 check('reasoning never reaches a PR comment', !r.posted.some((body) => body.includes('private thinking')));
 check('Gemini thought parts never reach a PR comment', !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
 check('healthy default uses GLM and Gemini labels', r.posted.some((body) => body.includes('GLM-5.2')) && r.posted.some((body) => body.includes('Gemini-3.7-Flash')));
+check('full review context and output budgets remain unchanged', studioBodies.every((body) => body.messages[1].content.includes('Changed files and patches:'))
+  && workflowText.includes('default: 100000')
+  && workflowText.includes('maxOutputTokens: 16384'));
+check('prompt asks reasoning models to preserve a final review', studioBodies.every((body) => body.messages[0].content.includes('reserve enough output budget for the final Markdown review')));
 
 r = await scenario((model) => model === 'glm-5.2'
   ? reply(503, '{"error":"unavailable"}')
@@ -97,12 +110,43 @@ check('Alibaba fallback still posts one lane comment beside Gemini', r.posted.le
 r = await scenario((model) => ['glm-5.2', 'qwen3.8-max'].includes(model)
   ? reply(503, '{"error":"unavailable"}')
   : reply(200, model === 'gemini-3.7-flash' ? geminiResult(`# review ${model}`) : result(model, `# review ${model}`)));
-check('DeepSeek runs only after GLM and Qwen both fail', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3
-  && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 3
-  && r.captured.filter((entry) => entry.model === 'deepseek-v4-pro').length === 1);
-check('second fallback is marked as degraded without replacing Gemini', r.posted.length === 2
-  && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by deepseek-v4-pro'))
+check('a model-specific outage still exhausts GLM and Qwen before diagnosing the lane', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3
+  && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 3);
+check('failed Alibaba lane does not replace independent Gemini', r.posted.length === 2
+  && r.posted.some((body) => body.includes('AI review was not generated'))
   && r.posted.some((body) => body.includes('<!-- ai-pr-review-bot:gemini-3.7-flash -->')));
+
+r = await scenario((model) => model === 'glm-5.2'
+  ? reply(429, '{"error":{"code":"insufficient_quota","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 08-18 15:16:00 UTC."}}')
+  : reply(200, geminiResult('# Gemini review')));
+check('plan-wide quota exhaustion is attempted only once', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 1);
+check('plan-wide quota exhaustion skips same-plan Qwen fallback', !r.captured.some((entry) => entry.model === 'qwen3.8-max')
+  && r.logs.some((line) => line.includes('quota-exhausted') && line.includes('skipping same-endpoint fallback')));
+check('quota failure still preserves independent Gemini review', r.posted.length === 2
+  && r.posted.some((body) => body.includes('# Gemini review'))
+  && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted')));
+
+r = await scenario((model) => {
+  if (model === 'glm-5.2') throw new Error('fetch failed');
+  return reply(200, geminiResult('# Gemini review'));
+});
+check('shared endpoint fetch failure retries GLM but does not duplicate context to Qwen', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3
+  && !r.captured.some((entry) => entry.model === 'qwen3.8-max'));
+check('shared endpoint failure is explained in the diagnostic', r.posted.some((body) => body.includes('endpoint remained unreachable')));
+
+r = await scenario((model) => model === 'glm-5.2'
+  ? reply(200, '<!DOCTYPE html><html><body>verification required</body></html>')
+  : reply(200, geminiResult('# Gemini review')));
+check('HTML verification response stops the shared lane even when HTTP status is 200', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 1
+  && !r.captured.some((entry) => entry.model === 'qwen3.8-max')
+  && r.posted.some((body) => body.includes('HTML verification page')));
+
+r = await scenario((model) => model === 'glm-5.2'
+  ? reply(429, '{"error":{"code":"rate_limit_exceeded","message":"short model rate limit"}}')
+  : reply(200, model === 'gemini-3.7-flash' ? geminiResult('# Gemini review') : result(model, '# Qwen review')));
+check('ordinary model rate limit still retries and falls back for review availability', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 3
+  && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 1
+  && r.posted.some((body) => body.includes('# Qwen review')));
 
 r = await scenario((model, body) => model === 'glm-5.2'
   ? reply(503, '{"error":"unavailable"}')
@@ -119,6 +163,24 @@ check('empty final content does not publish reasoning', !r.posted.some((body) =>
 check('empty primary content moves forward to Qwen', r.captured.filter((entry) => entry.model === 'glm-5.2').length === 1
   && r.captured.filter((entry) => entry.model === 'qwen3.8-max').length === 1
   && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by qwen3.8-max')));
+
+const newerPull = { ...pull, head: { ...pull.head, sha: 'cafebabe' } };
+r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [newerPull] });
+check('event already superseded before startup makes zero model calls', r.captured.length === 0 && r.pullGets === 1
+  && r.logs.some((line) => line.includes('Skip stale review before context collection')));
+
+r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [pull, newerPull] });
+check('head changed during context collection makes zero model calls', r.captured.length === 0 && r.pullGets === 2
+  && r.logs.some((line) => line.includes('Skip stale review before model dispatch')));
+
+r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')), {}, { pulls: [pull, pull, newerPull] });
+check('head changed during model execution publishes no stale comments', r.captured.length === 2 && r.posted.length === 0 && r.pullGets === 3
+  && r.logs.some((line) => line.includes('Skip stale review before comment publishing')));
+
+const manualContext = { ...context, payload: { issue: { number: 42 } }, sha: 'defaultbranch' };
+r = await scenario((model) => reply(200, model === 'gemini-3.7-flash' ? geminiResult('# review') : result(model, '# review')), {}, { context: manualContext });
+check('manual review comments report the PR head instead of the default branch SHA', r.posted.length === 2
+  && r.posted.every((body) => body.includes('Commit: deadbee')));
 
 r = await scenario((model) => reply(200, result(model, '# review')), {
   PR_REVIEW_MODELS: 'glm-5.2,qwen3.8-max',

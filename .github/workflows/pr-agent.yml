@@ -10,7 +10,7 @@ on:
     types: [created]
 
 concurrency:
-  group: ai-pr-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:

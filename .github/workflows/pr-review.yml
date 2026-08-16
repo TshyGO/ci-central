@@ -22,10 +22,10 @@ on:
 
 jobs:
   ai-pr-review:
-    # Enforce latest-commit-wins centrally even when a thin caller forgot to enable
-    # cancellation. Keep manual /review comments isolated from pull_request pushes.
+    # Serialize every trigger for the same PR. Automatic and manual reviews update the
+    # same stable Lane comments, so allowing their event types to overlap creates races.
     concurrency:
-      group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     # Backstop only. The script bounds each model with MODEL_BUDGET_MS (~6 min) and runs
@@ -61,6 +61,7 @@ jobs:
           LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
           LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
           PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
+          PR_REVIEW_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
         with:
           script: |
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;
@@ -73,6 +74,10 @@ jobs:
             }
             if (reviewConfig.repository !== `${owner}/${repo}` || !Array.isArray(reviewConfig.lanes) || reviewConfig.lanes.length === 0) {
               throw new Error(`Central PR review config does not match ${owner}/${repo}.`);
+            }
+            const workflowSha = (process.env.PR_REVIEW_WORKFLOW_SHA || '').trim().toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(workflowSha)) {
+              throw new Error('github.job_workflow_sha must provide the full 40-character reusable workflow commit SHA.');
             }
             const lanes = reviewConfig.lanes;
             const reviewPolicy = reviewConfig.review_policy || {};
@@ -119,6 +124,55 @@ jobs:
             if (eventHeadSha && eventHeadSha !== reviewHeadSha) {
               console.log(`Skip stale review before context collection: event=${eventHeadSha.slice(0, 7)} current=${reviewHeadSha.slice(0, 7)}.`);
               return;
+            }
+
+            // A bot comment is reusable only when its machine-readable evidence proves that
+            // this exact Lane completed a valid review for both the current PR head and the
+            // current reusable-workflow revision. Legacy, diagnostic, partial, edited, or
+            // previous-workflow comments are deliberately not reusable.
+            const existingComments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pullNumber,
+              per_page: 100,
+            });
+            const evidencePattern = /<!-- ai-pr-review-evidence:v2 lane=([A-C]) head=([0-9a-f]{40}) workflow=([0-9a-f]{40}) status=(valid|diagnostic|partial) -->/i;
+            const reusableLaneIds = new Set();
+            for (const comment of existingComments) {
+              if (comment.user?.login !== 'github-actions[bot]') continue;
+              const evidence = evidencePattern.exec(comment.body || '');
+              if (!evidence) continue;
+              const [, laneId, headSha, evidenceWorkflowSha, status] = evidence;
+              const stableMarker = `<!-- ai-pr-review-bot:lane-${laneId.toUpperCase()} -->`;
+              if (comment.body.includes(stableMarker)
+                  && headSha.toLowerCase() === reviewHeadSha.toLowerCase()
+                  && evidenceWorkflowSha.toLowerCase() === workflowSha
+                  && status.toLowerCase() === 'valid') {
+                reusableLaneIds.add(laneId.toUpperCase());
+              }
+            }
+            const isManualReview = context.eventName === 'issue_comment';
+            const lanesToReview = isManualReview
+              ? lanes
+              : lanes.filter((lane) => !reusableLaneIds.has(lane.id));
+            if (reusableLaneIds.size) {
+              console.log(`Reusable valid review evidence for ${reviewHeadSha.slice(0, 7)}: ${[...reusableLaneIds].sort().map((lane) => `Lane ${lane}`).join(', ')}.`);
+            }
+            if (lanesToReview.length === 0) {
+              const { data: dedupePull } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pullNumber,
+              });
+              if (dedupePull.head.sha !== reviewHeadSha || dedupePull.state !== 'open') {
+                console.log(`Skip stale evidence reuse: reviewed=${reviewHeadSha.slice(0, 7)} current=${dedupePull.head.sha.slice(0, 7)} state=${dedupePull.state || 'unknown'}.`);
+                return;
+              }
+              console.log(`All configured Lanes already have valid review evidence for head ${reviewHeadSha} at workflow ${workflowSha}; skipping model requests.`);
+              return;
+            }
+            if (isManualReview) {
+              console.log('Manual /review bypasses same-HEAD evidence reuse and forces every configured Lane to run.');
             }
 
             const files = await github.paginate(github.rest.pulls.listFiles, {
@@ -442,7 +496,7 @@ jobs:
                 if (review && finishReason && finishReason !== 'STOP') {
                   review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
                 }
-                return { review, reasoningLength: 0 };
+                return { review, reasoningLength: 0, complete: !finishReason || finishReason === 'STOP' };
               }
               const choice = payload?.choices?.[0];
               const message = choice?.message;
@@ -456,7 +510,7 @@ jobs:
               if (review && finishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }
-              return { review, reasoningLength: reasoning.length };
+              return { review, reasoningLength: reasoning.length, complete: !finishReason || finishReason === 'stop' };
             }
 
             // Try the primary model, then same-provider fallbacks. Shared provider failures
@@ -473,6 +527,7 @@ jobs:
                   servedBy: null,
                   reasoningLength: 0,
                   degraded: false,
+                  status: 'diagnostic',
                   review: [
                     '> AI review was not generated.',
                     '',
@@ -497,9 +552,17 @@ jobs:
                 lastFailureKind = failureKind;
                 if (response?.ok) {
                   try {
-                    const { review, reasoningLength } = extractReview(lane, model, responseText);
+                    const { review, reasoningLength, complete } = extractReview(lane, model, responseText);
                     if (review) {
-                      return { lane, primary, servedBy: model, review, reasoningLength, degraded: model !== primary };
+                      return {
+                        lane,
+                        primary,
+                        servedBy: model,
+                        review,
+                        reasoningLength,
+                        degraded: model !== primary,
+                        status: complete ? 'valid' : 'partial',
+                      };
                     }
                     console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
                   } catch (error) {
@@ -553,7 +616,7 @@ jobs:
                       : 'Action needed: inspect the upstream response above to identify the request or auth problem.',
               ].join('\n');
 
-              return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false };
+              return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false, status: 'diagnostic' };
             }
 
             // Context collection can take long enough for another push to land. Re-read the
@@ -573,7 +636,7 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             // Run lanes independently in parallel. A healthy lane emits exactly one comment;
             // fallbacks are sequential inside that lane and can never cross credentials.
-            const settled = await Promise.allSettled(lanes.map((lane) => requestReview(lane)));
+            const settled = await Promise.allSettled(lanesToReview.map((lane) => requestReview(lane)));
 
             // Model calls can outlive the commit they reviewed. Do not attach completed
             // results to a newer head (or to a PR that was closed while they were running).
@@ -588,21 +651,15 @@ jobs:
             }
 
             let posted = 0;
-            let reviewed = 0;
-            const existingComments = await github.paginate(github.rest.issues.listComments, {
-              owner,
-              repo,
-              issue_number: pullNumber,
-              per_page: 100,
-            });
+            const validLaneIds = new Set(isManualReview ? [] : reusableLaneIds);
             for (let i = 0; i < settled.length; i++) {
-              const lane = lanes[i];
+              const lane = lanesToReview[i];
               const primary = lane.primary;
               if (settled[i].status === 'rejected') {
                 console.log(`[Lane ${lane.id}/${primary.id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
                 continue;
               }
-              const { servedBy, review, reasoningLength, degraded } = settled[i].value;
+              const { servedBy, review, reasoningLength, degraded, status } = settled[i].value;
               const modelLine = degraded
                 ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
                 : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
@@ -611,6 +668,7 @@ jobs:
                 : [];
               const body = [
                 `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
+                `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
                 `## AI PR Review · Lane ${lane.id} · ${primary.label}`,
                 '',
                 ...banner,
@@ -647,8 +705,8 @@ jobs:
                   }
                 }
                 posted++;
-                if (servedBy) reviewed++;
-                console.log(`${currentComment ? 'Updated' : 'Created'} AI PR Review comment ${publishedComment.id} for Lane ${lane.id}.`);
+                if (status === 'valid') validLaneIds.add(lane.id);
+                console.log(`${currentComment ? 'Updated' : 'Created'} AI PR Review comment ${publishedComment.id} for Lane ${lane.id} with status=${status}.`);
               } catch (error) {
                 // One failed comment must not swallow the others.
                 console.log(`Failed to post comment for Lane ${lane.id}: ${error?.message || error}`);
@@ -657,6 +715,9 @@ jobs:
             if (posted === 0) {
               throw new Error('No AI PR Review comment could be posted for any configured model.');
             }
-            if (reviewed === 0) {
-              throw new Error('Every lane produced a diagnostic only; no model review was generated.');
+            const invalidLaneIds = lanes
+              .map((lane) => lane.id)
+              .filter((laneId) => !validLaneIds.has(laneId));
+            if (invalidLaneIds.length) {
+              throw new Error(`Required review evidence is not valid for ${invalidLaneIds.map((laneId) => `Lane ${laneId}`).join(', ')} at head ${reviewHeadSha}.`);
             }

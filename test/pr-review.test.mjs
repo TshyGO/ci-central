@@ -21,14 +21,24 @@ const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'se
 const centralConfig = JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', 'TshyGO__NebulaLab.json'), 'utf8'));
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
 const files = [patch('src/a.ts', 100), patch('tests/a.test.ts', 100)];
-const pull = { number: 42, title: 'Test', state: 'open', user: { login: 'octocat' }, base: { ref: 'main' }, head: { ref: 'feature', sha: 'deadbeef' }, body: '' };
-const context = { payload: { pull_request: { number: 42, head: { sha: 'deadbeef' } } }, repo: { owner: 'TshyGO', repo: 'NebulaLab' }, serverUrl: 'https://github.com', runId: 1 };
+const headSha = 'deadbeef'.repeat(5);
+const workflowSha = 'feedface'.repeat(5);
+const pull = { number: 42, title: 'Test', state: 'open', user: { login: 'octocat' }, base: { ref: 'main' }, head: { ref: 'feature', sha: headSha }, body: '' };
+const context = { eventName: 'pull_request', payload: { pull_request: { number: 42, head: { sha: headSha } } }, repo: { owner: 'TshyGO', repo: 'NebulaLab' }, serverUrl: 'https://github.com', runId: 1 };
 const env = {
   LANE_A_KEY: 'lane-a-key', LANE_A_API_BASE: 'https://lane-a.example.test/v1/',
   LANE_B_KEY: 'lane-b-key', LANE_B_API_BASE: 'https://lane-b.example.test/v1/',
   LANE_C_KEY: 'lane-c-key', LANE_C_API_BASE: 'https://lane-c.example.test/v1beta/',
   PR_REVIEW_CONFIG: JSON.stringify(centralConfig),
+  PR_REVIEW_WORKFLOW_SHA: workflowSha,
 };
+const evidenceComment = (lane, { head = headSha, workflow = workflowSha, status = 'valid' } = {}) => ({
+  body: [
+    `<!-- ai-pr-review-bot:lane-${lane} -->`,
+    `<!-- ai-pr-review-evidence:v2 lane=${lane} head=${head} workflow=${workflow} status=${status} -->`,
+    `review ${lane}`,
+  ].join('\n'),
+});
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
 const chatResult = (model, content, { reasoning = 'private thinking', finish = 'stop' } = {}) => JSON.stringify({
   model: `provider/${model}`,
@@ -122,15 +132,54 @@ check('reusable workflow accepts only fixed Lane secret slots',
     .some((name) => workflowText.includes(name)));
 check('central repository has the same thin six-slot caller', callerText.includes('uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main')
   && ['A', 'B', 'C'].every((lane) => callerText.includes(`PR_AGENT_LANE_${lane}_KEY`) && callerText.includes(`PR_AGENT_LANE_${lane}_API_BASE`))
+  && callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
   && callerText.includes('cancel-in-progress: true')
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
-check('reusable job centrally cancels superseded reviews', workflowText.includes('cancel-in-progress: true'));
+check('reusable job serializes automatic and manual triggers for one PR', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
+  && workflowText.includes('cancel-in-progress: true'));
 
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.2,C:gemini-3.7-flash');
 check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['kimi-k3', 'deepseek-v4-pro-202606'].includes(model)));
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
+check('healthy comments carry reusable v2 evidence for the full head and workflow SHAs', ['A', 'B', 'C'].every((lane) =>
+  r.posted.some((body) => body.includes(`<!-- ai-pr-review-evidence:v2 lane=${lane} head=${headSha} workflow=${workflowSha} status=valid -->`))));
+
+const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
+r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: validEvidence });
+check('automatic rerun reuses all valid same-head evidence without model calls', r.error === undefined
+  && r.captured.length === 0 && r.posted.length === 0 && r.pullGets === 2
+  && r.logs.some((line) => line.includes('skipping model requests')));
+
+r = await scenario(healthy, {}, { comments: [
+  evidenceComment('A'),
+  evidenceComment('B', { status: 'diagnostic' }),
+  evidenceComment('C', { status: 'partial' }),
+] });
+check('automatic rerun calls only missing or invalid Lanes', r.error === undefined
+  && r.captured.map(({ lane }) => lane).sort().join(',') === 'B,C'
+  && r.posted.length === 2);
+
+r = await scenario(healthy, {}, { comments: ['A', 'B', 'C'].map((lane) => evidenceComment(lane, { workflow: '0'.repeat(40) })) });
+check('evidence from an older reusable workflow revision is not reused', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
+
+const otherHeadSha = '01234567'.repeat(5);
+const otherHeadPull = { ...pull, head: { ...pull.head, sha: otherHeadSha } };
+const otherHeadContext = { ...context, payload: { pull_request: { number: 42, head: { sha: otherHeadSha } } } };
+r = await scenario(healthy, {}, { comments: validEvidence, pulls: [otherHeadPull], context: otherHeadContext });
+check('valid evidence from an older PR head is not reused', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
+
+const manualContext = { ...context, eventName: 'issue_comment', payload: { issue: { number: 42 }, comment: { body: '/review' } } };
+r = await scenario(healthy, {}, { comments: validEvidence, context: manualContext });
+check('manual /review bypasses same-head reuse and forces every Lane', r.error === undefined && r.captured.length === 3 && r.posted.length === 3
+  && r.logs.some((line) => line.includes('forces every configured Lane')));
+
+r = await scenario(healthy, {}, { comments: validEvidence.map((comment) => ({ ...comment, user: { login: 'octocat' } })) });
+check('non-bot comments cannot spoof reusable review evidence', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
+
+r = await scenario(healthy, { PR_REVIEW_WORKFLOW_SHA: '' });
+check('workflow defense requires a full reusable-workflow SHA before model calls', /40-character/.test(r.error?.message || '') && r.captured.length === 0);
 const duplicateComments = [
   { id: 10, body: '<!-- ai-pr-review-bot:lane-A -->\nold diagnostic' },
   { id: 11, body: '<!-- ai-pr-review-bot:lane-A -->\nnewer diagnostic' },
@@ -161,7 +210,9 @@ check('Lane B falls back only to DeepSeek', r.captured.filter(({ model }) => mod
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure short-circuits only its provider lane', r.captured.filter(({ lane }) => lane === 'A').length === 1
   && !r.captured.some(({ model }) => model === 'kimi-k3') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
-check('failed lane publishes one diagnostic beside healthy lane reviews', r.posted.length === 3 && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted')));
+check('failed lane publishes a diagnostic and fails the strict aggregate gate', /Lane A/.test(r.error?.message || '')
+  && r.posted.length === 3
+  && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted') && body.includes('status=diagnostic')));
 
 r = await scenario((call) => { if (call.lane === 'A') throw new Error('fetch failed'); return healthy(call); });
 check('DNS or TLS style failures retry primary but do not resend context to fallback', r.captured.filter(({ lane }) => lane === 'A').length === 3
@@ -174,6 +225,12 @@ check('optional-field rejection repairs the request inside the same lane', repai
 
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(200, chatResult(call.model, '')) : healthy(call));
 check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'kimi-k3') && !r.posted.some((body) => body.includes('private thinking')));
+
+r = await scenario((call) => call.lane === 'A'
+  ? reply(200, chatResult(call.model, '# incomplete', { finish: 'length' }))
+  : healthy(call));
+check('truncated output is marked partial and cannot satisfy the strict aggregate gate', /Lane A/.test(r.error?.message || '')
+  && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial')));
 
 const sameModelConfig = structuredClone(centralConfig);
 sameModelConfig.lanes[1].primary = { ...sameModelConfig.lanes[1].primary, id: 'qwen3.8-max', label: 'Qwen via Lane B' };
@@ -208,7 +265,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(missingFallbacksC
 check('workflow defense rejects a missing fallback array before model calls', /fallbacks must be an array/.test(r.error?.message || '') && r.captured.length === 0);
 
 r = await scenario(healthy, { LANE_B_KEY: '' });
-check('an unprovisioned lane emits one diagnostic without blocking healthy lanes', r.error === undefined
+check('an unprovisioned lane preserves healthy reviews but fails the strict aggregate gate', /Lane B/.test(r.error?.message || '')
   && r.captured.length === 2
   && !r.captured.some(({ lane }) => lane === 'B')
   && r.posted.length === 3
@@ -217,10 +274,13 @@ check('an unprovisioned lane emits one diagnostic without blocking healthy lanes
 r = await scenario(healthy, {
   LANE_A_KEY: '', LANE_A_API_BASE: '', LANE_B_KEY: '', LANE_B_API_BASE: '', LANE_C_KEY: '', LANE_C_API_BASE: '',
 });
-check('diagnostic-only execution fails the job after preserving lane diagnostics', /no model review was generated/.test(r.error?.message || '')
+check('diagnostic-only execution fails the job after preserving lane diagnostics', /Lane A, Lane B, Lane C/.test(r.error?.message || '')
   && r.captured.length === 0 && r.posted.length === 3);
 
-const newerPull = { ...pull, head: { ...pull.head, sha: 'cafebabe' } };
+const newerPull = { ...pull, head: { ...pull.head, sha: 'cafebabe'.repeat(5) } };
+r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: validEvidence, pulls: [pull, newerPull] });
+check('head change during evidence reuse prevents a stale green result', r.captured.length === 0 && r.posted.length === 0
+  && r.logs.some((line) => line.includes('Skip stale evidence reuse')));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [newerPull] });
 check('superseded event makes zero model calls before context collection', r.captured.length === 0 && r.logs.some((line) => line.includes('before context collection')));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [pull, newerPull] });
@@ -229,6 +289,7 @@ r = await scenario(healthy, {}, { pulls: [pull, pull, newerPull] });
 check('head change during model execution publishes no stale comments', r.captured.length === 3 && r.posted.length === 0 && r.logs.some((line) => line.includes('before comment publishing')));
 
 r = await scenario(healthy, {}, { rejectComment: (body) => body.includes('lane-A') });
-check('one comment failure does not swallow healthy independent lanes', r.posted.length === 2 && r.posted.some((body) => body.includes('lane-B')) && r.posted.some((body) => body.includes('lane-C')));
+check('one comment failure preserves healthy independent lanes but fails the aggregate gate', /Lane A/.test(r.error?.message || '')
+  && r.posted.length === 2 && r.posted.some((body) => body.includes('lane-B')) && r.posted.some((body) => body.includes('lane-C')));
 
 if (checks.some((value) => !value)) process.exitCode = 1;

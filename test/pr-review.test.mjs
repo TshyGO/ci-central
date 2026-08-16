@@ -135,7 +135,7 @@ check('central repository has the same thin six-slot caller', callerText.include
   && callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
   && callerText.includes('cancel-in-progress: true')
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
-check('reusable job serializes automatic and manual triggers for one PR', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
+check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
   && workflowText.includes('cancel-in-progress: true')
   && workflowText.includes('timeout-minutes: 30'));
 
@@ -202,6 +202,14 @@ r = await scenario(healthy, {}, { comments: duplicateComments });
 check('reruns update one stable comment per lane and remove prior duplicates', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.comments.filter(({ body }) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('reasoning and Gemini thought parts never reach comments', !r.posted.some((body) => body.includes('private thinking') || body.includes('PRIVATE GEMINI THOUGHT')));
+
+r = await scenario((call) => reply(200, call.lane === 'C'
+  ? geminiResult(`# review ${call.model}`, { finish: 'stop' })
+  : chatResult(call.model, `# review ${call.model}`, { finish: 'STOP' })));
+check('finish reasons are normalized across provider casing', r.error === undefined
+  && ['A', 'B', 'C'].every((lane) => r.posted.some((body) => body.includes(`lane-${lane}`) && body.includes('status=valid')))
+  && !r.posted.some((body) => body.includes('可能不完整')));
+
 check('full-context primaries preserve input and output budgets', r.captured.filter(({ lane }) => lane !== 'C').every(({ body }) => body.messages[1].content.includes('Changed files and patches:') && body.max_tokens === 16384)
   && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 16384);
 
@@ -249,10 +257,10 @@ r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(200, chatResul
 check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'kimi-k3') && !r.posted.some((body) => body.includes('private thinking')));
 
 r = await scenario((call) => call.lane === 'A'
-  ? reply(200, chatResult(call.model, '# incomplete', { finish: 'length' }))
+  ? reply(200, chatResult(call.model, '# incomplete', { finish: 'LENGTH' }))
   : healthy(call));
 check('truncated output is marked partial and cannot satisfy the strict aggregate gate', /Lane A/.test(r.error?.message || '')
-  && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial')));
+  && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial') && body.includes('max_tokens')));
 
 const sameModelConfig = structuredClone(centralConfig);
 sameModelConfig.lanes[1].primary = { ...sameModelConfig.lanes[1].primary, id: 'qwen3.8-max', label: 'Qwen via Lane B' };

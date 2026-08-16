@@ -22,8 +22,8 @@ on:
 
 jobs:
   ai-pr-review:
-    # Serialize every trigger for the same PR. Automatic and manual reviews update the
-    # same stable Lane comments, so allowing their event types to overlap creates races.
+    # Put every trigger for the same PR in one latest-wins group. Automatic and manual
+    # reviews update the same stable Lane comments, so a new trigger cancels the older run.
     concurrency:
       group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -500,26 +500,28 @@ jobs:
                   .map((part) => part?.text || '')
                   .join('\n'));
                 const finishReason = candidate?.finishReason;
+                const normalizedFinishReason = typeof finishReason === 'string' ? finishReason.toLowerCase() : '';
                 console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
                 let review = content;
-                if (review && finishReason && finishReason !== 'STOP') {
+                if (review && normalizedFinishReason && normalizedFinishReason !== 'stop') {
                   review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
                 }
-                return { review, reasoningLength: 0, complete: !finishReason || finishReason === 'STOP' };
+                return { review, reasoningLength: 0, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
               }
               const choice = payload?.choices?.[0];
               const message = choice?.message;
               const finishReason = choice?.finish_reason;
+              const normalizedFinishReason = typeof finishReason === 'string' ? finishReason.toLowerCase() : '';
               const reasoning = message?.reasoning_content || '';
               const content = stripThinking(message?.content);
               // Never publish provider reasoning as a review. An empty final response makes
               // the caller continue to its configured fallback instead.
               let review = content;
               console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
-              if (review && finishReason === 'length') {
+              if (review && normalizedFinishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }
-              return { review, reasoningLength: reasoning.length, complete: !finishReason || finishReason === 'stop' };
+              return { review, reasoningLength: reasoning.length, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
             }
 
             // Try the primary model, then same-provider fallbacks. Shared provider failures

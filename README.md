@@ -7,7 +7,7 @@ NebulaLab 系列仓库的 AI PR Review 唯一中央实现。业务仓库只保�
 ```text
 业务仓库 .github/workflows/pr-agent.yml
   ├─ PR 与 /review 触发
-  ├─ 按 PR 串行化所有自动与手动触发，并声明权限
+  ├─ 按 PR 合并自动与手动触发的并发组，新触发取消旧运行
   ├─ uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
   └─ 只映射 PR_AGENT_LANE_{A,B,C}_{KEY,API_BASE}
                          │
@@ -89,7 +89,7 @@ reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable j
 
 ## 精度、去重与节流保证
 
-- reusable job 按仓库和 PR 号启用 `cancel-in-progress: true`，自动 PR 事件与手动 `/review` 不会并发更新同一组评论。
+- reusable job 按仓库和 PR 号启用 `cancel-in-progress: true`：自动 PR 事件与手动 `/review` 共享同一并发组，新触发取消旧运行，不会并发更新同一组评论。
 - 上下文收集前、模型调用前、发布评论前分别核对 PR head SHA。
 - 每条 Lane 评论都包含 v2 机器证据：Lane、完整 40 位 head SHA、`github.job_workflow_sha` 和 `valid`、`diagnostic` 或 `partial` 状态。
 - 自动触发只复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；缺失、旧版、诊断和不完整 Lane 会单独重跑。

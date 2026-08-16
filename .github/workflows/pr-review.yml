@@ -28,10 +28,10 @@ jobs:
       group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    # Backstop only. The script bounds each model with MODEL_BUDGET_MS (~6 min) and runs
-    # lanes in parallel, so a real run finishes in a few minutes; this just guarantees a
-    # hung upstream can never hold a runner the way one 26-minute job did.
-    timeout-minutes: 20
+    # Backstop only. Repository policy bounds each model independently and lanes run in
+    # parallel. The public ci-central profile allows 32K reasoning-heavy Lane B responses,
+    # including one same-Lane fallback, while this cap still prevents an unbounded runner.
+    timeout-minutes: 30
     permissions:
       contents: read
       issues: write
@@ -305,11 +305,10 @@ jobs:
             // Model ids are scoped to a lane, never globally. The same model id may be routed
             // through two providers without changing credentials or fallback ownership.
             const maxAttempts = Number(reviewPolicy.max_attempts) || 3;
-            // A healthy response with heavy reasoning has been observed at ~270s, so give one
-            // attempt 5 minutes. But an upstream can also accept the connection and then hang
-            // without replying; MODEL_BUDGET_MS is a hard wall-clock cap so retries + the
-            // field-repair loop can never run away (the regression that let one job spin for
-            // 26 minutes was a 480s timeout x 4 attempts x a fallback chain).
+            // A healthy response with heavy reasoning has been observed at ~270s. The default
+            // request window is 5 minutes; repository policy may raise it for a larger output
+            // ceiling (ci-central Lane B uses 10 minutes). MODEL_BUDGET_MS remains the hard
+            // per-model wall-clock cap for retries and field-repair loops.
             const requestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
             const MODEL_BUDGET_MS = Number(reviewPolicy.model_budget_ms) || 360000;
 

@@ -96,8 +96,9 @@ reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable j
 - 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
 - Lane 主模型成功时绝不调用 fallback。
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
-- Qwen、GLM、Gemini 保留完整审核上下文和 16384 输出上限。
+- Qwen、GLM、Gemini 保留完整审核上下文；三个业务仓维持 16384 输出上限。公开的 `ci-central` 元 CI 审核更容易触发长推理，因此仅其 Lane B 的 GLM/DeepSeek completion ceiling 为 32768，单请求/单模型预算分别为 10/12 分钟。
 - Kimi 只在 Qwen 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。
+- reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。
 

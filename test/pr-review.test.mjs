@@ -136,7 +136,8 @@ check('central repository has the same thin six-slot caller', callerText.include
   && callerText.includes('cancel-in-progress: true')
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job serializes automatic and manual triggers for one PR', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
-  && workflowText.includes('cancel-in-progress: true'));
+  && workflowText.includes('cancel-in-progress: true')
+  && workflowText.includes('timeout-minutes: 30'));
 
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.2,C:gemini-3.7-flash');
@@ -202,6 +203,15 @@ check('reruns update one stable comment per lane and remove prior duplicates', r
   && ['A', 'B', 'C'].every((lane) => r.comments.filter(({ body }) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('reasoning and Gemini thought parts never reach comments', !r.posted.some((body) => body.includes('private thinking') || body.includes('PRIVATE GEMINI THOUGHT')));
 check('full-context primaries preserve input and output budgets', r.captured.filter(({ lane }) => lane !== 'C').every(({ body }) => body.messages[1].content.includes('Changed files and patches:') && body.max_tokens === 16384)
+  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 16384);
+
+const expandedLaneBConfig = structuredClone(centralConfig);
+expandedLaneBConfig.lanes[1].primary.max_output_tokens = 32768;
+expandedLaneBConfig.lanes[1].fallbacks[0].max_output_tokens = 32768;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(expandedLaneBConfig) });
+check('repository policy can raise only Lane B to a 32K completion ceiling', r.error === undefined
+  && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 16384
+  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 32768
   && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 16384);
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'

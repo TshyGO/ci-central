@@ -161,6 +161,18 @@ check('automatic rerun calls only missing or invalid Lanes', r.error === undefin
   && r.captured.map(({ lane }) => lane).sort().join(',') === 'B,C'
   && r.posted.length === 2);
 
+r = await scenario(healthy, {}, { comments: [
+  evidenceComment('A'),
+  evidenceComment('A', { status: 'diagnostic' }),
+  evidenceComment('B'),
+  evidenceComment('C'),
+] });
+check('duplicate stable comments force only that Lane to rerun and reconcile history', r.error === undefined
+  && r.captured.map(({ lane }) => lane).join(',') === 'A'
+  && r.posted.length === 1
+  && r.comments.filter(({ body }) => body.includes('ai-pr-review-bot:lane-A')).length === 1
+  && r.logs.some((line) => line.includes('forcing a rerun to reconcile duplicates')));
+
 r = await scenario(healthy, {}, { comments: ['A', 'B', 'C'].map((lane) => evidenceComment(lane, { workflow: '0'.repeat(40) })) });
 check('evidence from an older reusable workflow revision is not reused', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
 

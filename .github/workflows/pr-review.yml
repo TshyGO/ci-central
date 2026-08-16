@@ -138,17 +138,27 @@ jobs:
             });
             const evidencePattern = /<!-- ai-pr-review-evidence:v2 lane=([A-C]) head=([0-9a-f]{40}) workflow=([0-9a-f]{40}) status=(valid|diagnostic|partial) -->/i;
             const reusableLaneIds = new Set();
-            for (const comment of existingComments) {
-              if (comment.user?.login !== 'github-actions[bot]') continue;
-              const evidence = evidencePattern.exec(comment.body || '');
+            for (const lane of lanes) {
+              const stableMarker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
+              const laneComments = existingComments.filter((comment) =>
+                comment.user?.login === 'github-actions[bot]' && comment.body?.includes(stableMarker));
+              // Duplicate stable comments are not a trustworthy freeze artifact. Force this
+              // Lane to run so the normal publish path keeps the newest comment and removes
+              // every older duplicate before evidence can be reused.
+              if (laneComments.length !== 1) {
+                if (laneComments.length > 1) {
+                  console.log(`Lane ${lane.id} has ${laneComments.length} stable comments; forcing a rerun to reconcile duplicates.`);
+                }
+                continue;
+              }
+              const evidence = evidencePattern.exec(laneComments[0].body || '');
               if (!evidence) continue;
               const [, laneId, headSha, evidenceWorkflowSha, status] = evidence;
-              const stableMarker = `<!-- ai-pr-review-bot:lane-${laneId.toUpperCase()} -->`;
-              if (comment.body.includes(stableMarker)
+              if (laneId.toUpperCase() === lane.id
                   && headSha.toLowerCase() === reviewHeadSha.toLowerCase()
                   && evidenceWorkflowSha.toLowerCase() === workflowSha
                   && status.toLowerCase() === 'valid') {
-                reusableLaneIds.add(laneId.toUpperCase());
+                reusableLaneIds.add(lane.id);
               }
             }
             const isManualReview = context.eventName === 'issue_comment';

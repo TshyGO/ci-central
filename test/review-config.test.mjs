@@ -23,6 +23,26 @@ for (const repository of repositories) {
   assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['kimi-k3', 'deepseek-v4-pro-202606']);
 }
 
+const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
+assert.equal(ciCentral.review_policy.request_timeout_ms, 600000);
+assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
+assert.deepEqual(
+  [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
+  [32768, 32768],
+  'ci-central Lane B must preserve full reasoning quality with a 32K completion ceiling',
+);
+
+for (const repository of repositories.slice(1)) {
+  const config = source.loadConfig(repository, actionPath);
+  assert.equal(config.review_policy.request_timeout_ms, 300000, `${repository} request timeout changed unexpectedly`);
+  assert.equal(config.review_policy.model_budget_ms, 360000, `${repository} model budget changed unexpectedly`);
+  assert.deepEqual(
+    [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
+    [16384, 16384],
+    `${repository} Lane B output budget changed unexpectedly`,
+  );
+}
+
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'alibaba');
 assert.equal(nebula.lanes[1].provider, 'tencent');

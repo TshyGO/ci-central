@@ -7,7 +7,7 @@ NebulaLab 系列仓库的 AI PR Review 唯一中央实现。业务仓库只保�
 ```text
 业务仓库 .github/workflows/pr-agent.yml
   ├─ PR 与 /review 触发
-  ├─ concurrency 与权限
+  ├─ 按 PR 合并自动与手动触发的并发组，新触发取消旧运行
   ├─ uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
   └─ 只映射 PR_AGENT_LANE_{A,B,C}_{KEY,API_BASE}
                          │
@@ -87,16 +87,26 @@ PR_AGENT_LANE_C_API_BASE
 
 reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable job 的同一提交，从而让 `review-action` 与仓库 JSON 精确匹配工作流版本，也不会误把业务仓的 PR ref 当成 `ci-central` ref。
 
-## 精度与节流保证
+## 精度、去重与节流保证
 
-- reusable job 按仓库、事件类型和 PR 号启用 `cancel-in-progress: true`。
+- reusable job 按仓库和 PR 号启用 `cancel-in-progress: true`：自动 PR 事件与手动 `/review` 共享同一并发组，新触发取消旧运行，不会并发更新同一组评论。
 - 上下文收集前、模型调用前、发布评论前分别核对 PR head SHA。
+- 每条 Lane 评论都包含 v2 机器证据：Lane、完整 40 位 head SHA、`github.job_workflow_sha` 和 `valid`、`diagnostic` 或 `partial` 状态。
+- 自动触发只复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；缺失、旧版、诊断和不完整 Lane 会单独重跑。
+- 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
 - Lane 主模型成功时绝不调用 fallback。
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
-- Qwen、GLM、Gemini 保留完整审核上下文和 16384 输出上限。
+- Qwen、GLM、Gemini 保留完整审核上下文；三个业务仓维持 16384 输出上限。公开的 `ci-central` 元 CI 审核更容易触发长推理，因此仅其 Lane B 的 GLM/DeepSeek completion ceiling 为 32768，单请求/单模型预算分别为 10/12 分钟。
 - Kimi 只在 Qwen 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。
+- reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
-- 未配置或失败的 Lane 会发布诊断；如果所有 Lane 都只有诊断而没有真实模型 review，job 明确失败。
+- 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。
+
+### Draft 冻结门禁
+
+PR 在集中修复阶段保持 Draft。每次推送后，等待 Lane A/B/C、常规 CI 和 review threads 全部稳定在同一个最终 head SHA。满足工作区 clean、成功刷新远端后的本地/远端 0/0、三条 Lane 都有当前 workflow 生成的 `valid` 证据、CI 全绿、unresolved threads 为 0 且没有待修改事项后，才标记 Ready。
+
+`ready_for_review` 事件保留：如果该 head 已在 `synchronize` 中完成有效审核，中央工作流会直接复用三条 Lane 证据而不调用模型；此前审核失败、部分完成、来自旧 workflow 或没有生成评论时，只重跑对应 Lane。Ready 后不再修改代码；如果意外发现问题，先转回 Draft，再集中修复。最终合并应冻结完整 head SHA，并使用 `gh pr merge --admin --match-head-commit <SHA>` 防止检查结束到合并之间 HEAD 被替换。
 
 ## 运维命令
 
@@ -127,7 +137,7 @@ on:
     types: [created]
 
 concurrency:
-  group: ai-pr-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:

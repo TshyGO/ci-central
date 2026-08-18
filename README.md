@@ -80,8 +80,10 @@ PR_AGENT_LANE_C_API_BASE
 - `lanes[].id`：固定 `A`、`B` 或 `C`，也是 Secret 槽位。
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
 - `lanes[].protocol`：`openai-chat-completions` 或 `google-generate-content`。
+- `lanes[].review_prompt_suffix`：可选的 Lane 专用审核契约；当前仅 Lane C 用它执行 findings-first 双遍深审，不会改变 A/B 的共享 prompt。
 - `primary` 与 `fallbacks`：Lane 内有序模型链。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、GLM、Gemini 使用完整上下文；Kimi 使用 `kimi-k3-throttled`。
+- Google 模型的 `thinking_level`：映射到原生 `generationConfig.thinkingConfig.thinkingLevel`；Gemini-3.7-Flash 固定为 `high`，其他协议配置该字段会失败关闭。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
@@ -97,6 +99,7 @@ reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable j
 - Lane 主模型成功时绝不调用 fallback。
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
 - Qwen、GLM、Gemini 保留完整审核上下文；三个业务仓维持 16384 输出上限。公开的 `ci-central` 元 CI 审核更容易触发长推理，因此仅其 Lane B 的 GLM/DeepSeek completion ceiling 为 32768，单请求/单模型预算分别为 10/12 分钟。
+- Gemini Lane C 显式请求 `HIGH` thinking，并在共享仓库 prompt 后追加独立的双遍审核契约：先检查正确性、边界与失败路径，再挑战安全、架构、CI/config 和测试充分性；最终 findings-first，PR 描述与绿测只作为待验证声明。评论 footer 报告可用的 thought token 计数，但 thought 内容仍会过滤。
 - Kimi 只在 Qwen 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。
 - reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
@@ -123,7 +126,9 @@ node ./test/pr-review.test.mjs
 git diff --check
 ```
 
-`probe-provider.ps1` 会依据中央配置选择协议，对 OpenAI 兼容端点先读取 `/models` 再发极小 Chat Completions 请求；Google Lane 发送极小 `generateContent` 请求。脚本不输出 Key。
+`probe-provider.ps1` 会依据中央配置选择协议，对 OpenAI 兼容端点先读取 `/models` 再发极小 Chat Completions 请求；Google Lane 发送 `generateContent` 请求并带上配置的 thinking level。Google probe 预留 512 completion tokens，避免高思考模式把过小预算全部耗在私有 reasoning 而没有最终 `OK`。脚本不输出 Key。
+
+Gemini thinking 字段以 Google 官方 [`generateContent` API reference](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Gemini thinking guide](https://ai.google.dev/gemini-api/docs/thinking) 为准；不要同时配置 legacy `thinkingBudget` 与 `thinkingLevel`。
 
 ## 最小 caller 模板
 

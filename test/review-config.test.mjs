@@ -21,6 +21,11 @@ for (const repository of repositories) {
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.2', 'gemini-3.7-flash']);
   assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['kimi-k3', 'deepseek-v4-pro-202606']);
+  assert.equal(fromSource.lanes[2].primary.thinking_level, 'high', `${repository} Lane C must explicitly request high thinking`);
+  assert.match(fromSource.lanes[2].review_prompt_suffix, /two independent internal review passes/, `${repository} Lane C deep-review prompt is missing`);
+  assert.ok(fromSource.lanes.slice(0, 2).every((lane) => lane.review_prompt_suffix === undefined
+    && lane.primary.thinking_level === undefined
+    && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} non-Google lanes changed unexpectedly`);
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
@@ -56,6 +61,18 @@ assert.doesNotThrow(() => source.validateConfig(duplicateAcrossLanes, 'TshyGO/Ne
 const duplicateInsideLane = structuredClone(nebula);
 duplicateInsideLane.lanes[0].fallbacks[0].id = duplicateInsideLane.lanes[0].primary.id;
 assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab'), /duplicate primary\/fallback/);
+
+const invalidThinkingLevel = structuredClone(nebula);
+invalidThinkingLevel.lanes[2].primary.thinking_level = 'maximum';
+assert.throws(() => source.validateConfig(invalidThinkingLevel, 'TshyGO/NebulaLab'), /thinking_level is not supported/);
+
+const crossProtocolThinking = structuredClone(nebula);
+crossProtocolThinking.lanes[0].primary.thinking_level = 'high';
+assert.throws(() => source.validateConfig(crossProtocolThinking, 'TshyGO/NebulaLab'), /only supported by google-generate-content/);
+
+const emptyLanePrompt = structuredClone(nebula);
+emptyLanePrompt.lanes[2].review_prompt_suffix = '';
+assert.throws(() => source.validateConfig(emptyLanePrompt, 'TshyGO/NebulaLab'), /review_prompt_suffix/);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-config-'));
 const output = path.join(tmp, 'output.txt');

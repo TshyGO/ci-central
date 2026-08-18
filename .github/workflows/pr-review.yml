@@ -109,6 +109,19 @@ jobs:
               if (new Set(chain.map((model) => model.id)).size !== chain.length) {
                 throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
               }
+              if (lane.review_prompt_suffix !== undefined
+                  && (typeof lane.review_prompt_suffix !== 'string' || !lane.review_prompt_suffix.trim())) {
+                throw new Error(`Lane ${lane.id} review_prompt_suffix must be a non-empty string when configured.`);
+              }
+              for (const model of chain) {
+                if (model.thinking_level === undefined) continue;
+                if (lane.protocol !== 'google-generate-content') {
+                  throw new Error(`Lane ${lane.id}/${model.id} thinking_level is only supported by google-generate-content.`);
+                }
+                if (!['minimal', 'low', 'medium', 'high'].includes(model.thinking_level)) {
+                  throw new Error(`Lane ${lane.id}/${model.id} thinking_level is not supported.`);
+                }
+              }
             }
 
             const { data: pull } = await github.rest.pulls.get({
@@ -276,6 +289,9 @@ jobs:
 
             const system = reviewPolicy.system_prompt;
             const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
+            const laneSystem = (lane) => lane.review_prompt_suffix
+              ? `${system}\n\n${lane.review_prompt_suffix}`
+              : system;
 
             const buildUser = (diffText, options = {}) => [
               `Repository: ${owner}/${repo}`,
@@ -349,12 +365,18 @@ jobs:
               return payload;
             }
 
-            function googlePayload(model) {
+            function googlePayload(lane, model) {
               const throttled = model.context_profile === 'kimi-k3-throttled';
+              const generationConfig = { maxOutputTokens: model.max_output_tokens };
+              if (model.thinking_level) {
+                generationConfig.thinkingConfig = {
+                  thinkingLevel: model.thinking_level.toUpperCase(),
+                };
+              }
               return {
-                systemInstruction: { parts: [{ text: throttled ? kimiK3System : system }] },
+                systemInstruction: { parts: [{ text: throttled ? kimiK3System : laneSystem(lane) }] },
                 contents: [{ role: 'user', parts: [{ text: throttled ? kimiK3User : user }] }],
-                generationConfig: { maxOutputTokens: model.max_output_tokens },
+                generationConfig,
               };
             }
 
@@ -388,7 +410,7 @@ jobs:
             async function callOnce(lane, model, payload, deadline) {
               const modelId = model.id;
               const requestBody = JSON.stringify(
-                lane.protocol === 'google-generate-content' ? googlePayload(model) : payload
+                lane.protocol === 'google-generate-content' ? googlePayload(lane, model) : payload
               );
               let response;
               let responseText = '';
@@ -501,12 +523,23 @@ jobs:
                   .join('\n'));
                 const finishReason = candidate?.finishReason;
                 const normalizedFinishReason = typeof finishReason === 'string' ? finishReason.toLowerCase() : '';
-                console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
+                const usage = payload?.usageMetadata || {};
+                const explicitThoughtTokens = Number(usage.thoughtsTokenCount);
+                const derivedThoughtTokens = Number(usage.totalTokenCount)
+                  - Number(usage.promptTokenCount)
+                  - Number(usage.candidatesTokenCount);
+                const hasExplicitThoughtTokens = Number.isFinite(explicitThoughtTokens);
+                const hasDerivedThoughtTokens = Number.isFinite(derivedThoughtTokens) && derivedThoughtTokens >= 0;
+                const reasoningLength = hasExplicitThoughtTokens
+                  ? explicitThoughtTokens
+                  : (hasDerivedThoughtTokens ? derivedThoughtTokens : 0);
+                const reasoningUnit = hasExplicitThoughtTokens || hasDerivedThoughtTokens ? 'tokens' : null;
+                console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} thoughtTokens=${reasoningUnit ? reasoningLength : 'not-reported'} usage=${JSON.stringify(usage)}`);
                 let review = content;
                 if (review && normalizedFinishReason && normalizedFinishReason !== 'stop') {
                   review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
                 }
-                return { review, reasoningLength: 0, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+                return { review, reasoningLength, reasoningUnit, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
               }
               const choice = payload?.choices?.[0];
               const message = choice?.message;
@@ -521,7 +554,7 @@ jobs:
               if (review && normalizedFinishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }
-              return { review, reasoningLength: reasoning.length, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+              return { review, reasoningLength: reasoning.length, reasoningUnit: 'chars', complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
             }
 
             // Try the primary model, then same-provider fallbacks. Shared provider failures
@@ -563,7 +596,7 @@ jobs:
                 lastFailureKind = failureKind;
                 if (response?.ok) {
                   try {
-                    const { review, reasoningLength, complete } = extractReview(lane, model, responseText);
+                    const { review, reasoningLength, reasoningUnit, complete } = extractReview(lane, model, responseText);
                     if (review) {
                       return {
                         lane,
@@ -571,6 +604,7 @@ jobs:
                         servedBy: model,
                         review,
                         reasoningLength,
+                        reasoningUnit,
                         degraded: model !== primary,
                         status: complete ? 'valid' : 'partial',
                       };
@@ -670,7 +704,7 @@ jobs:
                 console.log(`[Lane ${lane.id}/${primary.id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
                 continue;
               }
-              const { servedBy, review, reasoningLength, degraded, status } = settled[i].value;
+              const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = settled[i].value;
               const modelLine = degraded
                 ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
                 : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
@@ -685,7 +719,7 @@ jobs:
                 ...banner,
                 review,
                 '',
-                `<sub>${modelLine} · Thinking: ${reasoningLength ? `${reasoningLength} chars` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
+                `<sub>${modelLine} · Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
               ].join('\n');
               try {
                 const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;

@@ -39,7 +39,18 @@ try {
     }
     elseif ($laneConfig.protocol -eq 'google-generate-content') {
         $headers = @{ 'x-goog-api-key' = $key }
-        $body = @{ contents = @(@{ role = 'user'; parts = @(@{ text = 'Reply with OK.' }) }); generationConfig = @{ maxOutputTokens = 16 } } | ConvertTo-Json -Depth 8
+        # A high-thinking Gemini probe needs enough completion room to reach final text;
+        # tiny ceilings can be consumed entirely by private reasoning.
+        $generationConfig = @{ maxOutputTokens = 512 }
+        if (-not [string]::IsNullOrWhiteSpace($laneConfig.primary.thinking_level)) {
+            $generationConfig.thinkingConfig = @{
+                thinkingLevel = $laneConfig.primary.thinking_level.ToUpperInvariant()
+            }
+        }
+        $body = @{
+            contents = @(@{ role = 'user'; parts = @(@{ text = 'Reply with OK.' }) })
+            generationConfig = $generationConfig
+        } | ConvertTo-Json -Depth 8
         $escapedModel = [Uri]::EscapeDataString($model)
         $result = Invoke-RestMethod -Method Post -Uri "$base/models/${escapedModel}:generateContent" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
         $final = @($result.candidates[0].content.parts | Where-Object thought -NE $true | ForEach-Object text) -join "`n"

@@ -62,9 +62,23 @@ function validateConfig(config, repository) {
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
+    if (lane.review_prompt_suffix !== undefined
+      && (typeof lane.review_prompt_suffix !== 'string' || !lane.review_prompt_suffix.trim())) {
+      throw new Error(`${location}.review_prompt_suffix must be a non-empty string when configured.`);
+    }
     validateModel(lane.primary, `${location}.primary`);
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
+    for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
+      if (model.thinking_level === undefined) continue;
+      const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;
+      if (lane.protocol !== 'google-generate-content') {
+        throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);
+      }
+      if (!['minimal', 'low', 'medium', 'high'].includes(model.thinking_level)) {
+        throw new Error(`${modelLocation}.thinking_level is not supported.`);
+      }
+    }
     const ids = [lane.primary.id, ...lane.fallbacks.map((model) => model.id)];
     if (new Set(ids).size !== ids.length) {
       throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);

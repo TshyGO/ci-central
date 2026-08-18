@@ -62,10 +62,6 @@ function validateConfig(config, repository) {
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
-    if (lane.review_prompt_suffix !== undefined
-      && (typeof lane.review_prompt_suffix !== 'string' || !lane.review_prompt_suffix.trim())) {
-      throw new Error(`${location}.review_prompt_suffix must be a non-empty string when configured.`);
-    }
     validateModel(lane.primary, `${location}.primary`);
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));

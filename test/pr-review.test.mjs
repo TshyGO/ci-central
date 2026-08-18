@@ -129,13 +129,15 @@ const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# r
 check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
-check('config resolver is checked out at the reusable workflow commit', workflowText.includes('ref: ${{ github.job_workflow_sha }}')
+check('config resolver is checked out at the reusable workflow commit', workflowText.includes('ref: ${{ github.job_workflow_sha ||')
+  && workflowText.includes("github.repository == 'TshyGO/ci-central' && github.sha")
   && !workflowText.includes('github.workflow_ref')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
 check('reusable workflow accepts only fixed Lane secret slots',
   !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']
     .some((name) => workflowText.includes(name)));
-check('central repository has the same thin six-slot caller', callerText.includes('uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main')
+check('central repository self-caller exercises the workflow from its own PR revision', callerText.includes('uses: ./.github/workflows/pr-review.yml')
+  && !callerText.includes('TshyGO/ci-central/.github/workflows/pr-review.yml@main')
   && ['A', 'B', 'C'].every((lane) => callerText.includes(`PR_AGENT_LANE_${lane}_KEY`) && callerText.includes(`PR_AGENT_LANE_${lane}_API_BASE`))
   && callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
   && callerText.includes('cancel-in-progress: true')

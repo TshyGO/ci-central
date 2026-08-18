@@ -41,7 +41,9 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: TshyGO/ci-central
-          ref: ${{ github.job_workflow_sha }}
+          # External callers resolve github.job_workflow_sha. The same-repository relative
+          # caller can fall back to its own event SHA, which is safe only for ci-central.
+          ref: ${{ github.job_workflow_sha || (github.repository == 'TshyGO/ci-central' && github.sha) }}
           path: .ci-central
           sparse-checkout: review-action
 
@@ -61,7 +63,7 @@ jobs:
           LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
           LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
           PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
-          PR_REVIEW_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          PR_REVIEW_WORKFLOW_SHA: ${{ github.job_workflow_sha || (github.repository == 'TshyGO/ci-central' && github.sha) }}
         with:
           script: |
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;

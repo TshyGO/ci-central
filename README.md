@@ -40,7 +40,7 @@ review-action/config/repositories/
 └─ TshyGO__NebulaLab-Plugins.json
 ```
 
-四个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。
+四个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 PR 能实际审核和验收本次 workflow 修改。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置关闭 `reviews.auto_review`，需要时可手动触发。Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 
@@ -87,7 +87,7 @@ PR_AGENT_LANE_C_API_BASE
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable job 的同一提交，从而让 `review-action` 与仓库 JSON 精确匹配工作流版本，也不会误把业务仓的 PR ref 当成 `ci-central` ref。
+reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable job 的同一提交，从而让 `review-action` 与仓库 JSON 精确匹配工作流版本，也不会误把业务仓的 PR ref 当成 `ci-central` ref。仅当同仓库相对 caller 的该字段为空时，`TshyGO/ci-central` 可使用自己的 `github.sha`；外部仓库不能使用这个 fallback。
 
 ## 精度、去重与节流保证
 

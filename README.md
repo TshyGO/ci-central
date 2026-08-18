@@ -40,7 +40,7 @@ review-action/config/repositories/
 └─ TshyGO__NebulaLab-Plugins.json
 ```
 
-四个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。
+四个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置关闭 `reviews.auto_review`，需要时可手动触发。Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 
@@ -82,10 +82,11 @@ PR_AGENT_LANE_C_API_BASE
 - `lanes[].protocol`：`openai-chat-completions` 或 `google-generate-content`。
 - `primary` 与 `fallbacks`：Lane 内有序模型链。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、GLM、Gemini 使用完整上下文；Kimi 使用 `kimi-k3-throttled`。
+- Google 模型的 `thinking_level`：映射到原生 `generationConfig.thinkingConfig.thinkingLevel`；Gemini-3.7-Flash 固定为 `high`，其他协议配置该字段会失败关闭。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable job 的同一提交，从而让 `review-action` 与仓库 JSON 精确匹配工作流版本，也不会误把业务仓的 PR ref 当成 `ci-central` ref。
+reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须提供 `github.job_workflow_sha`；仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 的该字段为空时，才使用本次事件的 `github.sha`。解析结果同时用于检出 `review-action`/仓库 JSON 和 v2 evidence，业务仓的 PR ref 不会作为中央 ref。
 
 ## 精度、去重与节流保证
 
@@ -97,6 +98,7 @@ reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable j
 - Lane 主模型成功时绝不调用 fallback。
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
 - Qwen、GLM、Gemini 保留完整审核上下文；三个业务仓维持 16384 输出上限。公开的 `ci-central` 元 CI 审核更容易触发长推理，因此仅其 Lane B 的 GLM/DeepSeek completion ceiling 为 32768，单请求/单模型预算分别为 10/12 分钟。
+- Gemini Lane C 显式请求 `HIGH` thinking；中央 workflow 仅在 Google 请求中追加独立的双遍审核契约：先检查正确性、边界与失败路径，再挑战安全、架构、CI/config 和测试充分性；最终 findings-first，PR 描述与绿测只作为待验证声明。评论 footer 报告可用的 thought token 计数，但 thought 内容仍会过滤。
 - Kimi 只在 Qwen 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。
 - reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
@@ -123,7 +125,9 @@ node ./test/pr-review.test.mjs
 git diff --check
 ```
 
-`probe-provider.ps1` 会依据中央配置选择协议，对 OpenAI 兼容端点先读取 `/models` 再发极小 Chat Completions 请求；Google Lane 发送极小 `generateContent` 请求。脚本不输出 Key。
+`probe-provider.ps1` 会依据中央配置选择协议，对 OpenAI 兼容端点先读取 `/models` 再发极小 Chat Completions 请求；Google Lane 发送 `generateContent` 请求并带上配置的 thinking level。Google probe 预留 512 completion tokens，避免高思考模式把过小预算全部耗在私有 reasoning 而没有最终 `OK`。脚本不输出 Key。
+
+Gemini thinking 字段以 Google 官方 [`generateContent` API reference](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Gemini thinking guide](https://ai.google.dev/gemini-api/docs/thinking) 为准；不要同时配置 legacy `thinkingBudget` 与 `thinkingLevel`。
 
 ## 最小 caller 模板
 

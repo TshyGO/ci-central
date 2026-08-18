@@ -45,12 +45,17 @@ const chatResult = (model, content, { reasoning = 'private thinking', finish = '
   choices: [{ finish_reason: finish, message: { content, reasoning_content: reasoning } }],
   usage: { prompt_tokens: 1 },
 });
-const geminiResult = (content, { finish = 'STOP', thought = '' } = {}) => JSON.stringify({
+const geminiResult = (content, { finish = 'STOP', thought = '', usageMetadata } = {}) => JSON.stringify({
   candidates: [{ finishReason: finish, content: { parts: [
     ...(thought ? [{ thought: true, text: thought }] : []),
     { text: content },
   ] } }],
-  usageMetadata: { promptTokenCount: 1 },
+  usageMetadata: usageMetadata || {
+    promptTokenCount: 100,
+    candidatesTokenCount: 20,
+    thoughtsTokenCount: 512,
+    totalTokenCount: 632,
+  },
 });
 
 function laneForUrl(url) {
@@ -124,16 +129,24 @@ const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# r
 check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
-check('config resolver is checked out at the reusable workflow commit', workflowText.includes('ref: ${{ github.job_workflow_sha }}')
+check('config resolver uses a validated trusted workflow SHA', workflowText.includes('- name: Resolve matching central ref')
+  && workflowText.includes('JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}')
+  && workflowText.includes('REPOSITORY: ${{ github.repository }}')
+  && workflowText.includes('"$REPOSITORY" == "TshyGO/ci-central"')
+  && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')
+  && workflowText.includes('PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}')
+  && workflowText.includes('trusted 40-character ci-central workflow SHA')
   && !workflowText.includes('github.workflow_ref')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
 check('reusable workflow accepts only fixed Lane secret slots',
   !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']
     .some((name) => workflowText.includes(name)));
-check('central repository has the same thin six-slot caller', callerText.includes('uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main')
+check('central repository self-caller exercises the workflow from its own PR revision', callerText.includes('uses: ./.github/workflows/pr-review.yml')
+  && !callerText.includes('TshyGO/ci-central/.github/workflows/pr-review.yml@main')
   && ['A', 'B', 'C'].every((lane) => callerText.includes(`PR_AGENT_LANE_${lane}_KEY`) && callerText.includes(`PR_AGENT_LANE_${lane}_API_BASE`))
   && callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
   && callerText.includes('cancel-in-progress: true')
+  && callerText.includes("github.event.pull_request.author_association == 'OWNER'")
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
   && workflowText.includes('cancel-in-progress: true')
@@ -142,6 +155,17 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.2,C:gemini-3.7-flash');
 check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['kimi-k3', 'deepseek-v4-pro-202606'].includes(model)));
+const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
+const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
+const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
+check('only Google Lane C receives the deep-review prompt contract',
+  healthyLaneA?.messages[0].content === centralConfig.review_policy.system_prompt
+  && healthyLaneB?.messages[0].content === centralConfig.review_policy.system_prompt
+  && healthyLaneC?.systemInstruction.parts[0].text.includes('two independent internal review passes')
+  && !healthyLaneA?.messages[0].content.includes('two independent internal review passes')
+  && !healthyLaneB?.messages[0].content.includes('two independent internal review passes'));
+check('Google Lane C explicitly requests maximum Gemini thinking depth',
+  healthyLaneC?.generationConfig.thinkingConfig?.thinkingLevel === 'HIGH');
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('healthy comments carry reusable v2 evidence for the full head and workflow SHAs', ['A', 'B', 'C'].every((lane) =>
@@ -202,6 +226,21 @@ r = await scenario(healthy, {}, { comments: duplicateComments });
 check('reruns update one stable comment per lane and remove prior duplicates', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.comments.filter(({ body }) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('reasoning and Gemini thought parts never reach comments', !r.posted.some((body) => body.includes('private thinking') || body.includes('PRIVATE GEMINI THOUGHT')));
+check('Gemini thought-token usage is visible without exposing thought text',
+  r.posted.some((body) => body.includes('lane-C') && body.includes('Thinking: 512 tokens')));
+
+r = await scenario((call) => reply(200, call.lane === 'C'
+  ? geminiResult(`# review ${call.model}`, { usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, totalTokenCount: 120 } })
+  : chatResult(call.model, `# review ${call.model}`, { reasoning: '' })));
+check('zero or absent thinking usage keeps provider reporting accurate',
+  r.posted.some((body) => body.includes('lane-C') && body.includes('Thinking: 0 tokens'))
+  && ['A', 'B'].every((lane) => r.posted.some((body) => body.includes(`lane-${lane}`) && body.includes('Thinking: not reported'))));
+
+r = await scenario((call) => reply(200, call.lane === 'C'
+  ? geminiResult(`# review ${call.model}`, { usageMetadata: { promptTokenCount: 100 } })
+  : chatResult(call.model, `# review ${call.model}`)));
+check('missing Gemini token totals remain explicitly unreported',
+  r.posted.some((body) => body.includes('lane-C') && body.includes('Thinking: not reported')));
 
 r = await scenario((call) => reply(200, call.lane === 'C'
   ? geminiResult(`# review ${call.model}`, { finish: 'stop' })
@@ -211,7 +250,8 @@ check('finish reasons are normalized across provider casing', r.error === undefi
   && !r.posted.some((body) => body.includes('可能不完整')));
 
 check('full-context primaries preserve input and output budgets', r.captured.filter(({ lane }) => lane !== 'C').every(({ body }) => body.messages[1].content.includes('Changed files and patches:') && body.max_tokens === 16384)
-  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 16384);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 16384
+  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.thinkingConfig?.thinkingLevel === 'HIGH');
 
 const expandedLaneBConfig = structuredClone(centralConfig);
 expandedLaneBConfig.lanes[1].primary.max_output_tokens = 32768;
@@ -282,6 +322,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(throttledGoogleCo
 const throttledGoogle = r.captured.find(({ lane }) => lane === 'C')?.body;
 check('Google protocol honors the configured throttled context profile', throttledGoogle?.generationConfig.maxOutputTokens === 8192
   && throttledGoogle.systemInstruction.parts[0].text.includes('high-confidence')
+  && throttledGoogle.systemInstruction.parts[0].text.includes('two independent internal review passes')
   && throttledGoogle.contents[0].parts[0].text.includes('All changed file names:'));
 
 const missingPromptConfig = structuredClone(centralConfig);
@@ -293,6 +334,16 @@ const missingFallbacksConfig = structuredClone(centralConfig);
 delete missingFallbacksConfig.lanes[0].fallbacks;
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(missingFallbacksConfig) });
 check('workflow defense rejects a missing fallback array before model calls', /fallbacks must be an array/.test(r.error?.message || '') && r.captured.length === 0);
+
+const invalidThinkingConfig = structuredClone(centralConfig);
+invalidThinkingConfig.lanes[2].primary.thinking_level = 'maximum';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidThinkingConfig) });
+check('workflow defense rejects an unsupported Google thinking level before model calls', /thinking_level is not supported/.test(r.error?.message || '') && r.captured.length === 0);
+
+const crossProtocolThinkingConfig = structuredClone(centralConfig);
+crossProtocolThinkingConfig.lanes[0].primary.thinking_level = 'high';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(crossProtocolThinkingConfig) });
+check('workflow defense rejects thinking configuration outside Google protocol', /only supported by google-generate-content/.test(r.error?.message || '') && r.captured.length === 0);
 
 r = await scenario(healthy, { LANE_B_KEY: '' });
 check('an unprovisioned lane preserves healthy reviews but fails the strict aggregate gate', /Lane B/.test(r.error?.message || '')

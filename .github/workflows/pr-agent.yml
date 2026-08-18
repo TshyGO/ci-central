@@ -1,6 +1,8 @@
 name: AI PR Review
 
-# Thin caller: all model/provider/retry policy lives in the reusable workflow.
+# Thin self-caller: all model/provider/retry policy lives in the reusable workflow.
+# A relative reusable-workflow reference makes ci-central PRs exercise their own workflow
+# revision; external business repositories remain separately commit-pinned callers.
 # This file only maps the six stable Lane credential slots.
 
 on:
@@ -18,7 +20,10 @@ jobs:
     if: |
       github.event.sender.type != 'Bot' &&
       (
-        github.event_name == 'pull_request' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.author_association == 'OWNER'
+        ) ||
         (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request != null &&
@@ -26,7 +31,7 @@ jobs:
           startsWith(github.event.comment.body, '/review')
         )
       )
-    uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
+    uses: ./.github/workflows/pr-review.yml
     permissions:
       contents: read
       issues: write

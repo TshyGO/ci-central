@@ -37,11 +37,29 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Resolve matching central ref
+        id: central-ref
+        shell: bash
+        env:
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          EVENT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ref="$JOB_WORKFLOW_SHA"
+          if [[ -z "$ref" && "$REPOSITORY" == "TshyGO/ci-central" ]]; then
+            ref="$EVENT_SHA"
+          fi
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Cannot resolve a trusted 40-character ci-central workflow SHA."
+            exit 1
+          fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Check out matching central configuration
         uses: actions/checkout@v5
         with:
           repository: TshyGO/ci-central
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ steps.central-ref.outputs.sha }}
           path: .ci-central
           sparse-checkout: review-action
 
@@ -61,7 +79,7 @@ jobs:
           LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
           LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
           PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
-          PR_REVIEW_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}
         with:
           script: |
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;
@@ -108,6 +126,15 @@ jobs:
               }
               if (new Set(chain.map((model) => model.id)).size !== chain.length) {
                 throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
+              }
+              for (const model of chain) {
+                if (model.thinking_level === undefined) continue;
+                if (lane.protocol !== 'google-generate-content') {
+                  throw new Error(`Lane ${lane.id}/${model.id} thinking_level is only supported by google-generate-content.`);
+                }
+                if (!['minimal', 'low', 'medium', 'high'].includes(model.thinking_level)) {
+                  throw new Error(`Lane ${lane.id}/${model.id} thinking_level is not supported.`);
+                }
               }
             }
 
@@ -276,6 +303,7 @@ jobs:
 
             const system = reviewPolicy.system_prompt;
             const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
+            const googleDeepReviewContract = 'Perform two independent internal review passes before writing the final answer: first trace correctness, edge cases, error paths, and contract preservation; then challenge security, architecture boundaries, CI or configuration, and test adequacy. Treat the PR description and passing tests as claims to verify, not proof. Write findings first. Each actionable finding must include severity, exact file or diff-hunk evidence, impact, and a concrete fix. If no actionable finding remains, state the failure paths and invariants you checked plus residual risks. Concise means omit filler and praise, never analysis. Do not invent findings or expose hidden reasoning.';
 
             const buildUser = (diffText, options = {}) => [
               `Repository: ${owner}/${repo}`,
@@ -351,10 +379,17 @@ jobs:
 
             function googlePayload(model) {
               const throttled = model.context_profile === 'kimi-k3-throttled';
+              const generationConfig = { maxOutputTokens: model.max_output_tokens };
+              if (model.thinking_level) {
+                generationConfig.thinkingConfig = {
+                  thinkingLevel: model.thinking_level.toUpperCase(),
+                };
+              }
+              const googleSystem = `${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`;
               return {
-                systemInstruction: { parts: [{ text: throttled ? kimiK3System : system }] },
+                systemInstruction: { parts: [{ text: googleSystem }] },
                 contents: [{ role: 'user', parts: [{ text: throttled ? kimiK3User : user }] }],
-                generationConfig: { maxOutputTokens: model.max_output_tokens },
+                generationConfig,
               };
             }
 
@@ -501,12 +536,23 @@ jobs:
                   .join('\n'));
                 const finishReason = candidate?.finishReason;
                 const normalizedFinishReason = typeof finishReason === 'string' ? finishReason.toLowerCase() : '';
-                console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} usage=${JSON.stringify(payload?.usageMetadata)}`);
+                const usage = payload?.usageMetadata || {};
+                const explicitThoughtTokens = Number(usage.thoughtsTokenCount);
+                const derivedThoughtTokens = Number(usage.totalTokenCount)
+                  - Number(usage.promptTokenCount)
+                  - Number(usage.candidatesTokenCount);
+                const hasExplicitThoughtTokens = Number.isFinite(explicitThoughtTokens);
+                const hasDerivedThoughtTokens = Number.isFinite(derivedThoughtTokens) && derivedThoughtTokens >= 0;
+                const reasoningLength = hasExplicitThoughtTokens
+                  ? explicitThoughtTokens
+                  : (hasDerivedThoughtTokens ? derivedThoughtTokens : 0);
+                const reasoningUnit = hasExplicitThoughtTokens || hasDerivedThoughtTokens ? 'tokens' : null;
+                console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} thoughtTokens=${reasoningUnit ? reasoningLength : 'not-reported'} usage=${JSON.stringify(usage)}`);
                 let review = content;
                 if (review && normalizedFinishReason && normalizedFinishReason !== 'stop') {
                   review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
                 }
-                return { review, reasoningLength: 0, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+                return { review, reasoningLength, reasoningUnit, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
               }
               const choice = payload?.choices?.[0];
               const message = choice?.message;
@@ -521,7 +567,7 @@ jobs:
               if (review && normalizedFinishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }
-              return { review, reasoningLength: reasoning.length, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+              return { review, reasoningLength: reasoning.length, reasoningUnit: reasoning.length ? 'chars' : null, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
             }
 
             // Try the primary model, then same-provider fallbacks. Shared provider failures
@@ -563,7 +609,7 @@ jobs:
                 lastFailureKind = failureKind;
                 if (response?.ok) {
                   try {
-                    const { review, reasoningLength, complete } = extractReview(lane, model, responseText);
+                    const { review, reasoningLength, reasoningUnit, complete } = extractReview(lane, model, responseText);
                     if (review) {
                       return {
                         lane,
@@ -571,6 +617,7 @@ jobs:
                         servedBy: model,
                         review,
                         reasoningLength,
+                        reasoningUnit,
                         degraded: model !== primary,
                         status: complete ? 'valid' : 'partial',
                       };
@@ -670,7 +717,7 @@ jobs:
                 console.log(`[Lane ${lane.id}/${primary.id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
                 continue;
               }
-              const { servedBy, review, reasoningLength, degraded, status } = settled[i].value;
+              const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = settled[i].value;
               const modelLine = degraded
                 ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
                 : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
@@ -685,7 +732,7 @@ jobs:
                 ...banner,
                 review,
                 '',
-                `<sub>${modelLine} · Thinking: ${reasoningLength ? `${reasoningLength} chars` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
+                `<sub>${modelLine} · Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
               ].join('\n');
               try {
                 const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;

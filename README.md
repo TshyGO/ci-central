@@ -86,7 +86,7 @@ PR_AGENT_LANE_C_API_BASE
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 使用 `github.job_workflow_sha` 检出定义当前 reusable job 的同一提交，从而让 `review-action` 与仓库 JSON 精确匹配工作流版本，也不会误把业务仓的 PR ref 当成 `ci-central` ref。同仓库相对 caller 已通过真实 PR run 验证会提供完整 SHA，不需要额外 ref fallback。
+reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须提供 `github.job_workflow_sha`；仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 的该字段为空时，才使用本次事件的 `github.sha`。解析结果同时用于检出 `review-action`/仓库 JSON 和 v2 evidence，业务仓的 PR ref 不会作为中央 ref。
 
 ## 精度、去重与节流保证
 

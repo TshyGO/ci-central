@@ -129,8 +129,13 @@ const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# r
 check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
-check('config resolver is checked out at the reusable workflow commit', workflowText.includes('ref: ${{ github.job_workflow_sha }}')
-  && !workflowText.includes("github.repository == 'TshyGO/ci-central' && github.sha")
+check('config resolver uses a validated trusted workflow SHA', workflowText.includes('- name: Resolve matching central ref')
+  && workflowText.includes('JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}')
+  && workflowText.includes('REPOSITORY: ${{ github.repository }}')
+  && workflowText.includes('"$REPOSITORY" == "TshyGO/ci-central"')
+  && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')
+  && workflowText.includes('PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}')
+  && workflowText.includes('trusted 40-character ci-central workflow SHA')
   && !workflowText.includes('github.workflow_ref')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
 check('reusable workflow accepts only fixed Lane secret slots',

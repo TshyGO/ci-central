@@ -37,11 +37,29 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Resolve matching central ref
+        id: central-ref
+        shell: bash
+        env:
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          EVENT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ref="$JOB_WORKFLOW_SHA"
+          if [[ -z "$ref" && "$REPOSITORY" == "TshyGO/ci-central" ]]; then
+            ref="$EVENT_SHA"
+          fi
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Cannot resolve a trusted 40-character ci-central workflow SHA."
+            exit 1
+          fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Check out matching central configuration
         uses: actions/checkout@v5
         with:
           repository: TshyGO/ci-central
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ steps.central-ref.outputs.sha }}
           path: .ci-central
           sparse-checkout: review-action
 
@@ -61,7 +79,7 @@ jobs:
           LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
           LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
           PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
-          PR_REVIEW_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}
         with:
           script: |
             const pullNumber = context.payload.pull_request?.number ?? context.payload.issue?.number;

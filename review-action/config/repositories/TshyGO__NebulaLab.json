@@ -22,10 +22,11 @@
       },
       "fallbacks": [
         {
-          "id": "kimi-k3",
-          "label": "Kimi-K3",
+          "id": "qwen3.6-flash",
+          "label": "Qwen3.6-Flash",
           "context_profile": "kimi-k3-throttled",
-          "max_output_tokens": 8192
+          "max_output_tokens": 8192,
+          "temperature": 0.2
         }
       ]
     },

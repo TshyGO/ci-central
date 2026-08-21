@@ -63,7 +63,6 @@ jobs:
               'qwen3.6-flash',
               'deepseek-v4-pro',
               'glm-5.2',
-              'kimi-k3',
             ];
             const candidates = preferred.filter((id) => modelIds.includes(id));
             if (candidates.length === 0) {
@@ -90,7 +89,7 @@ jobs:
                 stream: false,
                 max_tokens: 4096,
               };
-              if (modelId !== 'kimi-k3') body.temperature = 0.2;
+              body.temperature = 0.2;
 
               try {
                 const startedAt = Date.now();

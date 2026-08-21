@@ -20,7 +20,7 @@ for (const repository of repositories) {
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.2', 'gemini-3.7-flash']);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['kimi-k3', 'deepseek-v4-pro-202606']);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.6-flash', 'deepseek-v4-pro-202606']);
   assert.equal(fromSource.lanes[2].primary.thinking_level, 'high', `${repository} Lane C must explicitly request high thinking`);
   assert.ok(fromSource.lanes.slice(0, 2).every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} non-Google lanes changed unexpectedly`);

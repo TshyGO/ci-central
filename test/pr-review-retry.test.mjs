@@ -89,6 +89,8 @@ check('retry workflow supports centralized calls and self workflow_run events', 
     .every((input) => workflowText.includes(`${input}:`)));
 check('retry workflow has bounded trigger and write permission only for Actions', workflowText.includes("workflowRun.run_attempt !== 1")
   && workflowText.includes('getWorkflowRun')
+  && workflowText.includes('github.event.workflow_run.id || inputs.run_id')
+  && workflowText.includes("inputs.conclusion == 'failure'")
   && workflowText.includes('actions: write')
   && workflowText.includes('issues: read')
   && workflowText.includes('pull-requests: read'));

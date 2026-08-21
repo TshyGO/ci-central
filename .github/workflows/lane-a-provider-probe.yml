@@ -1,11 +1,6 @@
 name: Lane A Provider Probe
 
 on:
-  push:
-    branches:
-      - codex/lane-a-live-probe
-    paths:
-      - .github/workflows/lane-a-provider-probe.yml
   workflow_dispatch:
 
 permissions:

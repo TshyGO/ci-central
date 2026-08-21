@@ -26,7 +26,7 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 
 | Lane | 当前供应商 | 协议 | 模型链 |
 |---|---|---|---|
-| A | 阿里 | OpenAI Chat Completions | Qwen3.8-Max → Kimi-K3 |
+| A | 阿里 | OpenAI Chat Completions | Qwen3.8-Max → Qwen3.7-Max |
 | B | 腾讯 | OpenAI Chat Completions | GLM-5.2 → DeepSeek-V4-Pro |
 | C | Google | Google generateContent | Gemini-3.7-Flash |
 
@@ -81,7 +81,7 @@ PR_AGENT_LANE_C_API_BASE
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
 - `lanes[].protocol`：`openai-chat-completions` 或 `google-generate-content`。
 - `primary` 与 `fallbacks`：Lane 内有序模型链。
-- 模型的 `context_profile` 与 `max_output_tokens`：Qwen、GLM、Gemini 使用完整上下文；Kimi 使用 `kimi-k3-throttled`。
+- 模型的 `context_profile` 与 `max_output_tokens`：Qwen、GLM、Gemini 均使用完整上下文。
 - Google 模型的 `thinking_level`：映射到原生 `generationConfig.thinkingConfig.thinkingLevel`；Gemini-3.7-Flash 固定为 `high`，其他协议配置该字段会失败关闭。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
@@ -99,7 +99,7 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须提�
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
 - Qwen、GLM、Gemini 保留完整审核上下文；三个业务仓维持 16384 输出上限。公开的 `ci-central` 元 CI 审核更容易触发长推理，因此仅其 Lane B 的 GLM/DeepSeek completion ceiling 为 32768，单请求/单模型预算分别为 10/12 分钟。
 - Gemini Lane C 显式请求 `HIGH` thinking；中央 workflow 仅在 Google 请求中追加独立的双遍审核契约：先检查正确性、边界与失败路径，再挑战安全、架构、CI/config 和测试充分性；最终 findings-first，PR 描述与绿测只作为待验证声明。评论 footer 报告可用的 thought token 计数，但 thought 内容仍会过滤。
-- Kimi 只在 Qwen 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限且不发送 `temperature`。
+- Qwen3.7-Max 只在 Qwen3.8-Max 失败时调用，并使用同一阿里 Lane A 凭据、完整审核上下文和 16384 输出上限。
 - reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。

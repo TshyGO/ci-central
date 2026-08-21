@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: lane-a-provider-probe
+  cancel-in-progress: true
+
 jobs:
   probe:
     runs-on: ubuntu-latest
@@ -20,7 +24,7 @@ jobs:
       LANE_A_API_BASE: ${{ secrets.PR_AGENT_LANE_A_API_BASE }}
     steps:
       - name: Discover and probe Lane A models
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const apiKey = process.env.LANE_A_KEY;
@@ -35,18 +39,33 @@ jobs:
               'Content-Type': 'application/json',
             };
 
-            const modelsResponse = await fetch(`${baseUrl}/models`, { headers });
-            const modelsText = await modelsResponse.text();
+            const modelsController = new AbortController();
+            const modelsTimeout = setTimeout(() => modelsController.abort(), 30_000);
+            let modelsResponse;
+            let modelsText;
+            try {
+              modelsResponse = await fetch(`${baseUrl}/models`, {
+                headers,
+                signal: modelsController.signal,
+              });
+              modelsText = await modelsResponse.text();
+            } catch (error) {
+              const cause = error?.cause?.code || error?.cause?.name || error?.name || 'unknown';
+              core.setFailed(`Lane A /models request failed: ${cause}`);
+              return;
+            } finally {
+              clearTimeout(modelsTimeout);
+            }
             if (!modelsResponse.ok) {
-              core.setFailed(`Lane A /models failed with HTTP ${modelsResponse.status}: ${modelsText.slice(0, 300)}`);
+              core.setFailed(`Lane A /models failed with HTTP ${modelsResponse.status}.`);
               return;
             }
 
             let modelsPayload;
             try {
               modelsPayload = JSON.parse(modelsText);
-            } catch (error) {
-              core.setFailed(`Lane A /models returned invalid JSON: ${error.message}`);
+            } catch {
+              core.setFailed('Lane A /models returned invalid JSON.');
               return;
             }
 
@@ -56,40 +75,26 @@ jobs:
               .sort();
             console.log(`Lane A models (${modelIds.length}): ${modelIds.join(', ')}`);
 
-            const preferred = [
-              'qwen3.8-max',
-              'qwen3.7-max',
-              'qwen3.7-plus',
-              'qwen3.6-flash',
-              'deepseek-v4-pro',
-              'glm-5.2',
-            ];
-            const candidates = preferred.filter((id) => modelIds.includes(id));
-            if (candidates.length === 0) {
-              core.setFailed('None of the known Lane A candidates are present in /models.');
+            const requiredModels = ['qwen3.8-max', 'qwen3.6-flash'];
+            const missingModels = requiredModels.filter((id) => !modelIds.includes(id));
+            if (missingModels.length > 0) {
+              core.setFailed(`Required Lane A models are absent from /models: ${missingModels.join(', ')}`);
               return;
             }
 
             async function probe(modelId) {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 180_000);
-              const representativeContext = Array.from(
-                { length: 600 },
-                (_, index) => `+ function check_${index}(value) { return value !== null && value !== undefined; }`,
-              ).join('\n');
               const body = {
                 model: modelId,
                 messages: [
-                  { role: 'system', content: 'Review the supplied synthetic patch and return a concise final answer.' },
-                  {
-                    role: 'user',
-                    content: `Return exactly OK if there is no security defect in this repetitive synthetic patch.\n${representativeContext}`,
-                  },
+                  { role: 'system', content: 'Return only the requested final answer.' },
+                  { role: 'user', content: 'Reply with exactly OK.' },
                 ],
                 stream: false,
-                max_tokens: 4096,
+                max_tokens: 2048,
+                temperature: 0.2,
               };
-              body.temperature = 0.2;
 
               try {
                 const startedAt = Date.now();
@@ -103,9 +108,7 @@ jobs:
                 let payload = null;
                 try {
                   payload = JSON.parse(text);
-                } catch {
-                  // The sanitized response prefix below is enough for diagnostics.
-                }
+                } catch {}
                 const message = payload?.choices?.[0]?.message;
                 const content = typeof message?.content === 'string' ? message.content.trim() : '';
                 const reasoning = typeof message?.reasoning_content === 'string' ? message.reasoning_content : '';
@@ -115,10 +118,12 @@ jobs:
                   `[${modelId}] HTTP ${response.status} finish=${finishReason} elapsedMs=${elapsedMs} contentLen=${content.length} reasoningLen=${reasoning.length}`,
                 );
                 if (!response.ok || !content) {
-                  const errorText = payload?.error?.message || text.slice(0, 300) || 'empty response';
-                  return { modelId, usable: false, detail: errorText };
+                  const detail = payload?.error?.code
+                    || payload?.error?.type
+                    || (response.ok ? 'empty-content' : 'http-error');
+                  return { modelId, usable: false, detail };
                 }
-                return { modelId, usable: true, detail: content.slice(0, 80) };
+                return { modelId, usable: true, detail: 'ok' };
               } catch (error) {
                 const cause = error?.cause?.code || error?.cause?.name || error?.name || 'unknown';
                 console.log(`[${modelId}] request failed cause=${cause}`);
@@ -128,10 +133,11 @@ jobs:
               }
             }
 
-            const results = await Promise.all(candidates.map((modelId) => probe(modelId)));
+            const results = await Promise.all(requiredModels.map((modelId) => probe(modelId)));
             for (const result of results) {
               console.log(`[${result.modelId}] usable=${result.usable} detail=${result.detail}`);
             }
-            if (!results.some((result) => result.usable)) {
-              core.setFailed('No probed Lane A model returned usable final content.');
+            const unusableModels = results.filter((result) => !result.usable).map((result) => result.modelId);
+            if (unusableModels.length > 0) {
+              core.setFailed(`Required Lane A models did not return usable final content: ${unusableModels.join(', ')}`);
             }

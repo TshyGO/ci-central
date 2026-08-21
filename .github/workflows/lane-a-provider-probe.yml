@@ -56,7 +56,15 @@ jobs:
               .sort();
             console.log(`Lane A models (${modelIds.length}): ${modelIds.join(', ')}`);
 
-            const preferred = ['qwen3.8-max', 'deepseek-v4-pro', 'glm-5.2', 'kimi-k3'];
+            const preferred = [
+              'qwen3.8-max',
+              'qwen3.7-max',
+              'qwen3.7-plus',
+              'qwen3.6-flash',
+              'deepseek-v4-pro',
+              'glm-5.2',
+              'kimi-k3',
+            ];
             const candidates = preferred.filter((id) => modelIds.includes(id));
             if (candidates.length === 0) {
               core.setFailed('None of the known Lane A candidates are present in /models.');
@@ -66,18 +74,26 @@ jobs:
             async function probe(modelId) {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 180_000);
+              const representativeContext = Array.from(
+                { length: 600 },
+                (_, index) => `+ function check_${index}(value) { return value !== null && value !== undefined; }`,
+              ).join('\n');
               const body = {
                 model: modelId,
                 messages: [
-                  { role: 'system', content: 'Return only the requested final answer.' },
-                  { role: 'user', content: 'Reply with exactly OK.' },
+                  { role: 'system', content: 'Review the supplied synthetic patch and return a concise final answer.' },
+                  {
+                    role: 'user',
+                    content: `Return exactly OK if there is no security defect in this repetitive synthetic patch.\n${representativeContext}`,
+                  },
                 ],
                 stream: false,
-                max_tokens: 2048,
+                max_tokens: 4096,
               };
               if (modelId !== 'kimi-k3') body.temperature = 0.2;
 
               try {
+                const startedAt = Date.now();
                 const response = await fetch(`${baseUrl}/chat/completions`, {
                   method: 'POST',
                   headers,
@@ -95,8 +111,9 @@ jobs:
                 const content = typeof message?.content === 'string' ? message.content.trim() : '';
                 const reasoning = typeof message?.reasoning_content === 'string' ? message.reasoning_content : '';
                 const finishReason = payload?.choices?.[0]?.finish_reason ?? 'not-reported';
+                const elapsedMs = Date.now() - startedAt;
                 console.log(
-                  `[${modelId}] HTTP ${response.status} finish=${finishReason} contentLen=${content.length} reasoningLen=${reasoning.length}`,
+                  `[${modelId}] HTTP ${response.status} finish=${finishReason} elapsedMs=${elapsedMs} contentLen=${content.length} reasoningLen=${reasoning.length}`,
                 );
                 if (!response.ok || !content) {
                   const errorText = payload?.error?.message || text.slice(0, 300) || 'empty response';

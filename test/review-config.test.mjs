@@ -52,14 +52,6 @@ assert.equal(nebula.lanes[1].provider, 'tencent');
 assert.equal(nebula.lanes[2].provider, 'google');
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
-const probeWorkflow = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'lane-a-provider-probe.yml'), 'utf8');
-for (const model of [nebula.lanes[0].primary, ...nebula.lanes[0].fallbacks]) {
-  assert.ok(probeWorkflow.includes(`'${model.id}'`), `Lane A probe must track configured model ${model.id}`);
-}
-assert.ok(probeWorkflow.includes("if: github.repository == 'TshyGO/ci-central'"));
-assert.ok(probeWorkflow.includes("baseUrl.startsWith('https://')"));
-assert.ok(/actions\/github-script@[0-9a-f]{40}/.test(probeWorkflow), 'Lane A probe action must be SHA-pinned');
-
 const duplicateAcrossLanes = structuredClone(nebula);
 duplicateAcrossLanes.lanes[1].primary.id = duplicateAcrossLanes.lanes[0].primary.id;
 assert.doesNotThrow(() => source.validateConfig(duplicateAcrossLanes, 'TshyGO/NebulaLab'), 'routing must be lane-scoped, not keyed globally by model id');

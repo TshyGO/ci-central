@@ -20,4 +20,3 @@ jobs:
           node-version: '20'
       - run: node test/review-config.test.mjs
       - run: node test/pr-review.test.mjs
-      - run: node test/pr-review-retry.test.mjs

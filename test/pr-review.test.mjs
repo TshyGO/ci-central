@@ -154,7 +154,7 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
 
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.2,C:gemini-3.7-flash');
-check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.6-flash', 'deepseek-v4-pro-202606'].includes(model)));
+check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.7-max', 'deepseek-v4-pro-202606'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -267,10 +267,10 @@ check('protocol and credentials come from lanes', r.captured.find(({ lane }) => 
   && r.captured.find(({ lane }) => lane === 'C')?.headers['x-goog-api-key'] === 'lane-c-key');
 
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(503, '{"error":"unavailable"}') : healthy(call));
-check('Lane A uses Qwen Flash only after Qwen Max exhausts retries', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 3 && r.captured.filter(({ model }) => model === 'qwen3.6-flash').length === 1);
-const qwenFlash = r.captured.find(({ model }) => model === 'qwen3.6-flash')?.body;
-check('Qwen Flash fallback uses validated throttling contract', qwenFlash?.max_tokens === 8192 && qwenFlash?.temperature === 0.2 && qwenFlash.messages[1].content.includes('All changed file names:'));
-check('Qwen Flash still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by qwen3.6-flash')));
+check('Lane A uses Qwen3.7-Max only after Qwen3.8-Max exhausts retries', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 3 && r.captured.filter(({ model }) => model === 'qwen3.7-max').length === 1);
+const qwenFallback = r.captured.find(({ model }) => model === 'qwen3.7-max')?.body;
+check('Qwen3.7-Max fallback uses the full review contract', qwenFallback?.max_tokens === 16384 && qwenFallback?.temperature === 0.2 && qwenFallback.messages[1].content.includes('Changed files and patches:'));
+check('Qwen3.7-Max still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by qwen3.7-max')));
 
 r = await scenario((call) => call.model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back only to DeepSeek', r.captured.filter(({ model }) => model === 'glm-5.2').length === 3
@@ -279,14 +279,14 @@ check('Lane B falls back only to DeepSeek', r.captured.filter(({ model }) => mod
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure short-circuits only its provider lane', r.captured.filter(({ lane }) => lane === 'A').length === 1
-  && !r.captured.some(({ model }) => model === 'qwen3.6-flash') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
+  && !r.captured.some(({ model }) => model === 'qwen3.7-max') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
 check('failed lane publishes a diagnostic and fails the strict aggregate gate', /Lane A/.test(r.error?.message || '')
   && r.posted.length === 3
   && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted') && body.includes('status=diagnostic')));
 
 r = await scenario((call) => { if (call.lane === 'A') throw new Error('fetch failed'); return healthy(call); });
 check('DNS or TLS style failures retry primary but do not resend context to fallback', r.captured.filter(({ lane }) => lane === 'A').length === 3
-  && !r.captured.some(({ model }) => model === 'qwen3.6-flash') && r.logs.some((line) => line.includes('endpoint-unavailable') && line.includes('Lane A')));
+  && !r.captured.some(({ model }) => model === 'qwen3.7-max') && r.logs.some((line) => line.includes('endpoint-unavailable') && line.includes('Lane A')));
 
 r = await scenario((call) => call.model === 'qwen3.8-max' && 'temperature' in call.body
   ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}') : healthy(call));
@@ -294,7 +294,7 @@ const repairedQwen = r.captured.filter(({ model }) => model === 'qwen3.8-max').m
 check('optional-field rejection repairs the request inside the same lane', repairedQwen.length === 2 && !('temperature' in repairedQwen[1]));
 
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(200, chatResult(call.model, '')) : healthy(call));
-check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'qwen3.6-flash') && !r.posted.some((body) => body.includes('private thinking')));
+check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'qwen3.7-max') && !r.posted.some((body) => body.includes('private thinking')));
 
 r = await scenario((call) => call.lane === 'A'
   ? reply(200, chatResult(call.model, '# incomplete', { finish: 'LENGTH' }))

@@ -20,7 +20,7 @@ for (const repository of repositories) {
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.2', 'gemini-3.7-flash']);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.6-flash', 'deepseek-v4-pro-202606']);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606']);
   assert.equal(fromSource.lanes[2].primary.thinking_level, 'high', `${repository} Lane C must explicitly request high thinking`);
   assert.ok(fromSource.lanes.slice(0, 2).every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} non-Google lanes changed unexpectedly`);
@@ -50,7 +50,7 @@ const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'alibaba');
 assert.equal(nebula.lanes[1].provider, 'tencent');
 assert.equal(nebula.lanes[2].provider, 'google');
-assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'kimi-k3-throttled');
+assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
 const probeWorkflow = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'lane-a-provider-probe.yml'), 'utf8');
 for (const model of [nebula.lanes[0].primary, ...nebula.lanes[0].fallbacks]) {

@@ -75,7 +75,7 @@ jobs:
               .sort();
             console.log(`Lane A models (${modelIds.length}): ${modelIds.join(', ')}`);
 
-            const requiredModels = ['qwen3.8-max', 'qwen3.6-flash'];
+            const requiredModels = ['qwen3.8-max', 'qwen3.7-max'];
             const missingModels = requiredModels.filter((id) => !modelIds.includes(id));
             if (missingModels.length > 0) {
               core.setFailed(`Required Lane A models are absent from /models: ${missingModels.join(', ')}`);

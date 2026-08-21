@@ -38,10 +38,11 @@ const endpointDiagnostic = ({ head = headSha, status = 'diagnostic', bot = true,
   ].join('\n'),
 });
 
-async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()], repository = 'TshyGO/ci-central', workflowCall = false } = {}) {
+async function scenario({ run = {}, authoritative = {}, pull = {}, comments = [endpointDiagnostic()], repository = 'TshyGO/ci-central', workflowCall = false } = {}) {
   const reruns = [];
   const logs = [];
   const [owner, repo] = repository.split('/');
+  const effectiveRun = { ...baseRun, ...run };
   const github = {
     rest: {
       pulls: {
@@ -49,6 +50,7 @@ async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()]
       },
       issues: { listComments: 'comments' },
       actions: {
+        getWorkflowRun: async () => ({ data: { ...baseRun, ...authoritative } }),
         reRunWorkflowFailedJobs: async (args) => { reruns.push(args); },
       },
     },
@@ -58,7 +60,6 @@ async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()]
     repo: { owner, repo },
     payload: workflowCall ? {} : { workflow_run: { ...baseRun, ...run } },
   };
-  const effectiveRun = { ...baseRun, ...run };
   const env = workflowCall ? {
     RETRY_RUN_ID: String(effectiveRun.id),
     RETRY_WORKFLOW_NAME: effectiveRun.name,
@@ -68,7 +69,10 @@ async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()]
     RETRY_HEAD_SHA: effectiveRun.head_sha,
     RETRY_PULL_NUMBER: String(effectiveRun.pull_requests?.[0]?.number || 0),
   } : {};
-  await runScript(github, context, { info: (message) => logs.push(message) }, { env });
+  await runScript(github, context, {
+    info: (message) => logs.push(message),
+    setFailed: (message) => logs.push(`FAILED: ${message}`),
+  }, { env });
   return { reruns, logs };
 }
 
@@ -84,6 +88,7 @@ check('retry workflow supports centralized calls and self workflow_run events', 
   && ['run_id', 'workflow_name', 'run_event', 'conclusion', 'run_attempt', 'head_sha', 'pull_number']
     .every((input) => workflowText.includes(`${input}:`)));
 check('retry workflow has bounded trigger and write permission only for Actions', workflowText.includes("workflowRun.run_attempt !== 1")
+  && workflowText.includes('getWorkflowRun')
   && workflowText.includes('actions: write')
   && workflowText.includes('issues: read')
   && workflowText.includes('pull-requests: read'));
@@ -101,6 +106,10 @@ result = await scenario({ workflowCall: true, repository: 'TshyGO/NebulaLab' });
 check('explicit workflow_call metadata triggers the same bounded retry path', result.reruns.length === 1
   && result.reruns[0].run_id === baseRun.id
   && result.reruns[0].repo === 'NebulaLab');
+
+result = await scenario({ workflowCall: true, repository: 'TshyGO/NebulaLab', run: { head_sha: 'a'.repeat(40) } });
+check('workflow_call metadata must match the authoritative GitHub run', result.reruns.length === 0
+  && result.logs.some((line) => line.includes('does not match the authoritative workflow run')));
 
 result = await scenario({ run: { run_attempt: 2 } });
 check('second workflow attempt never triggers another rerun', result.reruns.length === 0);

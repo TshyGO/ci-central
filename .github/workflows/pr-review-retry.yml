@@ -39,6 +39,11 @@ concurrency:
 
 jobs:
   retry-lane-a-endpoint-failure:
+    if: |
+      github.repository == 'TshyGO/ci-central' ||
+      github.repository == 'TshyGO/NebulaLab' ||
+      github.repository == 'TshyGO/NebulaLab-Docs' ||
+      github.repository == 'TshyGO/NebulaLab-Plugins'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -56,7 +61,7 @@ jobs:
           script: |
             const directWorkflowRun = context.payload.workflow_run;
             const calledRunId = Number(process.env.RETRY_RUN_ID || 0);
-            const workflowRun = directWorkflowRun || (calledRunId ? {
+            let workflowRun = directWorkflowRun || (calledRunId ? {
               id: calledRunId,
               name: process.env.RETRY_WORKFLOW_NAME,
               event: process.env.RETRY_RUN_EVENT,
@@ -74,6 +79,32 @@ jobs:
             if (!allowedRepositories.has(`${context.repo.owner}/${context.repo.repo}`)) {
               core.info('Skip retry: repository is not managed by ci-central.');
               return;
+            }
+            if (!directWorkflowRun && workflowRun) {
+              const { data: authoritativeRun } = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: workflowRun.id,
+              });
+              const metadataMatches = authoritativeRun.name === workflowRun.name
+                && authoritativeRun.event === workflowRun.event
+                && authoritativeRun.conclusion === workflowRun.conclusion
+                && authoritativeRun.run_attempt === workflowRun.run_attempt
+                && authoritativeRun.head_sha === workflowRun.head_sha;
+              if (!metadataMatches) {
+                core.info('Skip retry: caller metadata does not match the authoritative workflow run.');
+                return;
+              }
+              const authoritativePulls = Array.isArray(authoritativeRun.pull_requests)
+                ? authoritativeRun.pull_requests
+                : [];
+              const requestedPullNumber = workflowRun.pull_requests?.[0]?.number;
+              if (authoritativePulls.length > 0
+                && !authoritativePulls.some((pull) => pull?.number === requestedPullNumber)) {
+                core.info('Skip retry: caller pull request is not linked to the authoritative workflow run.');
+                return;
+              }
+              workflowRun = { ...authoritativeRun, pull_requests: workflowRun.pull_requests };
             }
             if (!workflowRun
               || workflowRun.name !== 'AI PR Review'

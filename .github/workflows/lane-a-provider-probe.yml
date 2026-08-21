@@ -1,0 +1,121 @@
+name: Lane A Provider Probe
+
+on:
+  push:
+    branches:
+      - codex/lane-a-live-probe
+    paths:
+      - .github/workflows/lane-a-provider-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      LANE_A_KEY: ${{ secrets.PR_AGENT_LANE_A_KEY }}
+      LANE_A_API_BASE: ${{ secrets.PR_AGENT_LANE_A_API_BASE }}
+    steps:
+      - name: Discover and probe Lane A models
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const apiKey = process.env.LANE_A_KEY;
+            const baseUrl = (process.env.LANE_A_API_BASE || '').replace(/\/$/, '');
+            if (!apiKey || !baseUrl) {
+              core.setFailed('Lane A credentials are not configured.');
+              return;
+            }
+
+            const headers = {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            };
+
+            const modelsResponse = await fetch(`${baseUrl}/models`, { headers });
+            const modelsText = await modelsResponse.text();
+            if (!modelsResponse.ok) {
+              core.setFailed(`Lane A /models failed with HTTP ${modelsResponse.status}: ${modelsText.slice(0, 300)}`);
+              return;
+            }
+
+            let modelsPayload;
+            try {
+              modelsPayload = JSON.parse(modelsText);
+            } catch (error) {
+              core.setFailed(`Lane A /models returned invalid JSON: ${error.message}`);
+              return;
+            }
+
+            const modelIds = (Array.isArray(modelsPayload.data) ? modelsPayload.data : [])
+              .map((model) => model?.id)
+              .filter((id) => typeof id === 'string' && id.length > 0)
+              .sort();
+            console.log(`Lane A models (${modelIds.length}): ${modelIds.join(', ')}`);
+
+            const preferred = ['qwen3.8-max', 'deepseek-v4-pro', 'glm-5.2', 'kimi-k3'];
+            const candidates = preferred.filter((id) => modelIds.includes(id));
+            if (candidates.length === 0) {
+              core.setFailed('None of the known Lane A candidates are present in /models.');
+              return;
+            }
+
+            async function probe(modelId) {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 180_000);
+              const body = {
+                model: modelId,
+                messages: [
+                  { role: 'system', content: 'Return only the requested final answer.' },
+                  { role: 'user', content: 'Reply with exactly OK.' },
+                ],
+                stream: false,
+                max_tokens: 2048,
+              };
+              if (modelId !== 'kimi-k3') body.temperature = 0.2;
+
+              try {
+                const response = await fetch(`${baseUrl}/chat/completions`, {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify(body),
+                  signal: controller.signal,
+                });
+                const text = await response.text();
+                let payload = null;
+                try {
+                  payload = JSON.parse(text);
+                } catch {
+                  // The sanitized response prefix below is enough for diagnostics.
+                }
+                const message = payload?.choices?.[0]?.message;
+                const content = typeof message?.content === 'string' ? message.content.trim() : '';
+                const reasoning = typeof message?.reasoning_content === 'string' ? message.reasoning_content : '';
+                const finishReason = payload?.choices?.[0]?.finish_reason ?? 'not-reported';
+                console.log(
+                  `[${modelId}] HTTP ${response.status} finish=${finishReason} contentLen=${content.length} reasoningLen=${reasoning.length}`,
+                );
+                if (!response.ok || !content) {
+                  const errorText = payload?.error?.message || text.slice(0, 300) || 'empty response';
+                  return { modelId, usable: false, detail: errorText };
+                }
+                return { modelId, usable: true, detail: content.slice(0, 80) };
+              } catch (error) {
+                const cause = error?.cause?.code || error?.cause?.name || error?.name || 'unknown';
+                console.log(`[${modelId}] request failed cause=${cause}`);
+                return { modelId, usable: false, detail: cause };
+              } finally {
+                clearTimeout(timeout);
+              }
+            }
+
+            const results = await Promise.all(candidates.map((modelId) => probe(modelId)));
+            for (const result of results) {
+              console.log(`[${result.modelId}] usable=${result.usable} detail=${result.detail}`);
+            }
+            if (!results.some((result) => result.usable)) {
+              core.setFailed('No probed Lane A model returned usable final content.');
+            }

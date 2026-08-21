@@ -2,6 +2,28 @@ name: AI PR Review Retry
 
 on:
   workflow_call:
+    inputs:
+      run_id:
+        required: true
+        type: number
+      workflow_name:
+        required: true
+        type: string
+      run_event:
+        required: true
+        type: string
+      conclusion:
+        required: true
+        type: string
+      run_attempt:
+        required: true
+        type: number
+      head_sha:
+        required: true
+        type: string
+      pull_number:
+        required: true
+        type: number
   workflow_run:
     workflows: [AI PR Review]
     types: [completed]
@@ -17,19 +39,32 @@ concurrency:
 
 jobs:
   retry-lane-a-endpoint-failure:
-    if: |
-      github.event.workflow_run.name == 'AI PR Review' &&
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Retry failed AI review job once for Lane A endpoint failure
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          RETRY_RUN_ID: ${{ inputs.run_id }}
+          RETRY_WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          RETRY_RUN_EVENT: ${{ inputs.run_event }}
+          RETRY_CONCLUSION: ${{ inputs.conclusion }}
+          RETRY_RUN_ATTEMPT: ${{ inputs.run_attempt }}
+          RETRY_HEAD_SHA: ${{ inputs.head_sha }}
+          RETRY_PULL_NUMBER: ${{ inputs.pull_number }}
         with:
           script: |
-            const workflowRun = context.payload.workflow_run;
+            const directWorkflowRun = context.payload.workflow_run;
+            const calledRunId = Number(process.env.RETRY_RUN_ID || 0);
+            const workflowRun = directWorkflowRun || (calledRunId ? {
+              id: calledRunId,
+              name: process.env.RETRY_WORKFLOW_NAME,
+              event: process.env.RETRY_RUN_EVENT,
+              conclusion: process.env.RETRY_CONCLUSION,
+              run_attempt: Number(process.env.RETRY_RUN_ATTEMPT || 0),
+              head_sha: process.env.RETRY_HEAD_SHA,
+              pull_requests: [{ number: Number(process.env.RETRY_PULL_NUMBER || 0) }],
+            } : null);
             const allowedRepositories = new Set([
               'TshyGO/ci-central',
               'TshyGO/NebulaLab',
@@ -77,8 +112,8 @@ jobs:
             const evidence = laneAComment?.body?.match(evidencePattern);
             const isMatchingEndpointDiagnostic = evidence?.[1]?.toLowerCase() === workflowRun.head_sha.toLowerCase()
               && evidence?.[3]?.toLowerCase() === 'diagnostic'
-              && laneAComment.body.includes('endpoint-unavailable')
-              && laneAComment.body.includes('fetch failed');
+              && laneAComment?.body?.includes('endpoint-unavailable')
+              && laneAComment?.body?.includes('fetch failed');
             if (!isMatchingEndpointDiagnostic) {
               core.info('Skip retry: Lane A has no matching endpoint-unavailable diagnostic for this head.');
               return;

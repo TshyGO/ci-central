@@ -16,7 +16,7 @@ for (let i = start + 1; i < raw.length; i++) {
   lines.push(raw[i].slice(12));
 }
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-const runScript = new AsyncFunction('github', 'context', 'core', lines.join('\n'));
+const runScript = new AsyncFunction('github', 'context', 'core', 'process', lines.join('\n'));
 
 const headSha = 'deadbeef'.repeat(5);
 const workflowSha = 'feedface'.repeat(5);
@@ -38,7 +38,7 @@ const endpointDiagnostic = ({ head = headSha, status = 'diagnostic', bot = true,
   ].join('\n'),
 });
 
-async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()], repository = 'TshyGO/ci-central' } = {}) {
+async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()], repository = 'TshyGO/ci-central', workflowCall = false } = {}) {
   const reruns = [];
   const logs = [];
   const [owner, repo] = repository.split('/');
@@ -56,9 +56,19 @@ async function scenario({ run = {}, pull = {}, comments = [endpointDiagnostic()]
   };
   const context = {
     repo: { owner, repo },
-    payload: { workflow_run: { ...baseRun, ...run } },
+    payload: workflowCall ? {} : { workflow_run: { ...baseRun, ...run } },
   };
-  await runScript(github, context, { info: (message) => logs.push(message) });
+  const effectiveRun = { ...baseRun, ...run };
+  const env = workflowCall ? {
+    RETRY_RUN_ID: String(effectiveRun.id),
+    RETRY_WORKFLOW_NAME: effectiveRun.name,
+    RETRY_RUN_EVENT: effectiveRun.event,
+    RETRY_CONCLUSION: effectiveRun.conclusion,
+    RETRY_RUN_ATTEMPT: String(effectiveRun.run_attempt),
+    RETRY_HEAD_SHA: effectiveRun.head_sha,
+    RETRY_PULL_NUMBER: String(effectiveRun.pull_requests?.[0]?.number || 0),
+  } : {};
+  await runScript(github, context, { info: (message) => logs.push(message) }, { env });
   return { reruns, logs };
 }
 
@@ -70,8 +80,10 @@ const check = (name, condition) => {
 
 check('retry workflow supports centralized calls and self workflow_run events', workflowText.includes('workflow_call:')
   && workflowText.includes('workflow_run:')
-  && workflowText.includes('workflows: [AI PR Review]'));
-check('retry workflow has bounded trigger and write permission only for Actions', workflowText.includes("github.event.workflow_run.run_attempt == 1")
+  && workflowText.includes('workflows: [AI PR Review]')
+  && ['run_id', 'workflow_name', 'run_event', 'conclusion', 'run_attempt', 'head_sha', 'pull_number']
+    .every((input) => workflowText.includes(`${input}:`)));
+check('retry workflow has bounded trigger and write permission only for Actions', workflowText.includes("workflowRun.run_attempt !== 1")
   && workflowText.includes('actions: write')
   && workflowText.includes('issues: read')
   && workflowText.includes('pull-requests: read'));
@@ -84,6 +96,11 @@ check('matching Lane A endpoint diagnostic reruns failed jobs exactly once', res
   && result.reruns[0].run_id === baseRun.id
   && result.reruns[0].owner === 'TshyGO'
   && result.reruns[0].repo === 'ci-central');
+
+result = await scenario({ workflowCall: true, repository: 'TshyGO/NebulaLab' });
+check('explicit workflow_call metadata triggers the same bounded retry path', result.reruns.length === 1
+  && result.reruns[0].run_id === baseRun.id
+  && result.reruns[0].repo === 'NebulaLab');
 
 result = await scenario({ run: { run_attempt: 2 } });
 check('second workflow attempt never triggers another rerun', result.reruns.length === 0);

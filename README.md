@@ -101,7 +101,7 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须提�
 - Gemini Lane C 显式请求 `HIGH` thinking；中央 workflow 仅在 Google 请求中追加独立的双遍审核契约：先检查正确性、边界与失败路径，再挑战安全、架构、CI/config 和测试充分性；最终 findings-first，PR 描述与绿测只作为待验证声明。评论 footer 报告可用的 thought token 计数，但 thought 内容仍会过滤。
 - Qwen3.6-Flash 只在 Qwen3.8-Max 失败时调用：完整文件清单、1000 字符代表性 patch、8192 输出上限，并使用同一阿里 Lane A 凭据。
 - `Lane A Provider Probe` 仅供维护者手动运行；它使用固定 SHA 的 action、最小权限、并发互斥和有界超时，只验证当前 Qwen3.8-Max/Qwen3.6-Flash 链，且不记录原始上游错误响应。
-- `AI PR Review Retry` 监听失败的首轮 PR 审核。只有当前 head 的 Lane A 评论同时为 `diagnostic`、`endpoint-unavailable` 且包含 `fetch failed` 时，才调用 GitHub 的 failed-jobs rerun API；最多自动重跑一次。新 attempt 会分配新 runner，自动复用同 head/workflow 的 Lane B/C `valid` 证据。PR 已关闭、head 已变化、手动 `/review`、配额/鉴权/模型错误或第二次失败都不会继续重跑。
+- `AI PR Review Retry` 监听失败的首轮 PR 审核。只有当前 head 的 Lane A 评论同时为 `diagnostic`、`endpoint-unavailable` 且包含 `fetch failed` 时，才调用 GitHub 的 failed-jobs rerun API；最多自动重跑一次。新 attempt 会分配新 runner，自动复用同 head/workflow 的 Lane B/C `valid` 证据。ci-central 自仓直接读取 `workflow_run`；业务仓薄 caller 通过 `workflow_call` 显式传递 run ID、attempt、head SHA 与 PR 号等非敏感元数据。PR 已关闭、head 已变化、手动 `/review`、配额/鉴权/模型错误或第二次失败都不会继续重跑。
 - reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。

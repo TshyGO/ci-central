@@ -690,7 +690,7 @@ jobs:
               return;
             }
 
-            const headSha = reviewHeadSha.slice(0, 7);
+            const reviewedHeadShortSha = reviewHeadSha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             // Run lanes independently in parallel. A healthy lane emits exactly one comment;
             // fallbacks are sequential inside that lane and can never cross credentials.
@@ -730,12 +730,12 @@ jobs:
                 `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
                 `## AI PR Review · Lane ${lane.id} · ${primary.label}`,
                 '',
-                `> 审核提交：\`${headSha}\` · 更新时间：\`${reviewedAt}\` · 此评论会随 PR 新提交原地更新 · [Run](${runUrl})`,
+                `> 审核提交：\`${reviewedHeadShortSha}\` · 更新时间：\`${reviewedAt}\` · 此评论会随 PR 新提交原地更新 · [Run](${runUrl})`,
                 '',
                 ...banner,
                 review,
                 '',
-                `<sub>${modelLine} · Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : 'not reported'} · Commit: ${headSha} · [Run](${runUrl})</sub>`,
+                `<sub>${modelLine} · Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : 'not reported'} · Commit: ${reviewedHeadShortSha} · [Run](${runUrl})</sub>`,
               ].join('\n');
               try {
                 const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;

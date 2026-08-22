@@ -170,6 +170,11 @@ check('each healthy lane publishes exactly one stable lane comment', r.posted.le
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('healthy comments carry reusable v2 evidence for the full head and workflow SHAs', ['A', 'B', 'C'].every((lane) =>
   r.posted.some((body) => body.includes(`<!-- ai-pr-review-evidence:v2 lane=${lane} head=${headSha} workflow=${workflowSha} status=valid -->`))));
+check('healthy comments visibly identify the reviewed head and stable-update behavior', r.posted.every((body) =>
+  body.includes(`> 审核提交：\`${headSha.slice(0, 7)}\``)
+  && /更新时间：`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z`/.test(body)
+  && body.includes('此评论会随 PR 新提交原地更新')
+  && body.includes(`[Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`)));
 
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: validEvidence });
@@ -206,6 +211,11 @@ const otherHeadPull = { ...pull, head: { ...pull.head, sha: otherHeadSha } };
 const otherHeadContext = { ...context, payload: { pull_request: { number: 42, head: { sha: otherHeadSha } } } };
 r = await scenario(healthy, {}, { comments: validEvidence, pulls: [otherHeadPull], context: otherHeadContext });
 check('valid evidence from an older PR head is not reused', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
+check('new-head reviews overwrite stable comments in place with visible freshness evidence',
+  r.comments.map(({ id }) => id).join(',') === '1,2,3'
+  && r.comments.every(({ body }) => body.includes(`> 审核提交：\`${otherHeadSha.slice(0, 7)}\``)
+    && body.includes(`head=${otherHeadSha}`)
+    && !body.includes(`head=${headSha}`)));
 
 const manualContext = { ...context, eventName: 'issue_comment', payload: { issue: { number: 42 }, comment: { body: '/review' } } };
 r = await scenario(healthy, {}, { comments: validEvidence, context: manualContext });

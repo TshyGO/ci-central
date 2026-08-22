@@ -42,10 +42,15 @@ jobs:
         shell: bash
         env:
           JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
           EVENT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           ref="$JOB_WORKFLOW_SHA"
+          expected_prefix="TshyGO/ci-central/.github/workflows/pr-review.yml@"
+          if [[ -z "$ref" && "$JOB_WORKFLOW_REF" == "$expected_prefix"* ]]; then
+            ref="${JOB_WORKFLOW_REF#"$expected_prefix"}"
+          fi
           if [[ -z "$ref" && "$REPOSITORY" == "TshyGO/ci-central" ]]; then
             ref="$EVENT_SHA"
           fi
@@ -95,7 +100,7 @@ jobs:
             }
             const workflowSha = (process.env.PR_REVIEW_WORKFLOW_SHA || '').trim().toLowerCase();
             if (!/^[0-9a-f]{40}$/.test(workflowSha)) {
-              throw new Error('github.job_workflow_sha must provide the full 40-character reusable workflow commit SHA.');
+              throw new Error('The resolved reusable workflow ref must provide the full 40-character ci-central commit SHA.');
             }
             const lanes = reviewConfig.lanes;
             const reviewPolicy = reviewConfig.review_policy || {};

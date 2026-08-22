@@ -86,13 +86,13 @@ PR_AGENT_LANE_C_API_BASE
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须提供 `github.job_workflow_sha`；仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 的该字段为空时，才使用本次事件的 `github.sha`。解析结果同时用于检出 `review-action`/仓库 JSON 和 v2 evidence，业务仓的 PR ref 不会作为中央 ref。
+reusable workflow 先解析并校验 40 位中央 ref：优先使用 `github.job_workflow_sha`；GitHub 对外部 caller 未提供该字段时，从 `github.job_workflow_ref` 中仅接受精确的 `TshyGO/ci-central/.github/workflows/pr-review.yml@<40位SHA>`。仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 无法提供上述 SHA 时，才使用本次事件的 `github.sha`。解析结果同时用于检出 `review-action`/仓库 JSON 和 v2 evidence，分支、tag、业务仓 PR ref 和其他 workflow 路径都会失败关闭。
 
 ## 精度、去重与节流保证
 
 - reusable job 按仓库和 PR 号启用 `cancel-in-progress: true`：自动 PR 事件与手动 `/review` 共享同一并发组，新触发取消旧运行，不会并发更新同一组评论。
 - 上下文收集前、模型调用前、发布评论前分别核对 PR head SHA。
-- 每条 Lane 评论都包含 v2 机器证据：Lane、完整 40 位 head SHA、`github.job_workflow_sha` 和 `valid`、`diagnostic` 或 `partial` 状态。
+- 每条 Lane 评论都包含 v2 机器证据：Lane、完整 40 位 head SHA、解析后的中央 workflow SHA 和 `valid`、`diagnostic` 或 `partial` 状态。
 - 每条 Lane 评论在标题下方醒目标出审核 commit、更新时间和运行链接；新提交仍原地更新同一条稳定评论，不会因时间线位置不变而隐藏审核新鲜度。
 - 自动触发只复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；缺失、旧版、诊断和不完整 Lane 会单独重跑。
 - 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。

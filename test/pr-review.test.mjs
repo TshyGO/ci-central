@@ -131,12 +131,16 @@ check('workflow resolves repository config and exposes only fixed lane slots', w
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
 check('config resolver uses a validated trusted workflow SHA', workflowText.includes('- name: Resolve matching central ref')
   && workflowText.includes('JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}')
+  && workflowText.includes('JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}')
+  && workflowText.includes('expected_prefix="TshyGO/ci-central/.github/workflows/pr-review.yml@"')
+  && workflowText.includes('ref="${JOB_WORKFLOW_REF#"$expected_prefix"}"')
   && workflowText.includes('REPOSITORY: ${{ github.repository }}')
   && workflowText.includes('"$REPOSITORY" == "TshyGO/ci-central"')
   && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('trusted 40-character ci-central workflow SHA')
   && !workflowText.includes('github.workflow_ref')
+  && !workflowText.includes('TshyGO/ci-central/.github/workflows/pr-review.yml@main')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
 check('reusable workflow accepts only fixed Lane secret slots',
   !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']

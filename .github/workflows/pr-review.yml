@@ -44,7 +44,7 @@ jobs:
     steps:
       - name: Resolve matching central ref
         id: central-ref
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
           JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
@@ -97,7 +97,7 @@ jobs:
             core.setOutput('sha', ref);
 
       - name: Check out matching central configuration
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: TshyGO/ci-central
           ref: ${{ steps.central-ref.outputs.sha }}
@@ -111,7 +111,7 @@ jobs:
           repository: ${{ github.repository }}
 
       - name: Review pull request
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           LANE_A_KEY: ${{ secrets.PR_AGENT_LANE_A_KEY }}
           LANE_A_API_BASE: ${{ secrets.PR_AGENT_LANE_A_API_BASE }}

@@ -8,6 +8,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const raw = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-review.yml'), 'utf8').split('\n');
 const workflowText = raw.join('\n');
 const callerText = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-agent.yml'), 'utf8');
+const workflowCallInputsBlock = /workflow_call:\n    inputs:\n([\s\S]*?)    secrets:/.exec(workflowText)?.[1] || '';
+const workflowCallInputs = [...workflowCallInputsBlock.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
 function extractScript(stepName) {
   const step = raw.findIndex((line) => line.trim() === `- name: ${stepName}`);
   const start = raw.findIndex((line, index) => index > step && line.trim() === 'script: |');
@@ -143,9 +145,14 @@ async function resolverScenario(env) {
 }
 
 check('workflow exposes only immutable central SHA metadata, never model, provider, fallback, prompt, or budget inputs',
-  workflowText.includes('central_workflow_sha:')
+  workflowCallInputs.join(',') === 'central_workflow_sha'
   && !['model:', 'provider:', 'fallback:', 'system_prompt:', 'max_output_tokens:', 'model_budget_ms:', 'request_timeout_ms:']
     .some((name) => workflowText.slice(0, workflowText.indexOf('secrets:')).includes(name)));
+check('security-critical first-party Actions are pinned to immutable commits',
+  workflowText.includes('actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd')
+  && workflowText.includes('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09')
+  && !workflowText.includes('actions/github-script@v8')
+  && !workflowText.includes('actions/checkout@v5'));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
 check('config resolver uses a validated trusted workflow SHA', workflowText.includes('- name: Resolve matching central ref')
@@ -181,6 +188,14 @@ resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKF
 check('a provided job workflow ref rejects another workflow path', /exact ci-central pr-review/.test(resolved.error?.message || ''));
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_SHA: '0'.repeat(40) });
 check('external caller rejects a GitHub context SHA that disagrees with its explicit pin', /does not match/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+});
+check('matching GitHub SHA, exact workflow ref, and caller pin resolve without fallback warning',
+  resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.warnings.length === 0);
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
 check('same-repository relative caller falls back to its exact event SHA', resolved.error === undefined && resolved.outputs.sha === headSha);
 check('reusable workflow accepts only fixed Lane secret slots',

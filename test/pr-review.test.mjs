@@ -196,8 +196,19 @@ resolved = await resolverScenario({
 });
 check('matching GitHub SHA, exact workflow ref, and caller pin resolve without fallback warning',
   resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.warnings.length === 0);
+resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_SHA: '0'.repeat(40),
+  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+});
+check('disagreeing GitHub job workflow SHA and ref fail closed', /job_workflow_sha and github.job_workflow_ref disagree/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_SHA: 'not-a-sha' });
+check('a malformed GitHub job workflow SHA fails with a precise diagnostic', /not a full 40-character SHA/.test(resolved.error?.message || ''));
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
 check('same-repository relative caller falls back to its exact event SHA', resolved.error === undefined && resolved.outputs.sha === headSha);
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
+check('same-repository caller rejects an accidentally mismatched explicit SHA', /same-repository central_workflow_sha does not match/.test(resolved.error?.message || ''));
 check('reusable workflow accepts only fixed Lane secret slots',
   !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']
     .some((name) => workflowText.includes(name)));

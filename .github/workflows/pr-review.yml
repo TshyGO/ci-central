@@ -62,6 +62,9 @@ jobs:
             const expectedPrefix = 'TshyGO/ci-central/.github/workflows/pr-review.yml@';
             let ref = jobWorkflowSha;
 
+            if (jobWorkflowSha && !shaPattern.test(jobWorkflowSha)) {
+              throw new Error('github.job_workflow_sha is present but is not a full 40-character SHA.');
+            }
             if (jobWorkflowRef) {
               if (!jobWorkflowRef.startsWith(expectedPrefix)) {
                 throw new Error('github.job_workflow_ref does not identify the exact ci-central pr-review workflow.');
@@ -78,6 +81,9 @@ jobs:
 
             if (repository === 'TshyGO/ci-central') {
               if (!ref) ref = eventSha;
+              if (callerWorkflowSha && callerWorkflowSha !== ref) {
+                throw new Error('The same-repository central_workflow_sha does not match the resolved PR workflow SHA.');
+              }
             } else {
               if (!shaPattern.test(callerWorkflowSha)) {
                 throw new Error('External callers must repeat their full ci-central uses pin as central_workflow_sha.');

@@ -8,15 +8,22 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const raw = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-review.yml'), 'utf8').split('\n');
 const workflowText = raw.join('\n');
 const callerText = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-agent.yml'), 'utf8');
-const start = raw.findIndex((line) => line.trim() === 'script: |');
-if (start < 0) throw new Error('script block not found');
-const lines = [];
-for (let i = start + 1; i < raw.length; i++) {
-  if (raw[i].trim() !== '' && !raw[i].startsWith(' '.repeat(12))) break;
-  lines.push(raw[i].slice(12));
+const workflowCallInputsBlock = /workflow_call:\n    inputs:\n([\s\S]*?)    secrets:/.exec(workflowText)?.[1] || '';
+const workflowCallInputs = [...workflowCallInputsBlock.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
+function extractScript(stepName) {
+  const step = raw.findIndex((line) => line.trim() === `- name: ${stepName}`);
+  const start = raw.findIndex((line, index) => index > step && line.trim() === 'script: |');
+  if (step < 0 || start < 0) throw new Error(`${stepName} script block not found`);
+  const lines = [];
+  for (let i = start + 1; i < raw.length; i++) {
+    if (raw[i].trim() !== '' && !raw[i].startsWith(' '.repeat(12))) break;
+    lines.push(raw[i].slice(12));
+  }
+  return lines.join('\n');
 }
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', lines.join('\n'));
+const runResolver = new AsyncFunction('core', 'process', extractScript('Resolve matching central ref'));
+const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', extractScript('Review pull request'));
 
 const centralConfig = JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', 'TshyGO__NebulaLab.json'), 'utf8'));
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
@@ -126,18 +133,82 @@ const checks = [];
 const check = (name, condition) => { checks.push(Boolean(condition)); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : chatResult(model, `# review ${model}`));
 
-check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
+async function resolverScenario(env) {
+  const outputs = {}, warnings = [];
+  let error;
+  try {
+    await runResolver({ setOutput: (name, value) => { outputs[name] = value; }, warning: (message) => warnings.push(message) }, { env });
+  } catch (caught) {
+    error = caught;
+  }
+  return { outputs, warnings, error };
+}
+
+check('workflow exposes only immutable central SHA metadata, never model, provider, fallback, prompt, or budget inputs',
+  workflowCallInputs.join(',') === 'central_workflow_sha'
+  && !['model:', 'provider:', 'fallback:', 'system_prompt:', 'max_output_tokens:', 'model_budget_ms:', 'request_timeout_ms:']
+    .some((name) => workflowText.slice(0, workflowText.indexOf('secrets:')).includes(name)));
+check('security-critical first-party Actions are pinned to immutable commits',
+  workflowText.includes('actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd')
+  && workflowText.includes('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09')
+  && !workflowText.includes('actions/github-script@v8')
+  && !workflowText.includes('actions/checkout@v5'));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
 check('config resolver uses a validated trusted workflow SHA', workflowText.includes('- name: Resolve matching central ref')
   && workflowText.includes('JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}')
+  && workflowText.includes('JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}')
+  && workflowText.includes('CALLER_WORKFLOW_SHA: ${{ inputs.central_workflow_sha }}')
+  && workflowText.includes("const expectedPrefix = 'TshyGO/ci-central/.github/workflows/pr-review.yml@';")
+  && workflowText.includes('External callers must repeat their full ci-central uses pin as central_workflow_sha.')
+  && workflowText.includes('The reusable workflow context SHA does not match central_workflow_sha.')
   && workflowText.includes('REPOSITORY: ${{ github.repository }}')
-  && workflowText.includes('"$REPOSITORY" == "TshyGO/ci-central"')
+  && workflowText.includes("repository === 'TshyGO/ci-central'")
   && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('trusted 40-character ci-central workflow SHA')
   && !workflowText.includes('github.workflow_ref')
+  && !workflowText.includes('TshyGO/ci-central/.github/workflows/pr-review.yml@main')
   && !workflowText.includes('TshyGO/ci-central/review-action@main'));
+
+let resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_SHA: '',
+  JOB_WORKFLOW_REF: '',
+  EVENT_SHA: headSha,
+});
+check('external caller falls back visibly to its reviewed explicit SHA when GitHub omits both job workflow fields',
+  resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.warnings.length === 1);
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: '', EVENT_SHA: headSha });
+check('external caller rejects a missing explicit central SHA', /must repeat/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_REF: 'TshyGO/ci-central/.github/workflows/pr-review.yml@main' });
+check('a provided job workflow ref rejects branch or tag pins', /full 40-character/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/other.yml@${workflowSha}` });
+check('a provided job workflow ref rejects another workflow path', /exact ci-central pr-review/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_SHA: '0'.repeat(40) });
+check('external caller rejects a GitHub context SHA that disagrees with its explicit pin', /does not match/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+});
+check('matching GitHub SHA, exact workflow ref, and caller pin resolve without fallback warning',
+  resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.warnings.length === 0);
+resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_SHA: '0'.repeat(40),
+  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+});
+check('disagreeing GitHub job workflow SHA and ref fail closed', /job_workflow_sha and github.job_workflow_ref disagree/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_SHA: 'not-a-sha' });
+check('a malformed GitHub job workflow SHA fails with a precise diagnostic', /not a full 40-character SHA/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
+check('same-repository relative caller falls back to its exact event SHA', resolved.error === undefined && resolved.outputs.sha === headSha);
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
+check('same-repository caller rejects an accidentally mismatched explicit SHA', /same-repository central_workflow_sha does not match/.test(resolved.error?.message || ''));
 check('reusable workflow accepts only fixed Lane secret slots',
   !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']
     .some((name) => workflowText.includes(name)));

@@ -93,6 +93,7 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须提�
 - reusable job 按仓库和 PR 号启用 `cancel-in-progress: true`：自动 PR 事件与手动 `/review` 共享同一并发组，新触发取消旧运行，不会并发更新同一组评论。
 - 上下文收集前、模型调用前、发布评论前分别核对 PR head SHA。
 - 每条 Lane 评论都包含 v2 机器证据：Lane、完整 40 位 head SHA、`github.job_workflow_sha` 和 `valid`、`diagnostic` 或 `partial` 状态。
+- 每条 Lane 评论在标题下方醒目标出审核 commit、更新时间和运行链接；新提交仍原地更新同一条稳定评论，不会因时间线位置不变而隐藏审核新鲜度。
 - 自动触发只复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；缺失、旧版、诊断和不完整 Lane 会单独重跑。
 - 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
 - Lane 主模型成功时绝不调用 fallback。
@@ -153,7 +154,7 @@ jobs:
         github.event.issue.pull_request != null &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
         startsWith(github.event.comment.body, '/review')))
-    uses: TshyGO/ci-central/.github/workflows/pr-review.yml@main
+    uses: TshyGO/ci-central/.github/workflows/pr-review.yml@<FULL_40_CHAR_CI_CENTRAL_SHA>
     permissions:
       contents: read
       issues: write

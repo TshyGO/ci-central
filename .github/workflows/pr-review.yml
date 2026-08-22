@@ -708,6 +708,7 @@ jobs:
               return;
             }
 
+            const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
             let posted = 0;
             const validLaneIds = new Set(isManualReview ? [] : reusableLaneIds);
             for (let i = 0; i < settled.length; i++) {
@@ -728,6 +729,8 @@ jobs:
                 `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
                 `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
                 `## AI PR Review · Lane ${lane.id} · ${primary.label}`,
+                '',
+                `> 审核提交：\`${headSha}\` · 更新时间：\`${reviewedAt}\` · 此评论会随 PR 新提交原地更新 · [Run](${runUrl})`,
                 '',
                 ...banner,
                 review,

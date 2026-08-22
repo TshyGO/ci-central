@@ -44,42 +44,57 @@ jobs:
     steps:
       - name: Resolve matching central ref
         id: central-ref
-        shell: bash
+        uses: actions/github-script@v8
         env:
           JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
           JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
           CALLER_WORKFLOW_SHA: ${{ inputs.central_workflow_sha }}
           EVENT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
-        run: |
-          ref="$JOB_WORKFLOW_SHA"
-          expected_prefix="TshyGO/ci-central/.github/workflows/pr-review.yml@"
-          if [[ -z "$ref" && "$JOB_WORKFLOW_REF" == "$expected_prefix"* ]]; then
-            job_ref_sha="${JOB_WORKFLOW_REF#"$expected_prefix"}"
-            if [[ "$job_ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
-              ref="$job_ref_sha"
-            fi
-          fi
-          if [[ "$REPOSITORY" == "TshyGO/ci-central" ]]; then
-            if [[ -z "$ref" ]]; then
-              ref="$EVENT_SHA"
-            fi
-          else
-            if [[ ! "$CALLER_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::External callers must repeat their full ci-central uses pin as central_workflow_sha."
-              exit 1
-            fi
-            if [[ -n "$ref" && "$ref" != "$CALLER_WORKFLOW_SHA" ]]; then
-              echo "::error::The reusable workflow context SHA does not match central_workflow_sha."
-              exit 1
-            fi
-            ref="$CALLER_WORKFLOW_SHA"
-          fi
-          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Cannot resolve a trusted 40-character ci-central workflow SHA."
-            exit 1
-          fi
-          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+        with:
+          script: |
+            const shaPattern = /^[0-9a-f]{40}$/;
+            const repository = process.env.REPOSITORY || '';
+            const jobWorkflowSha = (process.env.JOB_WORKFLOW_SHA || '').trim().toLowerCase();
+            const jobWorkflowRef = (process.env.JOB_WORKFLOW_REF || '').trim();
+            const callerWorkflowSha = (process.env.CALLER_WORKFLOW_SHA || '').trim().toLowerCase();
+            const eventSha = (process.env.EVENT_SHA || '').trim().toLowerCase();
+            const expectedPrefix = 'TshyGO/ci-central/.github/workflows/pr-review.yml@';
+            let ref = jobWorkflowSha;
+
+            if (jobWorkflowRef) {
+              if (!jobWorkflowRef.startsWith(expectedPrefix)) {
+                throw new Error('github.job_workflow_ref does not identify the exact ci-central pr-review workflow.');
+              }
+              const refSha = jobWorkflowRef.slice(expectedPrefix.length).toLowerCase();
+              if (!shaPattern.test(refSha)) {
+                throw new Error('github.job_workflow_ref must be pinned to a full 40-character ci-central SHA.');
+              }
+              if (ref && ref !== refSha) {
+                throw new Error('github.job_workflow_sha and github.job_workflow_ref disagree.');
+              }
+              ref = refSha;
+            }
+
+            if (repository === 'TshyGO/ci-central') {
+              if (!ref) ref = eventSha;
+            } else {
+              if (!shaPattern.test(callerWorkflowSha)) {
+                throw new Error('External callers must repeat their full ci-central uses pin as central_workflow_sha.');
+              }
+              if (ref && ref !== callerWorkflowSha) {
+                throw new Error('The reusable workflow context SHA does not match central_workflow_sha.');
+              }
+              if (!ref) {
+                core.warning('GitHub did not expose job_workflow_sha or job_workflow_ref; relying on the reviewed caller central_workflow_sha input.');
+              }
+              ref = callerWorkflowSha;
+            }
+
+            if (!shaPattern.test(ref)) {
+              throw new Error('Cannot resolve a trusted 40-character ci-central workflow SHA.');
+            }
+            core.setOutput('sha', ref);
 
       - name: Check out matching central configuration
         uses: actions/checkout@v5

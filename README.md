@@ -86,7 +86,7 @@ PR_AGENT_LANE_C_API_BASE
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 先解析并校验 40 位中央 ref：优先使用 `github.job_workflow_sha`；GitHub 对外部 caller 未提供该字段时，从 `github.job_workflow_ref` 中仅接受精确的 `TshyGO/ci-central/.github/workflows/pr-review.yml@<40位SHA>`。仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 无法提供上述 SHA 时，才使用本次事件的 `github.sha`。解析结果同时用于检出 `review-action`/仓库 JSON 和 v2 evidence，分支、tag、业务仓 PR ref 和其他 workflow 路径都会失败关闭。
+reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 `uses` 中的同一个完整 SHA 重复传入唯一的非策略输入 `central_workflow_sha`；如果 GitHub 提供 `github.job_workflow_sha`，或可从精确的 `github.job_workflow_ref` 中解析出 SHA，则两者必须一致。仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 无法提供上述 SHA 时，才使用本次事件的 `github.sha`。解析结果同时用于检出 `review-action`/仓库 JSON 和 v2 evidence；分支、tag、业务仓 PR ref、其他 workflow 路径以及 caller pin 不一致都会失败关闭。
 
 ## 精度、去重与节流保证
 
@@ -159,6 +159,8 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+    with:
+      central_workflow_sha: <FULL_40_CHAR_CI_CENTRAL_SHA>
     secrets:
       PR_AGENT_LANE_A_KEY: ${{ secrets.PR_AGENT_LANE_A_KEY }}
       PR_AGENT_LANE_A_API_BASE: ${{ secrets.PR_AGENT_LANE_A_API_BASE }}

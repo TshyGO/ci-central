@@ -6,6 +6,11 @@ name: Reusable AI PR Review
 
 on:
   workflow_call:
+    inputs:
+      central_workflow_sha:
+        description: Full immutable ci-central commit SHA repeated from the external caller's uses pin
+        required: false
+        type: string
     secrets:
       PR_AGENT_LANE_A_KEY:
         required: false
@@ -43,16 +48,32 @@ jobs:
         env:
           JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
           JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ inputs.central_workflow_sha }}
           EVENT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           ref="$JOB_WORKFLOW_SHA"
           expected_prefix="TshyGO/ci-central/.github/workflows/pr-review.yml@"
           if [[ -z "$ref" && "$JOB_WORKFLOW_REF" == "$expected_prefix"* ]]; then
-            ref="${JOB_WORKFLOW_REF#"$expected_prefix"}"
+            job_ref_sha="${JOB_WORKFLOW_REF#"$expected_prefix"}"
+            if [[ "$job_ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              ref="$job_ref_sha"
+            fi
           fi
-          if [[ -z "$ref" && "$REPOSITORY" == "TshyGO/ci-central" ]]; then
-            ref="$EVENT_SHA"
+          if [[ "$REPOSITORY" == "TshyGO/ci-central" ]]; then
+            if [[ -z "$ref" ]]; then
+              ref="$EVENT_SHA"
+            fi
+          else
+            if [[ ! "$CALLER_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::External callers must repeat their full ci-central uses pin as central_workflow_sha."
+              exit 1
+            fi
+            if [[ -n "$ref" && "$ref" != "$CALLER_WORKFLOW_SHA" ]]; then
+              echo "::error::The reusable workflow context SHA does not match central_workflow_sha."
+              exit 1
+            fi
+            ref="$CALLER_WORKFLOW_SHA"
           fi
           if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Cannot resolve a trusted 40-character ci-central workflow SHA."

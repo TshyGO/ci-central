@@ -126,14 +126,20 @@ const checks = [];
 const check = (name, condition) => { checks.push(Boolean(condition)); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 const healthy = ({ model, lane }) => reply(200, lane === 'C' ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' }) : chatResult(model, `# review ${model}`));
 
-check('workflow has no model, provider, fallback, prompt, or budget inputs', !workflowText.includes('inputs:'));
+check('workflow exposes only immutable central SHA metadata, never model, provider, fallback, prompt, or budget inputs',
+  workflowText.includes('central_workflow_sha:')
+  && !['model:', 'provider:', 'fallback:', 'system_prompt:', 'max_output_tokens:', 'model_budget_ms:', 'request_timeout_ms:']
+    .some((name) => workflowText.slice(0, workflowText.indexOf('secrets:')).includes(name)));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
 check('config resolver uses a validated trusted workflow SHA', workflowText.includes('- name: Resolve matching central ref')
   && workflowText.includes('JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}')
   && workflowText.includes('JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}')
+  && workflowText.includes('CALLER_WORKFLOW_SHA: ${{ inputs.central_workflow_sha }}')
   && workflowText.includes('expected_prefix="TshyGO/ci-central/.github/workflows/pr-review.yml@"')
-  && workflowText.includes('ref="${JOB_WORKFLOW_REF#"$expected_prefix"}"')
+  && workflowText.includes('job_ref_sha="${JOB_WORKFLOW_REF#"$expected_prefix"}"')
+  && workflowText.includes('External callers must repeat their full ci-central uses pin as central_workflow_sha.')
+  && workflowText.includes('The reusable workflow context SHA does not match central_workflow_sha.')
   && workflowText.includes('REPOSITORY: ${{ github.repository }}')
   && workflowText.includes('"$REPOSITORY" == "TshyGO/ci-central"')
   && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')

@@ -27,8 +27,8 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | Lane | 当前供应商 | 协议 | 模型链 |
 |---|---|---|---|
 | A | 阿里 | OpenAI Chat Completions | Qwen3.8-Max → Qwen3.7-Max |
-| B | 腾讯 | OpenAI Chat Completions | DeepSeek-V4-Pro → DeepSeek-V4-Pro-202606 |
-| C | SenseNova | OpenAI Chat Completions | GLM-5.2 |
+| B | 腾讯 | OpenAI Chat Completions | GLM-5.2 → DeepSeek-V4-Pro-202606 |
+| C | SenseNova | OpenAI Chat Completions | DeepSeek-V4-Flash → SenseNova-6.8-Flash-Lite |
 
 配置由 `github.repository` 自动选择：
 

@@ -362,14 +362,6 @@ check('full-context primaries preserve input while SenseNova omits only max_toke
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 
-const expandedLaneBConfig = structuredClone(centralConfig);
-expandedLaneBConfig.lanes[1].primary.max_output_tokens = 393216;
-expandedLaneBConfig.lanes[1].fallbacks[0].max_output_tokens = 393216;
-r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(expandedLaneBConfig) });
-check('repository policy preserves the expanded Lane B output space', r.error === undefined
-  && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 16384
-  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 393216
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
@@ -385,11 +377,13 @@ check('Qwen3.7-Max still yields one Lane A comment', r.posted.filter((body) => b
 r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back only to its dated DeepSeek model', r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.2').length === 3
   && r.captured.filter(({ model }) => model === 'deepseek-v4-pro-202606').length === 1
-  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-202606'));
+  && r.captured.find(({ model }) => model === 'deepseek-v4-pro-202606')?.body.max_tokens === 393216
+  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-202606')
+  && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by deepseek-v4-pro-202606')));
 
-r = await scenario((call) => call.model === 'deepseek-v4-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+r = await scenario((call) => call.lane === 'C' && call.model === 'deepseek-v4-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
 check('Lane C falls back only to SenseNova 6.8 Flash Lite after DeepSeek V4 Flash exhausts retries',
-  r.captured.filter(({ model }) => model === 'deepseek-v4-flash').length === 3
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'deepseek-v4-flash').length === 3
   && r.captured.filter(({ model }) => model === 'sensenova-6.8-flash-lite').length === 1
   && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'sensenova-6.8-flash-lite')
   && r.posted.some((body) => body.includes('deepseek-v4-flash unavailable -> served by sensenova-6.8-flash-lite')));

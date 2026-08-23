@@ -44,8 +44,8 @@ for (const repository of repositories) {
     [65536, 393216],
     `${repository} Lane B must use GLM primary and retain the DeepSeek fallback ceiling`,
   );
-  assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must allow high reasoning`);
-  assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must allow high reasoning`);
+  assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must preserve the provider response window`);
+  assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must preserve the provider response window`);
   assert.equal(config.lanes[2].request_timeout_ms, 600000, `${repository} Lane C request budget must preserve the provider response window`);
   assert.equal(config.lanes[2].model_budget_ms, 600000, `${repository} Lane C must fall back after one full provider response window`);
 }

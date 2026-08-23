@@ -37,10 +37,10 @@
       "request_timeout_ms": 900000,
       "model_budget_ms": 900000,
       "primary": {
-        "id": "deepseek/deepseek-v4-pro",
-        "label": "DeepSeek-V4-Pro",
+        "id": "glm-5.2",
+        "label": "GLM-5.2",
         "context_profile": "full",
-        "max_output_tokens": 393216,
+        "max_output_tokens": 65536,
         "temperature": 0.2
       },
       "fallbacks": [
@@ -60,8 +60,8 @@
       "request_timeout_ms": 600000,
       "model_budget_ms": 600000,
       "primary": {
-        "id": "glm-5.2",
-        "label": "GLM-5.2",
+        "id": "deepseek-v4-flash",
+        "label": "DeepSeek-V4-Flash",
         "context_profile": "full",
         "max_output_tokens": 16384,
         "omit_max_tokens": true,

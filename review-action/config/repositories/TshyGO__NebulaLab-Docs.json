@@ -10,7 +10,7 @@
   },
   "lanes": [
     { "id": "A", "provider": "alibaba", "protocol": "openai-chat-completions", "primary": { "id": "qwen3.8-max", "label": "Qwen3.8-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [{ "id": "qwen3.7-max", "label": "Qwen3.7-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }] },
-    { "id": "B", "provider": "tencent", "protocol": "openai-chat-completions", "primary": { "id": "deepseek/deepseek-v4-pro", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [{ "id": "deepseek-v4-pro-202606", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }] },
-    { "id": "C", "provider": "sensenova", "protocol": "openai-chat-completions", "primary": { "id": "glm-5.2", "label": "GLM-5.2", "context_profile": "full", "max_output_tokens": 16384, "omit_max_tokens": true, "temperature": 0.2 }, "fallbacks": [] }
+    { "id": "B", "provider": "tencent", "protocol": "openai-chat-completions", "request_timeout_ms": 900000, "model_budget_ms": 900000, "primary": { "id": "deepseek/deepseek-v4-pro", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 393216, "temperature": 0.2 }, "fallbacks": [{ "id": "deepseek-v4-pro-202606", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 393216, "temperature": 0.2 }] },
+    { "id": "C", "provider": "sensenova", "protocol": "openai-chat-completions", "request_timeout_ms": 600000, "model_budget_ms": 600000, "primary": { "id": "glm-5.2", "label": "GLM-5.2", "context_profile": "full", "max_output_tokens": 16384, "omit_max_tokens": true, "temperature": 0.2 }, "fallbacks": [{ "id": "sensenova-6.8-flash-lite", "label": "SenseNova-6.8-Flash-Lite", "context_profile": "full", "max_output_tokens": 16384, "omit_max_tokens": true, "temperature": 0.2 }] }
   ]
 }

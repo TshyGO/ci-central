@@ -225,11 +225,11 @@ check('central repository self-caller exercises the workflow from its own PR rev
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
   && workflowText.includes('cancel-in-progress: true')
-  && workflowText.includes('timeout-minutes: 30'));
+  && workflowText.includes('timeout-minutes: 40'));
 
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:deepseek/deepseek-v4-pro,C:glm-5.2');
-check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.7-max', 'deepseek-v4-pro-202606'].includes(model)));
+check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.7-max', 'deepseek-v4-pro-202606', 'sensenova-6.8-flash-lite'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -245,6 +245,10 @@ check('Lane C uses OpenAI Chat Completions without Google thinking fields',
   && healthyLaneC?.max_tokens === undefined
   && healthyLaneC?.temperature === 0.2
   && healthyLaneC?.generationConfig === undefined);
+check('Lane B keeps high reasoning defaults and uses DeepSeek maximum output space',
+  healthyLaneB?.max_tokens === 393216
+  && healthyLaneB?.reasoning_effort === undefined
+  && healthyLaneB?.thinking === undefined);
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('healthy comments carry reusable v2 evidence for the full head and workflow SHAs', ['A', 'B', 'C'].every((lane) =>
@@ -353,16 +357,17 @@ check('finish reasons are normalized across provider casing', r.error === undefi
 r = await scenario(healthy);
 check('full-context primaries preserve input while SenseNova GLM omits only max_tokens',
   r.captured.every(({ body }) => body.messages[1].content.includes('Changed files and patches:'))
-  && r.captured.filter(({ lane }) => lane !== 'C').every(({ body }) => body.max_tokens === 16384)
+  && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 16384
+  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 393216
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 
 const expandedLaneBConfig = structuredClone(centralConfig);
-expandedLaneBConfig.lanes[1].primary.max_output_tokens = 32768;
-expandedLaneBConfig.lanes[1].fallbacks[0].max_output_tokens = 32768;
+expandedLaneBConfig.lanes[1].primary.max_output_tokens = 393216;
+expandedLaneBConfig.lanes[1].fallbacks[0].max_output_tokens = 393216;
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(expandedLaneBConfig) });
-check('repository policy can raise only Lane B to a 32K completion ceiling', r.error === undefined
+check('repository policy raises only Lane B to DeepSeek maximum output space', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 16384
-  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 32768
+  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 393216
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
@@ -380,6 +385,13 @@ r = await scenario((call) => call.model === 'deepseek/deepseek-v4-pro' ? reply(5
 check('Lane B falls back only to its dated DeepSeek model', r.captured.filter(({ model }) => model === 'deepseek/deepseek-v4-pro').length === 3
   && r.captured.filter(({ model }) => model === 'deepseek-v4-pro-202606').length === 1
   && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-202606'));
+
+r = await scenario((call) => call.model === 'glm-5.2' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+check('Lane C falls back only to SenseNova 6.8 Flash Lite after GLM exhausts retries',
+  r.captured.filter(({ model }) => model === 'glm-5.2').length === 3
+  && r.captured.filter(({ model }) => model === 'sensenova-6.8-flash-lite').length === 1
+  && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'sensenova-6.8-flash-lite')
+  && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by sensenova-6.8-flash-lite')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure short-circuits only its provider lane', r.captured.filter(({ lane }) => lane === 'A').length === 1
@@ -404,6 +416,7 @@ r = await scenario((call) => call.lane === 'A'
   ? reply(200, chatResult(call.model, '# incomplete', { finish: 'LENGTH' }))
   : healthy(call));
 check('truncated output is marked partial and cannot satisfy the strict aggregate gate', /Lane A/.test(r.error?.message || '')
+  && r.captured.some(({ model }) => model === 'qwen3.7-max')
   && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial') && body.includes('max_tokens')));
 
 const sameModelConfig = structuredClone(centralConfig);

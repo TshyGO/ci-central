@@ -33,10 +33,10 @@ jobs:
       group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    # Backstop only. Repository policy bounds each model independently and lanes run in
-    # parallel. The public ci-central profile allows 32K reasoning-heavy Lane B responses,
-    # including one same-Lane fallback, while this cap still prevents an unbounded runner.
-    timeout-minutes: 30
+    # Backstop only. Repository and lane policy bound each model independently and lanes
+    # run in parallel. Lane B may spend up to 15 minutes on each of two high-reasoning
+    # DeepSeek models, while this cap still prevents an unbounded runner.
+    timeout-minutes: 40
     permissions:
       contents: read
       issues: write
@@ -173,6 +173,15 @@ jobs:
               }
               if (new Set(chain.map((model) => model.id)).size !== chain.length) {
                 throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
+              }
+              for (const field of ['request_timeout_ms', 'model_budget_ms']) {
+                if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) {
+                  throw new Error(`Lane ${lane.id} ${field} must be a positive integer when configured.`);
+                }
+              }
+              if (lane.request_timeout_ms !== undefined && lane.model_budget_ms !== undefined
+                && lane.model_budget_ms < lane.request_timeout_ms) {
+                throw new Error(`Lane ${lane.id} model_budget_ms must be greater than or equal to request_timeout_ms.`);
               }
               for (const model of chain) {
                 if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
@@ -386,12 +395,12 @@ jobs:
             // Model ids are scoped to a lane, never globally. The same model id may be routed
             // through two providers without changing credentials or fallback ownership.
             const maxAttempts = Number(reviewPolicy.max_attempts) || 3;
-            // A healthy response with heavy reasoning has been observed at ~270s. The default
-            // request window is 5 minutes; repository policy may raise it for a larger output
-            // ceiling (ci-central Lane B uses 10 minutes). MODEL_BUDGET_MS remains the hard
-            // per-model wall-clock cap for retries and field-repair loops.
-            const requestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
-            const MODEL_BUDGET_MS = Number(reviewPolicy.model_budget_ms) || 360000;
+            // A healthy response with heavy reasoning has been observed beyond 300s. Repository
+            // policy supplies defaults while a slow Lane can raise its own request and model
+            // windows without changing the others. The model budget remains the hard wall-clock
+            // cap for retries and field-repair loops.
+            const defaultRequestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
+            const defaultModelBudgetMs = Number(reviewPolicy.model_budget_ms) || 360000;
 
             // Some upstreams (e.g. MiniMax) inline their chain-of-thought into `content`
             // instead of `reasoning_content`. Never let that reach the PR comment.
@@ -473,7 +482,7 @@ jobs:
               return { kind: 'model-or-upstream-failure', stopRetries: false, stopFallbacks: false };
             }
 
-            async function callOnce(lane, model, payload, deadline) {
+            async function callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs) {
               const modelId = model.id;
               const requestBody = JSON.stringify(
                 lane.protocol === 'google-generate-content' ? googlePayload(model) : payload
@@ -493,7 +502,7 @@ jobs:
                 // whatever time is left, and give up rather than starting an attempt with none.
                 const remaining = deadline - Date.now();
                 if (remaining <= 0) {
-                  requestError = `Gave up on ${modelId} after its ${MODEL_BUDGET_MS / 1000}s budget was exhausted (upstream likely hung).`;
+                  requestError = `Gave up on ${modelId} after its ${modelBudgetMs / 1000}s budget was exhausted (upstream likely hung).`;
                   console.log(`[Lane ${lane.id}/${modelId}] attempt ${attempt}/${maxAttempts} skipped: model budget exhausted`);
                   break;
                 }
@@ -560,13 +569,15 @@ jobs:
               // One budget per model covers all its attempts and field-repair retries. Each
               // model in a fallback chain gets a fresh budget, so a hung primary is abandoned
               // in bounded time and the fallback still gets its own full window.
-              const deadline = Date.now() + MODEL_BUDGET_MS;
+              const requestTimeoutMs = Number(lane.request_timeout_ms) || defaultRequestTimeoutMs;
+              const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
+              const deadline = Date.now() + modelBudgetMs;
               if (lane.protocol === 'google-generate-content') {
-                return callOnce(lane, model, null, deadline);
+                return callOnce(lane, model, null, deadline, requestTimeoutMs, modelBudgetMs);
               }
               const payload = basePayload(model);
               for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
-                const result = await callOnce(lane, model, payload, deadline);
+                const result = await callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs);
                 if (result.response?.status !== 400) return result;
                 const text = result.responseText || '';
                 const matched = EXTRA_FIELD_REJECTED.map((re) => re.exec(text)).find(Boolean);
@@ -575,7 +586,7 @@ jobs:
                 console.log(`[Lane ${lane.id}/${model.id}] upstream rejected optional field '${field}'; dropping it and retrying.`);
                 delete payload[field];
               }
-              return callOnce(lane, model, payload, deadline);
+              return callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs);
             }
 
             function extractReview(lane, model, responseText) {
@@ -653,6 +664,7 @@ jobs:
               let lastRequestError = '';
               let lastFailureKind = '';
               let stoppedSharedLane = false;
+              let bestPartial = null;
 
               for (const model of chain) {
                 const { response, responseText, requestError, attempts, failureKind, stopFallbacks } = await callModel(lane, model);
@@ -663,7 +675,7 @@ jobs:
                 if (response?.ok) {
                   try {
                     const { review, reasoningLength, reasoningUnit, complete } = extractReview(lane, model, responseText);
-                    if (review) {
+                    if (review && complete) {
                       return {
                         lane,
                         primary,
@@ -672,10 +684,24 @@ jobs:
                         reasoningLength,
                         reasoningUnit,
                         degraded: model !== primary,
-                        status: complete ? 'valid' : 'partial',
+                        status: 'valid',
                       };
                     }
-                    console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
+                    if (review) {
+                      bestPartial ??= {
+                        lane,
+                        primary,
+                        servedBy: model,
+                        review,
+                        reasoningLength,
+                        reasoningUnit,
+                        degraded: model !== primary,
+                        status: 'partial',
+                      };
+                      console.log(`[Lane ${lane.id}/${model.id}] response was incomplete; trying the next model in the lane.`);
+                    } else {
+                      console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
+                    }
                   } catch (error) {
                     console.log(`[Lane ${lane.id}/${model.id}] parse error: ${error?.message || error}`);
                   }
@@ -690,6 +716,8 @@ jobs:
                   console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
                 }
               }
+
+              if (bestPartial) return bestPartial;
 
               const failText = (lastResponseText || lastRequestError || '').trim();
               const gatewayBlocked = lastFailureKind === 'gateway-blocked';

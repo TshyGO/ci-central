@@ -80,9 +80,10 @@ PR_AGENT_LANE_C_API_BASE
 - `lanes[].id`：固定 `A`、`B` 或 `C`，也是 Secret 槽位。
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
 - `lanes[].protocol`：`openai-chat-completions` 或 `google-generate-content`。
+- `lanes[].request_timeout_ms` 与 `lanes[].model_budget_ms`：可选的 Lane 级预算覆盖；未配置时继承 `review_policy`，因此放大慢模型预算不会改变其他 Lane。
 - `primary` 与 `fallbacks`：Lane 内有序模型链。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、DeepSeek、GLM 均使用完整上下文。
-- `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点；当前 SenseNova GLM-5.2 按官方请求形状启用，其他 Lane 不启用。
+- `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点；当前 SenseNova Lane C 主备模型按该端点的请求形状启用，其他 Lane 不启用。
 - Google 协议仍保留通用兼容代码，但当前没有活动 Lane 使用它；`thinking_level` 只允许配置在 `google-generate-content` 协议，其他协议会失败关闭。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
@@ -99,10 +100,11 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
 - Lane 主模型成功时绝不调用 fallback。
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
-- Qwen、DeepSeek、GLM 保留完整审核上下文；三个业务仓维持 16384 输出上限。公开的 `ci-central` 元 CI 审核更容易触发长推理，因此仅其 Lane B 的 DeepSeek completion ceiling 为 32768，单请求/单模型预算分别为 10/12 分钟。
-- Lane C 使用 `PR_AGENT_LANE_C_API_BASE` 指定的 SenseNova OpenAI Chat Completions 地址，不再使用 Google endpoint、协议或 thinking 配置。真实探测确认 GLM-5.2 在省略 `max_tokens` 时返回完整最终文本，而显式传入该字段会被端点错误地按 workspace quota 拒绝，因此仅该模型的请求省略该字段。
+- Qwen、DeepSeek、GLM 保留完整审核上下文。Lane B 不降低 DeepSeek 默认高思考等级，主备 completion ceiling 均为其官方最大 393216 tokens，并各自使用 15 分钟 Lane 级请求/模型预算；Lane A 仍继承原有 5/6 分钟和 16384 输出上限。
+- Lane C 使用 `PR_AGENT_LANE_C_API_BASE` 指定的 SenseNova OpenAI Chat Completions 地址，不再使用 Google endpoint、协议或 thinking 配置。以 NebulaLab PR #692 的 100000 字符真实补丁探测，GLM-5.2 在省略 `max_tokens` 时以 306.406 秒返回 `finish_reason=stop`、19219 reasoning tokens 和完整最终正文，因此 Lane C 主模型使用 10 分钟请求/模型预算。显式传入 `max_tokens` 会被该端点错误地按 workspace quota 拒绝，所以 Lane C 主备请求均省略该字段。
+- Lane C 的同供应商 fallback 为 `sensenova-6.8-flash-lite`。仅模型超时、5xx、解析失败、空正文或不完整输出进入 fallback；配额、认证、HTML 验证页、DNS、TLS 和共享端点故障仍短路当前 Lane，避免把完整 PR 重发到同一故障 Workspace。
 - Qwen3.7-Max 只在 Qwen3.8-Max 失败时调用，并使用同一阿里 Lane A 凭据、完整审核上下文和 16384 输出上限。
-- reusable job 的 30 分钟硬上限允许 `ci-central` Lane B 在 32K 主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
+- reusable job 的 40 分钟硬上限允许 Lane B 在 15 分钟主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。
 

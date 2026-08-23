@@ -23,6 +23,9 @@ for (const repository of repositories) {
   assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606']);
   assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
+  assert.equal(fromSource.lanes[2].primary.omit_max_tokens, true, `${repository} SenseNova GLM must follow the provider request shape without max_tokens`);
+  assert.ok(fromSource.lanes.slice(0, 2).every((lane) => lane.primary.omit_max_tokens === undefined
+    && lane.fallbacks.every((model) => model.omit_max_tokens === undefined)), `${repository} Lane A/B output request fields changed unexpectedly`);
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
@@ -62,12 +65,21 @@ assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab
 
 const invalidThinkingLevel = structuredClone(nebula);
 invalidThinkingLevel.lanes[2].protocol = 'google-generate-content';
+delete invalidThinkingLevel.lanes[2].primary.omit_max_tokens;
 invalidThinkingLevel.lanes[2].primary.thinking_level = 'maximum';
 assert.throws(() => source.validateConfig(invalidThinkingLevel, 'TshyGO/NebulaLab'), /thinking_level is not supported/);
 
 const crossProtocolThinking = structuredClone(nebula);
 crossProtocolThinking.lanes[0].primary.thinking_level = 'high';
 assert.throws(() => source.validateConfig(crossProtocolThinking, 'TshyGO/NebulaLab'), /only supported by google-generate-content/);
+
+const invalidOmitMaxTokens = structuredClone(nebula);
+invalidOmitMaxTokens.lanes[2].primary.omit_max_tokens = 'yes';
+assert.throws(() => source.validateConfig(invalidOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens must be a boolean/);
+
+const googleOmitMaxTokens = structuredClone(nebula);
+googleOmitMaxTokens.lanes[2].protocol = 'google-generate-content';
+assert.throws(() => source.validateConfig(googleOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens is only supported by openai-chat-completions/);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-config-'));
 const output = path.join(tmp, 'output.txt');

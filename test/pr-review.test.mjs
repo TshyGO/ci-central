@@ -242,7 +242,7 @@ check('all active OpenAI-compatible lanes receive the repository review prompt',
   && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
 check('Lane C uses OpenAI Chat Completions without Google thinking fields',
   healthyLaneC?.model === 'glm-5.2'
-  && healthyLaneC?.max_tokens === 16384
+  && healthyLaneC?.max_tokens === undefined
   && healthyLaneC?.temperature === 0.2
   && healthyLaneC?.generationConfig === undefined);
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
@@ -351,8 +351,10 @@ check('finish reasons are normalized across provider casing', r.error === undefi
   && !r.posted.some((body) => body.includes('可能不完整')));
 
 r = await scenario(healthy);
-check('full-context primaries preserve input and output budgets', r.captured.every(({ body }) =>
-  body.messages[1].content.includes('Changed files and patches:') && body.max_tokens === 16384));
+check('full-context primaries preserve input while SenseNova GLM omits only max_tokens',
+  r.captured.every(({ body }) => body.messages[1].content.includes('Changed files and patches:'))
+  && r.captured.filter(({ lane }) => lane !== 'C').every(({ body }) => body.max_tokens === 16384)
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 
 const expandedLaneBConfig = structuredClone(centralConfig);
 expandedLaneBConfig.lanes[1].primary.max_output_tokens = 32768;
@@ -361,7 +363,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(expandedLaneBConf
 check('repository policy can raise only Lane B to a 32K completion ceiling', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 16384
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 32768
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 16384);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
@@ -448,6 +450,7 @@ check('workflow defense rejects a missing fallback array before model calls', /f
 
 const invalidThinkingConfig = structuredClone(centralConfig);
 invalidThinkingConfig.lanes[2].protocol = 'google-generate-content';
+delete invalidThinkingConfig.lanes[2].primary.omit_max_tokens;
 invalidThinkingConfig.lanes[2].primary.thinking_level = 'maximum';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidThinkingConfig) });
 check('workflow defense rejects an unsupported Google thinking level before model calls', /thinking_level is not supported/.test(r.error?.message || '') && r.captured.length === 0);
@@ -456,6 +459,11 @@ const crossProtocolThinkingConfig = structuredClone(centralConfig);
 crossProtocolThinkingConfig.lanes[0].primary.thinking_level = 'high';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(crossProtocolThinkingConfig) });
 check('workflow defense rejects thinking configuration outside Google protocol', /only supported by google-generate-content/.test(r.error?.message || '') && r.captured.length === 0);
+
+const invalidOmitMaxTokensConfig = structuredClone(centralConfig);
+invalidOmitMaxTokensConfig.lanes[2].primary.omit_max_tokens = 'yes';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidOmitMaxTokensConfig) });
+check('workflow defense rejects a non-boolean omit_max_tokens flag', /omit_max_tokens must be a boolean/.test(r.error?.message || '') && r.captured.length === 0);
 
 r = await scenario(healthy, { LANE_B_KEY: '' });
 check('an unprovisioned lane preserves healthy reviews but fails the strict aggregate gate', /Lane B/.test(r.error?.message || '')

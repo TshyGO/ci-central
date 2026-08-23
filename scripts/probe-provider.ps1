@@ -33,7 +33,9 @@ try {
         $modelsResponse = Invoke-RestMethod -Method Get -Uri "$base/models" -Headers $headers -TimeoutSec 30
         $available = @($modelsResponse.data.id)
         if ($available.Count -gt 0 -and $model -notin $available) { throw "Primary model $model is not present in the provider model list." }
-        $body = @{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with OK.' }); max_tokens = 16; stream = $false } | ConvertTo-Json -Depth 6
+        $request = @{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with OK.' }); stream = $false }
+        if (-not $laneConfig.primary.omit_max_tokens) { $request.max_tokens = 16 }
+        $body = $request | ConvertTo-Json -Depth 6
         $result = Invoke-RestMethod -Method Post -Uri "$base/chat/completions" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
         if ([string]::IsNullOrWhiteSpace($result.choices[0].message.content)) { throw 'Probe returned no final content.' }
     }

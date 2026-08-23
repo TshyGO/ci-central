@@ -60,6 +60,7 @@
         "label": "GLM-5.2",
         "context_profile": "full",
         "max_output_tokens": 16384,
+        "omit_max_tokens": true,
         "temperature": 0.2
       },
       "fallbacks": []

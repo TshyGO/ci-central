@@ -175,6 +175,12 @@ jobs:
                 throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
               }
               for (const model of chain) {
+                if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
+                  throw new Error(`Lane ${lane.id}/${model.id} omit_max_tokens must be a boolean.`);
+                }
+                if (model.omit_max_tokens && lane.protocol !== 'openai-chat-completions') {
+                  throw new Error(`Lane ${lane.id}/${model.id} omit_max_tokens is only supported by openai-chat-completions.`);
+                }
                 if (model.thinking_level === undefined) continue;
                 if (lane.protocol !== 'google-generate-content') {
                   throw new Error(`Lane ${lane.id}/${model.id} thinking_level is only supported by google-generate-content.`);
@@ -418,8 +424,8 @@ jobs:
                 model: model.id,
                 messages,
                 stream: false,
-                max_tokens: model.max_output_tokens,
               };
+              if (!model.omit_max_tokens) payload.max_tokens = model.max_output_tokens;
               if (Number.isFinite(model.temperature)) payload.temperature = model.temperature;
               return payload;
             }

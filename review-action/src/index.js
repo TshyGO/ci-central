@@ -31,6 +31,9 @@ function validateModel(model, location) {
   if (!Number.isInteger(model.max_output_tokens) || model.max_output_tokens < 1) {
     throw new Error(`${location}.max_output_tokens must be a positive integer.`);
   }
+  if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
+    throw new Error(`${location}.omit_max_tokens must be a boolean.`);
+  }
 }
 
 function validateConfig(config, repository) {
@@ -66,8 +69,11 @@ function validateConfig(config, repository) {
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
     for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
-      if (model.thinking_level === undefined) continue;
       const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;
+      if (model.omit_max_tokens && lane.protocol !== 'openai-chat-completions') {
+        throw new Error(`${modelLocation}.omit_max_tokens is only supported by openai-chat-completions.`);
+      }
+      if (model.thinking_level === undefined) continue;
       if (lane.protocol !== 'google-generate-content') {
         throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);
       }

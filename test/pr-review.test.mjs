@@ -226,7 +226,10 @@ check('reusable workflow accepts only fixed Lane secret slots',
 check('central repository self-caller exercises the workflow from its own PR revision', callerText.includes('uses: ./.github/workflows/pr-review.yml')
   && !callerText.includes('TshyGO/ci-central/.github/workflows/pr-review.yml@main')
   && ['A', 'B', 'C'].every((lane) => callerText.includes(`PR_AGENT_LANE_${lane}_KEY`) && callerText.includes(`PR_AGENT_LANE_${lane}_API_BASE`))
-  && callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
+  && callerText.includes('group: ai-pr-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}')
+  // Without the event_name segment a bot comment cancels the in-flight review; keep
+  // the un-keyed form from creeping back in.
+  && !callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
   && callerText.includes('cancel-in-progress: true')
   && callerText.includes("github.event.pull_request.author_association == 'OWNER'")
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));

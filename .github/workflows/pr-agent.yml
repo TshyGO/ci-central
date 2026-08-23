@@ -12,7 +12,13 @@ on:
     types: [created]
 
 concurrency:
-  group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  # Keyed by event type as well as PR number, mirroring the NebulaLab caller. Without the
+  # event_name segment an auto-comment (CodeRabbit's summary, say) landing seconds after the
+  # PR opens starts an issue_comment run in the same group, which cancels the in-flight
+  # review and replaces it with a no-op - the issue_comment job's own `if` only fires on an
+  # authorized "/review". Observed on PR #34: opened 14:56:54, CodeRabbit commented
+  # 14:57:03, review cancelled 14:57:10.
+  group: ai-pr-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:

@@ -30,6 +30,7 @@ for (const repository of repositories) {
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
 assert.equal(ciCentral.review_policy.request_timeout_ms, 600000);
+assert.equal(ciCentral.lanes[2].advisory, true, 'ci-central Lane C rides the same free quota and must not gate its own PRs');
 assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
 assert.deepEqual(
   [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
@@ -39,6 +40,11 @@ assert.deepEqual(
 
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
+  // Lane C rides a free quota that returns 429 once exhausted. Every repository keeps it
+  // advisory so an empty quota never turns a PR red on its own, and keeps Lanes A and B
+  // gating so the review still enforces something.
+  assert.equal(config.lanes[2].advisory, true, `${repository} Lane C must stay advisory`);
+  assert.ok(config.lanes.slice(0, 2).every((lane) => lane.advisory === undefined), `${repository} Lane A/B must keep gating the job`);
   assert.deepEqual(
     [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
     [65536, 393216],

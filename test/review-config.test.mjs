@@ -87,6 +87,20 @@ const invalidLaneBudget = structuredClone(nebula);
 invalidLaneBudget.lanes[2].model_budget_ms = invalidLaneBudget.lanes[2].request_timeout_ms - 1;
 assert.throws(() => source.validateConfig(invalidLaneBudget, 'TshyGO/NebulaLab'), /greater than or equal to request_timeout_ms/);
 
+// Lane C is a free-tier best-effort slot. It must publish a review when it can, but an
+// exhausted quota must never turn the job red - a permanently failing check is one that
+// reviewers learn to ignore.
+assert.equal(nebula.lanes[2].advisory, true, 'NebulaLab Lane C must stay advisory');
+assert.ok(nebula.lanes.slice(0, 2).every((lane) => lane.advisory === undefined), 'NebulaLab Lane A/B must keep gating the job');
+
+const invalidAdvisory = structuredClone(nebula);
+invalidAdvisory.lanes[2].advisory = 'yes';
+assert.throws(() => source.validateConfig(invalidAdvisory, 'TshyGO/NebulaLab'), /advisory must be a boolean/);
+
+const everyLaneAdvisory = structuredClone(nebula);
+for (const lane of everyLaneAdvisory.lanes) lane.advisory = true;
+assert.throws(() => source.validateConfig(everyLaneAdvisory, 'TshyGO/NebulaLab'), /At least one lane must be required/);
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-config-'));
 const output = path.join(tmp, 'output.txt');
 source.run({ INPUT_REPOSITORY: 'TshyGO/NebulaLab', GITHUB_ACTION_PATH: actionPath, GITHUB_OUTPUT: output });

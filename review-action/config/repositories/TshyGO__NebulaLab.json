@@ -57,6 +57,7 @@
       "id": "C",
       "provider": "sensenova",
       "protocol": "openai-chat-completions",
+      "advisory": true,
       "request_timeout_ms": 600000,
       "model_budget_ms": 600000,
       "primary": {

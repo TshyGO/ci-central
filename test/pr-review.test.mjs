@@ -146,10 +146,17 @@ async function resolverScenario(env) {
   return { outputs, warnings, error };
 }
 
-check('workflow exposes only immutable central SHA metadata, never model, provider, fallback, prompt, or budget inputs',
-  workflowCallInputs.join(',') === 'central_workflow_sha'
+check('workflow exposes only immutable central SHA metadata and a runner tier, never model, provider, fallback, prompt, or budget inputs',
+  workflowCallInputs.join(',') === 'central_workflow_sha,runner_tier'
   && !['model:', 'provider:', 'fallback:', 'system_prompt:', 'max_output_tokens:', 'model_budget_ms:', 'request_timeout_ms:']
     .some((name) => workflowText.slice(0, workflowText.indexOf('secrets:')).includes(name)));
+// runner_tier is infrastructure, not policy - but it still decides which machine receives
+// the Lane credentials, so a caller must only ever pick from a closed set of tiers. If the
+// label could be interpolated straight from the input, a caller could name any runner.
+check('runner_tier maps to fixed labels and can never carry a caller-supplied label',
+  workflowText.includes("runs-on: ${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}")
+  && !/runs-on:\s*\$\{\{\s*inputs\.runner_tier\s*\}\}/.test(workflowText)
+  && workflowText.includes('- name: Validate runner tier'));
 check('security-critical first-party Actions are pinned to immutable commits',
   workflowText.includes('actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd')
   && workflowText.includes('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09')
@@ -491,8 +498,35 @@ check('an unprovisioned lane preserves healthy reviews but fails the strict aggr
 r = await scenario(healthy, {
   LANE_A_KEY: '', LANE_A_API_BASE: '', LANE_B_KEY: '', LANE_B_API_BASE: '', LANE_C_KEY: '', LANE_C_API_BASE: '',
 });
-check('diagnostic-only execution fails the job after preserving lane diagnostics', /Lane A, Lane B, Lane C/.test(r.error?.message || '')
+// Lane C is advisory, so it is absent from the gate message even when it also failed:
+// every lane still publishes its diagnostic, but only the required lanes turn the job red.
+check('diagnostic-only execution fails the job after preserving lane diagnostics', /Lane A, Lane B/.test(r.error?.message || '')
+  && !/Lane C/.test(r.error?.message || '')
   && r.captured.length === 0 && r.posted.length === 3);
+
+r = await scenario(healthy, { LANE_C_KEY: '', LANE_C_API_BASE: '' });
+check('an advisory lane without evidence publishes its diagnostic without failing the job', !r.error
+  && r.captured.length === 2
+  && !r.captured.some(({ lane }) => lane === 'C')
+  && r.posted.length === 3
+  && r.posted.some((body) => body.includes('PR_AGENT_LANE_C_KEY'))
+  && r.logs.some((line) => line.includes('Advisory lane(s) without valid evidence')));
+
+r = await scenario(healthy, { LANE_A_KEY: '', LANE_C_KEY: '' });
+check('a required lane still gates the job when an advisory lane fails alongside it', /Lane A/.test(r.error?.message || '')
+  && !/Lane C/.test(r.error?.message || ''));
+
+const allAdvisoryConfig = structuredClone(centralConfig);
+for (const lane of allAdvisoryConfig.lanes) lane.advisory = true;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(allAdvisoryConfig) });
+check('workflow defense rejects a config where every lane is advisory', /every configured lane is advisory/.test(r.error?.message || '')
+  && r.captured.length === 0);
+
+const invalidAdvisoryConfig = structuredClone(centralConfig);
+invalidAdvisoryConfig.lanes[2].advisory = 'yes';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidAdvisoryConfig) });
+check('workflow defense rejects a non-boolean advisory flag', /advisory must be a boolean/.test(r.error?.message || '')
+  && r.captured.length === 0);
 
 const newerPull = { ...pull, head: { ...pull.head, sha: 'cafebabe'.repeat(5) } };
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: validEvidence, pulls: [pull, newerPull] });

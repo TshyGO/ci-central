@@ -11,6 +11,15 @@ on:
         description: Full immutable ci-central commit SHA repeated from the external caller's uses pin
         required: false
         type: string
+      runner_tier:
+        description: >-
+          Runner pool for this review: hosted (default) runs on GitHub-hosted ubuntu-latest,
+          review and build select fixed self-hosted labels. Callers pick a tier, never a raw
+          label, so a caller cannot route this job - and the Lane credentials it receives -
+          onto an arbitrary runner.
+        required: false
+        default: hosted
+        type: string
     secrets:
       PR_AGENT_LANE_A_KEY:
         required: false
@@ -32,7 +41,11 @@ jobs:
     concurrency:
       group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    # An unrecognised tier resolves to ubuntu-latest rather than to a self-hosted label:
+    # falling back to the hosted pool is always safe, while guessing a label could place
+    # Lane credentials on an unintended machine. The first step rejects the bad value so
+    # the misconfiguration still fails loudly instead of silently running hosted.
+    runs-on: ${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}
     # Backstop only. Repository and lane policy bound each model independently and lanes
     # run in parallel. Lane B may spend up to 15 minutes on each model in its same-lane endpoint
     # chain, while this cap still prevents an unbounded runner.
@@ -42,6 +55,19 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Validate runner tier
+        env:
+          RUNNER_TIER: ${{ inputs.runner_tier }}
+        run: |
+          case "${RUNNER_TIER}" in
+            hosted|review|build) ;;
+            *)
+              echo "::error::runner_tier must be hosted, review, or build; got '${RUNNER_TIER}'." >&2
+              exit 1
+              ;;
+          esac
+          echo "runner_tier=${RUNNER_TIER} runner=${RUNNER_NAME:-unknown}"
+
       - name: Resolve matching central ref
         id: central-ref
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -145,6 +171,12 @@ jobs:
               throw new Error('The resolved reusable workflow ref must provide the full 40-character ci-central commit SHA.');
             }
             const lanes = reviewConfig.lanes;
+            // Advisory lanes never gate the job, so a config where every lane is advisory
+            // would publish reviews that can never fail anything. Refuse it rather than
+            // silently degrade into an unenforced check.
+            if (lanes.every((lane) => lane.advisory === true)) {
+              throw new Error('At least one lane must be required; every configured lane is advisory.');
+            }
             const reviewPolicy = reviewConfig.review_policy || {};
             if (typeof reviewPolicy.system_prompt !== 'string' || !reviewPolicy.system_prompt.trim()) {
               throw new Error('Central PR review config is missing review_policy.system_prompt.');
@@ -166,6 +198,9 @@ jobs:
             for (const lane of lanes) {
               if (!Array.isArray(lane.fallbacks)) {
                 throw new Error(`Lane ${lane.id} fallbacks must be an array.`);
+              }
+              if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') {
+                throw new Error(`Lane ${lane.id} advisory must be a boolean.`);
               }
               const chain = [lane.primary, ...lane.fallbacks];
               if (!lane.primary || chain.some((model) => !model?.id || !model?.label)) {
@@ -857,7 +892,18 @@ jobs:
             if (posted === 0) {
               throw new Error('No AI PR Review comment could be posted for any configured model.');
             }
+            // An advisory lane still publishes its comment and its diagnostics, but a
+            // best-effort upstream (a free quota that runs dry, say) must not turn the whole
+            // review red - that trains reviewers to ignore a permanently failing check.
+            const failedAdvisoryLaneIds = lanes
+              .filter((lane) => lane.advisory)
+              .map((lane) => lane.id)
+              .filter((laneId) => !validLaneIds.has(laneId));
+            if (failedAdvisoryLaneIds.length) {
+              console.log(`Advisory lane(s) without valid evidence, not gating this run: ${failedAdvisoryLaneIds.map((laneId) => `Lane ${laneId}`).join(', ')}.`);
+            }
             const invalidLaneIds = lanes
+              .filter((lane) => !lane.advisory)
               .map((lane) => lane.id)
               .filter((laneId) => !validLaneIds.has(laneId));
             if (invalidLaneIds.length) {

@@ -24,11 +24,13 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 
 ## 当前 NebulaLab Lane
 
-| Lane | 当前供应商 | 协议 | 模型链 |
-|---|---|---|---|
-| A | 阿里 | OpenAI Chat Completions | Qwen3.8-Max → Qwen3.7-Max |
-| B | 腾讯 | OpenAI Chat Completions | GLM-5.2 → DeepSeek-V4-Pro-202606 |
-| C | SenseNova | OpenAI Chat Completions | DeepSeek-V4-Flash → SenseNova-6.8-Flash-Lite |
+| Lane | 当前供应商 | 协议 | 模型链 | 是否阻塞 |
+|---|---|---|---|---|
+| A | 阿里 | OpenAI Chat Completions | Qwen3.8-Max → Qwen3.7-Max | 阻塞 |
+| B | 腾讯 | OpenAI Chat Completions | GLM-5.2 → DeepSeek-V4-Pro-202606 | 阻塞 |
+| C | SenseNova | OpenAI Chat Completions | DeepSeek-V4-Flash → SenseNova-6.8-Flash-Lite | **advisory，不阻塞** |
+
+Lane C 走的是免费额度，额度耗尽时返回 429 属于预期行为。它仍然会发布评论和诊断，但不参与聚合门禁——否则每次额度用尽都会让整个 PR 检查变红，而一个长期红的检查会被人学会忽略。
 
 配置由 `github.repository` 自动选择：
 
@@ -72,6 +74,22 @@ PR_AGENT_LANE_C_API_BASE
 
 四个仓库 caller 已全部切换到固定 Lane A/B/C 槽位。reusable workflow 不再声明或读取任何旧供应商命名 Secret；缺少固定槽位凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。
 
+## Runner 选择
+
+可选输入 `runner_tier` 决定这个 job 跑在哪个 runner 池：
+
+| 值 | runs-on | 用途 |
+|---|---|---|
+| `hosted`（默认） | `ubuntu-latest` | GitHub 托管，计入 Actions 分钟额度 |
+| `review` | `ai-pr-review` | 自建 runner（szlab 隔离 VM），执行分钟不计费 |
+| `build` | `nebulalab-build` | 自建 runner，供需要 root/Docker 的重负载工作流使用 |
+
+caller 只能选择档位，**不能传入任意 runner label**。这不是为了简洁：这个 job 会拿到 Lane A/B/C 的密钥，允许 caller 指定原始 label 就等于允许它把密钥路由到任意机器上。
+
+未识别的值解析为 `ubuntu-latest`——回落到托管池永远是安全方向，而猜测一个 label 可能把密钥放到非预期的机器上。job 的第一步会显式拒绝非法值，因此配置错误仍然会响亮地失败，而不是悄悄跑在托管池上。
+
+不传该输入的 caller 行为完全不变。
+
 ## 配置契约
 
 每个仓库 JSON 包含：
@@ -80,6 +98,7 @@ PR_AGENT_LANE_C_API_BASE
 - `lanes[].id`：固定 `A`、`B` 或 `C`，也是 Secret 槽位。
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
 - `lanes[].protocol`：`openai-chat-completions` 或 `google-generate-content`。
+- `lanes[].advisory`：可选布尔值，默认 `false`。标记为 `true` 的 Lane 照常发布评论与诊断，但不进入聚合门禁——用于免费额度或尽力而为的供应商。至少要保留一条非 advisory 的 Lane，否则整份配置会失败关闭（全部 advisory 等于没有门禁）。
 - `lanes[].request_timeout_ms` 与 `lanes[].model_budget_ms`：可选的 Lane 级预算覆盖；未配置时继承 `review_policy`，因此放大慢模型预算不会改变其他 Lane。
 - `primary` 与 `fallbacks`：Lane 内有序模型链。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、DeepSeek、GLM 均使用完整上下文。

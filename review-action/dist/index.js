@@ -38,6 +38,7 @@ function validateConfig(config, repository) {
     if (laneIds.has(lane.id)) throw new Error(`Lane ${lane.id} is configured more than once.`);
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
+    if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') throw new Error(`${location}.advisory must be a boolean.`);
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
     for (const field of ['request_timeout_ms', 'model_budget_ms']) {
       if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) throw new Error(`${location}.${field} must be a positive integer when configured.`);
@@ -56,6 +57,7 @@ function validateConfig(config, repository) {
     const ids = [lane.primary.id, ...lane.fallbacks.map((model) => model.id)];
     if (new Set(ids).size !== ids.length) throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
   }
+  if (config.lanes.every((lane) => lane.advisory === true)) throw new Error('At least one lane must be required; every configured lane is advisory.');
   return config;
 }
 function loadConfig(repository, actionPath) {

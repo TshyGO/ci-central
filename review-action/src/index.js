@@ -64,6 +64,7 @@ function validateConfig(config, repository) {
     if (laneIds.has(lane.id)) throw new Error(`Lane ${lane.id} is configured more than once.`);
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
+    if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') throw new Error(`${location}.advisory must be a boolean.`);
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
     for (const field of ['request_timeout_ms', 'model_budget_ms']) {
       if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) {
@@ -94,6 +95,11 @@ function validateConfig(config, repository) {
     if (new Set(ids).size !== ids.length) {
       throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
     }
+  }
+  // Advisory lanes never gate a review, so a config where every lane is advisory has no
+  // enforcement left at all. Reject it here rather than let it degrade silently.
+  if (config.lanes.every((lane) => lane.advisory === true)) {
+    throw new Error('At least one lane must be required; every configured lane is advisory.');
   }
   return config;
 }

@@ -35,8 +35,8 @@
       "provider": "tencent",
       "protocol": "openai-chat-completions",
       "primary": {
-        "id": "glm-5.2",
-        "label": "GLM-5.2",
+        "id": "deepseek/deepseek-v4-pro",
+        "label": "DeepSeek-V4-Pro",
         "context_profile": "full",
         "max_output_tokens": 16384,
         "temperature": 0.2
@@ -53,14 +53,15 @@
     },
     {
       "id": "C",
-      "provider": "google",
-      "protocol": "google-generate-content",
+      "provider": "sensenova",
+      "protocol": "openai-chat-completions",
       "primary": {
-        "id": "gemini-3.7-flash",
-        "label": "Gemini-3.7-Flash",
+        "id": "glm-5.2",
+        "label": "GLM-5.2",
         "context_profile": "full",
         "max_output_tokens": 16384,
-        "thinking_level": "high"
+        "omit_max_tokens": true,
+        "temperature": 0.2
       },
       "fallbacks": []
     }

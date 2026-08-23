@@ -19,11 +19,10 @@ for (const repository of repositories) {
   const fromBundle = bundled.loadConfig(repository, actionPath);
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.2', 'gemini-3.7-flash']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'deepseek/deepseek-v4-pro', 'glm-5.2']);
   assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606']);
-  assert.equal(fromSource.lanes[2].primary.thinking_level, 'high', `${repository} Lane C must explicitly request high thinking`);
-  assert.ok(fromSource.lanes.slice(0, 2).every((lane) => lane.primary.thinking_level === undefined
-    && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} non-Google lanes changed unexpectedly`);
+  assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
+    && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
@@ -49,7 +48,8 @@ for (const repository of repositories.slice(1)) {
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'alibaba');
 assert.equal(nebula.lanes[1].provider, 'tencent');
-assert.equal(nebula.lanes[2].provider, 'google');
+assert.equal(nebula.lanes[2].provider, 'sensenova');
+assert.ok(nebula.lanes.every((lane) => lane.protocol === 'openai-chat-completions'));
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
 const duplicateAcrossLanes = structuredClone(nebula);
@@ -61,6 +61,7 @@ duplicateInsideLane.lanes[0].fallbacks[0].id = duplicateInsideLane.lanes[0].prim
 assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab'), /duplicate primary\/fallback/);
 
 const invalidThinkingLevel = structuredClone(nebula);
+invalidThinkingLevel.lanes[2].protocol = 'google-generate-content';
 invalidThinkingLevel.lanes[2].primary.thinking_level = 'maximum';
 assert.throws(() => source.validateConfig(invalidThinkingLevel, 'TshyGO/NebulaLab'), /thinking_level is not supported/);
 

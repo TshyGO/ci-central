@@ -10,7 +10,7 @@
   },
   "lanes": [
     { "id": "A", "provider": "alibaba", "protocol": "openai-chat-completions", "primary": { "id": "qwen3.8-max", "label": "Qwen3.8-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [{ "id": "qwen3.7-max", "label": "Qwen3.7-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }] },
-    { "id": "B", "provider": "tencent", "protocol": "openai-chat-completions", "primary": { "id": "glm-5.2", "label": "GLM-5.2", "context_profile": "full", "max_output_tokens": 32768, "temperature": 0.2 }, "fallbacks": [{ "id": "deepseek-v4-pro-202606", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 32768, "temperature": 0.2 }] },
-    { "id": "C", "provider": "google", "protocol": "google-generate-content", "primary": { "id": "gemini-3.7-flash", "label": "Gemini-3.7-Flash", "context_profile": "full", "max_output_tokens": 16384, "thinking_level": "high" }, "fallbacks": [] }
+    { "id": "B", "provider": "tencent", "protocol": "openai-chat-completions", "primary": { "id": "deepseek/deepseek-v4-pro", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 32768, "temperature": 0.2 }, "fallbacks": [{ "id": "deepseek-v4-pro-202606", "label": "DeepSeek-V4-Pro", "context_profile": "full", "max_output_tokens": 32768, "temperature": 0.2 }] },
+    { "id": "C", "provider": "sensenova", "protocol": "openai-chat-completions", "primary": { "id": "glm-5.2", "label": "GLM-5.2", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [] }
   ]
 }

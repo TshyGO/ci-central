@@ -160,7 +160,7 @@ jobs:
               },
               C: {
                 apiKey: process.env.LANE_C_KEY,
-                baseUrl: (process.env.LANE_C_API_BASE || (process.env.LANE_C_KEY ? 'https://generativelanguage.googleapis.com/v1beta' : '')).replace(/\/$/, ''),
+                baseUrl: (process.env.LANE_C_API_BASE || '').replace(/\/$/, ''),
               },
             };
             for (const lane of lanes) {

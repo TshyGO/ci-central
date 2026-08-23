@@ -34,11 +34,13 @@
       "id": "B",
       "provider": "tencent",
       "protocol": "openai-chat-completions",
+      "request_timeout_ms": 900000,
+      "model_budget_ms": 900000,
       "primary": {
         "id": "deepseek/deepseek-v4-pro",
         "label": "DeepSeek-V4-Pro",
         "context_profile": "full",
-        "max_output_tokens": 16384,
+        "max_output_tokens": 393216,
         "temperature": 0.2
       },
       "fallbacks": [
@@ -46,7 +48,7 @@
           "id": "deepseek-v4-pro-202606",
           "label": "DeepSeek-V4-Pro",
           "context_profile": "full",
-          "max_output_tokens": 16384,
+          "max_output_tokens": 393216,
           "temperature": 0.2
         }
       ]
@@ -55,6 +57,8 @@
       "id": "C",
       "provider": "sensenova",
       "protocol": "openai-chat-completions",
+      "request_timeout_ms": 600000,
+      "model_budget_ms": 600000,
       "primary": {
         "id": "glm-5.2",
         "label": "GLM-5.2",
@@ -63,7 +67,16 @@
         "omit_max_tokens": true,
         "temperature": 0.2
       },
-      "fallbacks": []
+      "fallbacks": [
+        {
+          "id": "sensenova-6.8-flash-lite",
+          "label": "SenseNova-6.8-Flash-Lite",
+          "context_profile": "full",
+          "max_output_tokens": 16384,
+          "omit_max_tokens": true,
+          "temperature": 0.2
+        }
+      ]
     }
   ]
 }

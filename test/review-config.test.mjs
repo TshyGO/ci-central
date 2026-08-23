@@ -20,10 +20,10 @@ for (const repository of repositories) {
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'deepseek/deepseek-v4-pro', 'glm-5.2']);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606']);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606', 'sensenova-6.8-flash-lite']);
   assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
-  assert.equal(fromSource.lanes[2].primary.omit_max_tokens, true, `${repository} SenseNova GLM must follow the provider request shape without max_tokens`);
+  assert.ok([fromSource.lanes[2].primary, ...fromSource.lanes[2].fallbacks].every((model) => model.omit_max_tokens === true), `${repository} SenseNova models must follow the provider request shape without max_tokens`);
   assert.ok(fromSource.lanes.slice(0, 2).every((lane) => lane.primary.omit_max_tokens === undefined
     && lane.fallbacks.every((model) => model.omit_max_tokens === undefined)), `${repository} Lane A/B output request fields changed unexpectedly`);
 }
@@ -33,19 +33,21 @@ assert.equal(ciCentral.review_policy.request_timeout_ms, 600000);
 assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
 assert.deepEqual(
   [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-  [32768, 32768],
-  'ci-central Lane B must preserve full reasoning quality with a 32K completion ceiling',
+  [393216, 393216],
+  'ci-central Lane B must preserve full reasoning quality with DeepSeek maximum output space',
 );
 
-for (const repository of repositories.slice(1)) {
+for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
-  assert.equal(config.review_policy.request_timeout_ms, 300000, `${repository} request timeout changed unexpectedly`);
-  assert.equal(config.review_policy.model_budget_ms, 360000, `${repository} model budget changed unexpectedly`);
   assert.deepEqual(
     [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-    [16384, 16384],
-    `${repository} Lane B output budget changed unexpectedly`,
+    [393216, 393216],
+    `${repository} Lane B must use DeepSeek maximum output space`,
   );
+  assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must allow high reasoning`);
+  assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must allow high reasoning`);
+  assert.equal(config.lanes[2].request_timeout_ms, 600000, `${repository} Lane C request budget must cover the measured GLM latency`);
+  assert.equal(config.lanes[2].model_budget_ms, 600000, `${repository} Lane C must fall back after one full measured GLM window`);
 }
 
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
@@ -80,6 +82,10 @@ assert.throws(() => source.validateConfig(invalidOmitMaxTokens, 'TshyGO/NebulaLa
 const googleOmitMaxTokens = structuredClone(nebula);
 googleOmitMaxTokens.lanes[2].protocol = 'google-generate-content';
 assert.throws(() => source.validateConfig(googleOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens is only supported by openai-chat-completions/);
+
+const invalidLaneBudget = structuredClone(nebula);
+invalidLaneBudget.lanes[2].model_budget_ms = invalidLaneBudget.lanes[2].request_timeout_ms - 1;
+assert.throws(() => source.validateConfig(invalidLaneBudget, 'TshyGO/NebulaLab'), /greater than or equal to request_timeout_ms/);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-config-'));
 const output = path.join(tmp, 'output.txt');

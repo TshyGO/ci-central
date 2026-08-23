@@ -65,6 +65,15 @@ function validateConfig(config, repository) {
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
+    for (const field of ['request_timeout_ms', 'model_budget_ms']) {
+      if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) {
+        throw new Error(`${location}.${field} must be a positive integer when configured.`);
+      }
+    }
+    if (lane.request_timeout_ms !== undefined && lane.model_budget_ms !== undefined
+      && lane.model_budget_ms < lane.request_timeout_ms) {
+      throw new Error(`${location}.model_budget_ms must be greater than or equal to request_timeout_ms.`);
+    }
     validateModel(lane.primary, `${location}.primary`);
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));

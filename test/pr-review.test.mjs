@@ -368,6 +368,14 @@ check('protocol and credentials come from lanes', r.captured.find(({ lane }) => 
   && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
+const overriddenConfig = structuredClone(centralConfig);
+overriddenConfig.lanes[0].primary.max_output_tokens = 8192;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig) });
+check('repository configuration supplied through the environment remains authoritative', r.error === undefined
+  && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 8192
+  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
+
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Qwen3.7-Max only after Qwen3.8-Max exhausts retries', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 3 && r.captured.filter(({ model }) => model === 'qwen3.7-max').length === 1);
 const qwenFallback = r.captured.find(({ model }) => model === 'qwen3.7-max')?.body;

@@ -34,7 +34,7 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     # Backstop only. Repository and lane policy bound each model independently and lanes
-    # run in parallel. Lane B may spend up to 15 minutes on each model in its same-provider
+    # run in parallel. Lane B may spend up to 15 minutes on each model in its same-lane endpoint
     # chain, while this cap still prevents an unbounded runner.
     timeout-minutes: 40
     permissions:

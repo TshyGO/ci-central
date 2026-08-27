@@ -48,7 +48,7 @@ function jobSteps(text, jobName) {
   for (let index = stepsStart + 1; index < (jobEnd < 0 ? lines.length : jobEnd); index++) {
     const line = lines[index].trimEnd();
     const firstField = /^      - ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
-    if (/^      -\s+/.test(line)) {
+    if (/^      -(?:\s+.*)?$/.test(line)) {
       step = { with: {}, start: index, valid: Boolean(firstField) };
       if (firstField) step[firstField[1]] = yamlScalar(firstField[2]);
       steps.push(step);
@@ -74,7 +74,7 @@ function jobSteps(text, jobName) {
 
 function literalBlock(text, step, fieldName) {
   const lines = text.split('\n');
-  const stepEnd = lines.findIndex((line, index) => index > step.start && /^      -\s+/.test(line));
+  const stepEnd = lines.findIndex((line, index) => index > step.start && /^      -(?:\s+.*)?$/.test(line.trimEnd()));
   const end = stepEnd < 0 ? lines.length : stepEnd;
   const fieldStart = lines.findIndex((line, index) => index > step.start
     && index < end
@@ -293,6 +293,8 @@ check('checkout contract rejects a folded-scalar additional checkout', !checkout
   `      - name: Checkout caller code\n        uses: >\n          ${pinnedCheckoutAction}`)));
 check('checkout contract rejects a shell clone and checkout of the PR head', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Clone caller PR code\n        run: |\n          git clone https://github.com/\${{ github.repository }} caller\n          git -C caller checkout \${{ github.event.pull_request.head.sha }}`)));
+check('checkout contract rejects a bare-dash shell step with quoted keys', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      -\n        "name": Clone caller PR code\n        "run": |\n          git clone https://github.com/\${{ github.repository }} caller\n          git -C caller checkout \${{ github.event.pull_request.head.sha }}`)));
 check('checkout contract rejects a pull request head checkout', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: ${{ github.event.pull_request.head.sha }}',

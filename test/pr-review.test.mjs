@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Executes the real inline workflow script against mocked GitHub and HTTP APIs.
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -130,20 +131,27 @@ function insertBeforeTrustedCheckout(text, insertedStep) {
   lines.splice(stepStart, 0, ...insertedStep.split('\n'), '');
   return lines.join('\n');
 }
-function extractScript(stepName) {
-  const step = raw.findIndex((line) => line.trim() === `- name: ${stepName}`);
-  const start = raw.findIndex((line, index) => index > step && line.trim() === 'script: |');
+function extractScript(stepName, text = workflowText) {
+  const lines = text.split('\n');
+  const step = lines.findIndex((line) => line.trim() === `- name: ${stepName}`);
+  const start = lines.findIndex((line, index) => index > step && line.trim() === 'script: |');
   if (step < 0 || start < 0) throw new Error(`${stepName} script block not found`);
-  const lines = [];
-  for (let i = start + 1; i < raw.length; i++) {
-    if (raw[i].trim() !== '' && !raw[i].startsWith(' '.repeat(12))) break;
-    lines.push(raw[i].slice(12));
+  const scriptLines = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i].trim() !== '' && !lines[i].startsWith(' '.repeat(12))) break;
+    scriptLines.push(lines[i].slice(12).replace(/\r$/, ''));
   }
-  return lines.join('\n');
+  return scriptLines.join('\n');
 }
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+const trustedGithubScriptBodies = (text) =>
+  sha256(extractScript('Resolve matching central ref', text)) === '0acb393291fb0f18cf8772af93fadd26ac9193f166f787aac87d1a838ba4550b'
+  && sha256(extractScript('Review pull request', text)) === '82fdbb1d5a999c7c24421c690b0c051b295c05505b3a587387880bc3cab26a5e';
+const resolverScript = extractScript('Resolve matching central ref');
+const reviewScript = extractScript('Review pull request');
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-const runResolver = new AsyncFunction('core', 'process', extractScript('Resolve matching central ref'));
-const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', extractScript('Review pull request'));
+const runResolver = new AsyncFunction('core', 'process', resolverScript);
+const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', reviewScript);
 
 const centralConfig = JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', 'TshyGO__NebulaLab.json'), 'utf8'));
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
@@ -282,6 +290,11 @@ check('security-critical first-party Actions are pinned to immutable commits',
   && workflowText.includes('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09')
   && !workflowText.includes('actions/github-script@v8')
   && !workflowText.includes('actions/checkout@v5'));
+check('security-critical github-script bodies match their reviewed digests', trustedGithubScriptBodies(workflowText));
+check('github-script body contract rejects runner-only child_process code', !trustedGithubScriptBodies(replaceExactlyOnce(workflowText,
+  '            const shaPattern = /^[0-9a-f]{40}$/;',
+  `            if (process.env.GITHUB_ACTIONS) require('node:child_process').execFileSync('git', ['clone', 'https://github.com/TshyGO/NebulaLab']);\n            const shaPattern = /^[0-9a-f]{40}$/;`,
+)));
 check('the only checkout reads pinned ci-central review configuration, never caller PR code', checkoutContract(workflowText));
 check('checkout contract rejects an additional default checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Checkout caller code\n        uses: ${pinnedCheckoutAction} # v5`)));

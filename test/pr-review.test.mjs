@@ -20,6 +20,8 @@ function yamlScalar(value) {
     : uncommented;
 }
 
+// This deliberately parses the controlled block-style subset used by this workflow.
+// Unknown formatting fails the exact contract instead of being treated as trusted YAML.
 function jobSteps(text, jobName) {
   const lines = text.split('\n');
   const jobStart = lines.findIndex((line) => line.trimEnd() === `  ${jobName}:`);
@@ -72,10 +74,24 @@ function checkoutContract(text) {
     && checkout.with['sparse-checkout'] === 'review-action';
 }
 
-const insertBeforeTrustedCheckout = (text, step) => text.replace(
-  '      - name: Check out matching central configuration',
-  `${step}\n\n      - name: Check out matching central configuration`,
-);
+function replaceExactlyOnce(text, search, replacement) {
+  const first = text.indexOf(search);
+  if (first < 0) throw new Error(`Mutation anchor not found: ${search}`);
+  if (text.indexOf(search, first + search.length) >= 0) throw new Error(`Mutation anchor is not unique: ${search}`);
+  return `${text.slice(0, first)}${replacement}${text.slice(first + search.length)}`;
+}
+
+function insertBeforeTrustedCheckout(text, insertedStep) {
+  const lines = text.split('\n');
+  const usesLine = `        uses: ${pinnedCheckoutAction} # v5`;
+  const usesIndexes = lines.flatMap((line, index) => line === usesLine ? [index] : []);
+  if (usesIndexes.length !== 1) throw new Error(`Expected one trusted checkout line, found ${usesIndexes.length}`);
+  let stepStart = usesIndexes[0];
+  while (stepStart >= 0 && !/^      - /.test(lines[stepStart])) stepStart--;
+  if (stepStart < 0) throw new Error('Trusted checkout step start not found');
+  lines.splice(stepStart, 0, ...insertedStep.split('\n'), '');
+  return lines.join('\n');
+}
 function extractScript(stepName) {
   const step = raw.findIndex((line) => line.trim() === `- name: ${stepName}`);
   const start = raw.findIndex((line, index) => index > step && line.trim() === 'script: |');
@@ -235,30 +251,34 @@ check('checkout contract rejects a quoted, case-varied additional checkout', !ch
   `      - name: Checkout caller code\n        uses: "Actions/Checkout@${pinnedCheckoutAction.split('@')[1]}"`)));
 check('checkout contract rejects a folded-scalar additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Checkout caller code\n        uses: >\n          ${pinnedCheckoutAction}`)));
-check('checkout contract rejects a pull request head checkout', !checkoutContract(workflowText.replace(
+check('checkout contract rejects a pull request head checkout', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: ${{ github.event.pull_request.head.sha }}',
 )));
-check('checkout contract rejects the pull request event merge SHA', !checkoutContract(workflowText.replace(
+check('checkout contract rejects the pull request event merge SHA', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: ${{ github.sha }}',
 )));
-check('checkout contract rejects an explicit pull request merge ref', !checkoutContract(workflowText.replace(
+check('checkout contract rejects the pull request merge commit SHA', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: ${{ github.event.pull_request.merge_commit_sha }}',
+)));
+check('checkout contract rejects an explicit pull request merge ref', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: refs/pull/123/merge',
 )));
-check('checkout contract rejects a missing checkout ref', !checkoutContract(workflowText.replace(
+check('checkout contract rejects a missing checkout ref', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}\n',
   '',
 )));
-check('checkout contract rejects the caller repository', !checkoutContract(workflowText.replace(
+check('checkout contract rejects the caller repository', !checkoutContract(replaceExactlyOnce(workflowText,
   '          repository: TshyGO/ci-central',
   '          repository: ${{ github.repository }}',
 )));
-check('checkout contract does not rely on the checkout step name', checkoutContract(workflowText.replace(
+check('checkout contract does not rely on the checkout step name', checkoutContract(replaceExactlyOnce(workflowText,
   '      - name: Check out matching central configuration',
   '      - name: Renamed trusted checkout',
-)) === checkoutContract(workflowText));
+)));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
 check('Lane C has no hidden Google endpoint fallback after provider migration',

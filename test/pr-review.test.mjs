@@ -10,6 +10,72 @@ const workflowText = raw.join('\n');
 const callerText = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-agent.yml'), 'utf8');
 const workflowCallInputsBlock = /workflow_call:\n    inputs:\n([\s\S]*?)    secrets:/.exec(workflowText)?.[1] || '';
 const workflowCallInputs = [...workflowCallInputsBlock.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
+const pinnedCheckoutAction = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
+
+function yamlScalar(value) {
+  const uncommented = value.replace(/\s+#.*$/, '').trim();
+  const quote = uncommented[0];
+  return quote && quote === uncommented.at(-1) && ['"', "'"].includes(quote)
+    ? uncommented.slice(1, -1)
+    : uncommented;
+}
+
+function jobSteps(text, jobName) {
+  const lines = text.split('\n');
+  const jobStart = lines.findIndex((line) => line.trimEnd() === `  ${jobName}:`);
+  if (jobStart < 0) return [];
+  const jobEnd = lines.findIndex((line, index) => index > jobStart && /^  [a-zA-Z0-9_-]+:\s*$/.test(line));
+  const stepsStart = lines.findIndex((line, index) => index > jobStart
+    && (jobEnd < 0 || index < jobEnd)
+    && line.trimEnd() === '    steps:');
+  if (stepsStart < 0) return [];
+
+  const steps = [];
+  let step;
+  let section;
+  for (let index = stepsStart + 1; index < (jobEnd < 0 ? lines.length : jobEnd); index++) {
+    const line = lines[index].trimEnd();
+    const firstField = /^      - ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
+    if (firstField) {
+      step = { with: {}, [firstField[1]]: yamlScalar(firstField[2]) };
+      steps.push(step);
+      section = undefined;
+      continue;
+    }
+    if (!step) continue;
+    const field = /^        ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
+    if (field) {
+      if (field[1] === 'with' && field[2] === '') {
+        section = 'with';
+        continue;
+      }
+      section = undefined;
+      step[field[1]] = yamlScalar(field[2]);
+      continue;
+    }
+    const nestedField = /^          ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
+    if (nestedField && section === 'with') step.with[nestedField[1]] = yamlScalar(nestedField[2]);
+  }
+  return steps;
+}
+
+function checkoutContract(text) {
+  if ((text.match(/actions\/checkout@/gi) || []).length !== 1) return false;
+  const checkoutSteps = jobSteps(text, 'ai-pr-review')
+    .filter((step) => step.uses?.toLowerCase().startsWith('actions/checkout@'));
+  if (checkoutSteps.length !== 1) return false;
+  const [checkout] = checkoutSteps;
+  return checkout.uses === pinnedCheckoutAction
+    && checkout.with.repository === 'TshyGO/ci-central'
+    && checkout.with.ref === '${{ steps.central-ref.outputs.sha }}'
+    && checkout.with.path === '.ci-central'
+    && checkout.with['sparse-checkout'] === 'review-action';
+}
+
+const insertBeforeTrustedCheckout = (text, step) => text.replace(
+  '      - name: Check out matching central configuration',
+  `${step}\n\n      - name: Check out matching central configuration`,
+);
 function extractScript(stepName) {
   const step = raw.findIndex((line) => line.trim() === `- name: ${stepName}`);
   const start = raw.findIndex((line, index) => index > step && line.trim() === 'script: |');
@@ -162,6 +228,37 @@ check('security-critical first-party Actions are pinned to immutable commits',
   && workflowText.includes('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09')
   && !workflowText.includes('actions/github-script@v8')
   && !workflowText.includes('actions/checkout@v5'));
+check('the only checkout reads pinned ci-central review configuration, never caller PR code', checkoutContract(workflowText));
+check('checkout contract rejects an additional default checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      - name: Checkout caller code\n        uses: ${pinnedCheckoutAction} # v5`)));
+check('checkout contract rejects a quoted, case-varied additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      - name: Checkout caller code\n        uses: "Actions/Checkout@${pinnedCheckoutAction.split('@')[1]}"`)));
+check('checkout contract rejects a folded-scalar additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      - name: Checkout caller code\n        uses: >\n          ${pinnedCheckoutAction}`)));
+check('checkout contract rejects a pull request head checkout', !checkoutContract(workflowText.replace(
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: ${{ github.event.pull_request.head.sha }}',
+)));
+check('checkout contract rejects the pull request event merge SHA', !checkoutContract(workflowText.replace(
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: ${{ github.sha }}',
+)));
+check('checkout contract rejects an explicit pull request merge ref', !checkoutContract(workflowText.replace(
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: refs/pull/123/merge',
+)));
+check('checkout contract rejects a missing checkout ref', !checkoutContract(workflowText.replace(
+  '          ref: ${{ steps.central-ref.outputs.sha }}\n',
+  '',
+)));
+check('checkout contract rejects the caller repository', !checkoutContract(workflowText.replace(
+  '          repository: TshyGO/ci-central',
+  '          repository: ${{ github.repository }}',
+)));
+check('checkout contract does not rely on the checkout step name', checkoutContract(workflowText.replace(
+  '      - name: Check out matching central configuration',
+  '      - name: Renamed trusted checkout',
+)) === checkoutContract(workflowText));
 check('workflow resolves repository config and exposes only fixed lane slots', workflowText.includes('uses: ./.ci-central/review-action')
   && ['A', 'B', 'C'].every((lane) => workflowText.includes(`PR_AGENT_LANE_${lane}_KEY`) && workflowText.includes(`PR_AGENT_LANE_${lane}_API_BASE`)));
 check('Lane C has no hidden Google endpoint fallback after provider migration',

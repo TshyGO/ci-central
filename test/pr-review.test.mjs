@@ -11,6 +11,16 @@ const callerText = fs.readFileSync(path.join(here, '..', '.github', 'workflows',
 const workflowCallInputsBlock = /workflow_call:\n    inputs:\n([\s\S]*?)    secrets:/.exec(workflowText)?.[1] || '';
 const workflowCallInputs = [...workflowCallInputsBlock.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
 const pinnedCheckoutAction = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
+const pinnedGithubScriptAction = 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd';
+const trustedStepUses = [pinnedGithubScriptAction, pinnedCheckoutAction, './.ci-central/review-action', pinnedGithubScriptAction];
+const runnerValidationScript = `case "\${RUNNER_TIER}" in
+  hosted|review|build) ;;
+  *)
+    echo "::error::runner_tier must be hosted, review, or build; got '\${RUNNER_TIER}'." >&2
+    exit 1
+    ;;
+esac
+echo "runner_tier=\${RUNNER_TIER} runner=\${RUNNER_NAME:-unknown}"`;
 
 function yamlScalar(value) {
   const uncommented = value.replace(/\s+#.*$/, '').trim();
@@ -38,8 +48,9 @@ function jobSteps(text, jobName) {
   for (let index = stepsStart + 1; index < (jobEnd < 0 ? lines.length : jobEnd); index++) {
     const line = lines[index].trimEnd();
     const firstField = /^      - ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
-    if (firstField) {
-      step = { with: {}, [firstField[1]]: yamlScalar(firstField[2]) };
+    if (/^      -\s+/.test(line)) {
+      step = { with: {}, start: index, valid: Boolean(firstField) };
+      if (firstField) step[firstField[1]] = yamlScalar(firstField[2]);
       steps.push(step);
       section = undefined;
       continue;
@@ -61,13 +72,40 @@ function jobSteps(text, jobName) {
   return steps;
 }
 
+function literalBlock(text, step, fieldName) {
+  const lines = text.split('\n');
+  const stepEnd = lines.findIndex((line, index) => index > step.start && /^      -\s+/.test(line));
+  const end = stepEnd < 0 ? lines.length : stepEnd;
+  const fieldStart = lines.findIndex((line, index) => index > step.start
+    && index < end
+    && line.trimEnd() === `        ${fieldName}: |`);
+  if (fieldStart < 0) return undefined;
+  const block = [];
+  for (let index = fieldStart + 1; index < end; index++) {
+    const line = lines[index].trimEnd();
+    if (line !== '' && !line.startsWith(' '.repeat(10))) return undefined;
+    block.push(line.slice(10));
+  }
+  while (block.at(-1) === '') block.pop();
+  return block.join('\n');
+}
+
 function checkoutContract(text) {
   if ((text.match(/actions\/checkout@/gi) || []).length !== 1) return false;
-  const checkoutSteps = jobSteps(text, 'ai-pr-review')
+  const steps = jobSteps(text, 'ai-pr-review');
+  const uses = steps.filter((step) => Object.hasOwn(step, 'uses')).map((step) => step.uses);
+  const runSteps = steps.filter((step) => Object.hasOwn(step, 'run'));
+  if (steps.length !== 5
+    || steps.some((step) => !step.valid)
+    || uses.join('\n') !== trustedStepUses.join('\n')
+    || runSteps.length !== 1
+    || literalBlock(text, runSteps[0], 'run') !== runnerValidationScript) return false;
+  const checkoutSteps = steps
     .filter((step) => step.uses?.toLowerCase().startsWith('actions/checkout@'));
   if (checkoutSteps.length !== 1) return false;
   const [checkout] = checkoutSteps;
-  return checkout.uses === pinnedCheckoutAction
+  return Object.keys(checkout.with).sort().join(',') === 'path,ref,repository,sparse-checkout'
+    && checkout.uses === pinnedCheckoutAction
     && checkout.with.repository === 'TshyGO/ci-central'
     && checkout.with.ref === '${{ steps.central-ref.outputs.sha }}'
     && checkout.with.path === '.ci-central'
@@ -249,8 +287,12 @@ check('checkout contract rejects an additional default checkout', !checkoutContr
   `      - name: Checkout caller code\n        uses: ${pinnedCheckoutAction} # v5`)));
 check('checkout contract rejects a quoted, case-varied additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Checkout caller code\n        uses: "Actions/Checkout@${pinnedCheckoutAction.split('@')[1]}"`)));
+check('checkout contract rejects a YAML-escaped additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      - name: Checkout caller code\n        uses: "actions/check\\u006fut@${pinnedCheckoutAction.split('@')[1]}"`)));
 check('checkout contract rejects a folded-scalar additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Checkout caller code\n        uses: >\n          ${pinnedCheckoutAction}`)));
+check('checkout contract rejects a shell clone and checkout of the PR head', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      - name: Clone caller PR code\n        run: |\n          git clone https://github.com/\${{ github.repository }} caller\n          git -C caller checkout \${{ github.event.pull_request.head.sha }}`)));
 check('checkout contract rejects a pull request head checkout', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: ${{ github.event.pull_request.head.sha }}',
@@ -274,6 +316,10 @@ check('checkout contract rejects a missing checkout ref', !checkoutContract(repl
 check('checkout contract rejects the caller repository', !checkoutContract(replaceExactlyOnce(workflowText,
   '          repository: TshyGO/ci-central',
   '          repository: ${{ github.repository }}',
+)));
+check('checkout contract rejects additional checkout credentials', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          sparse-checkout: review-action',
+  '          sparse-checkout: review-action\n          token: ${{ secrets.REVIEW_TOKEN }}',
 )));
 check('checkout contract does not rely on the checkout step name', checkoutContract(replaceExactlyOnce(workflowText,
   '      - name: Check out matching central configuration',

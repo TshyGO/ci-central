@@ -48,6 +48,60 @@ function yamlScalar(value) {
     : uncommented;
 }
 
+function mappingAtIndent(lines, start, end, indent) {
+  const mapping = {};
+  let valid = true;
+  const prefix = ' '.repeat(indent);
+  for (let index = start; index < end; index++) {
+    const line = lines[index].replace(/\r$/, '');
+    if (line === '' || /^\s*#/.test(line) || !line.startsWith(prefix) || line[indent] === ' ') continue;
+    const field = new RegExp(`^ {${indent}}([a-zA-Z0-9_-]+):\\s*(.*?)\\s*$`).exec(line);
+    if (!field || Object.hasOwn(mapping, field[1])) {
+      valid = false;
+      continue;
+    }
+    mapping[field[1]] = yamlScalar(field[2]);
+  }
+  return { mapping, valid };
+}
+
+function workflowExecutionContract(text) {
+  const lines = text.split('\n');
+  const top = mappingAtIndent(lines, 0, lines.length, 0);
+  if (!top.valid || !exactObject(top.mapping, { name: 'Reusable AI PR Review', on: '', jobs: '' })) return false;
+
+  const jobsStart = lines.findIndex((line) => line.trimEnd() === 'jobs:');
+  const jobs = mappingAtIndent(lines, jobsStart + 1, lines.length, 2);
+  if (jobsStart < 0 || !jobs.valid || !exactObject(jobs.mapping, { 'ai-pr-review': '' })) return false;
+
+  const jobStart = lines.findIndex((line) => line.trimEnd() === '  ai-pr-review:');
+  const job = mappingAtIndent(lines, jobStart + 1, lines.length, 4);
+  if (jobStart < 0 || !job.valid || !exactObject(job.mapping, {
+    concurrency: '',
+    'runs-on': "${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}",
+    'timeout-minutes': '40',
+    permissions: '',
+    steps: '',
+  })) return false;
+
+  const concurrencyStart = lines.findIndex((line, index) => index > jobStart && line.trimEnd() === '    concurrency:');
+  const runsOn = lines.findIndex((line, index) => index > concurrencyStart && line.startsWith('    runs-on:'));
+  const concurrency = mappingAtIndent(lines, concurrencyStart + 1, runsOn, 6);
+  if (concurrencyStart < 0 || runsOn < 0 || !concurrency.valid || !exactObject(concurrency.mapping, {
+    group: 'centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}',
+    'cancel-in-progress': 'true',
+  })) return false;
+
+  const permissionsStart = lines.findIndex((line, index) => index > jobStart && line.trimEnd() === '    permissions:');
+  const stepsStart = lines.findIndex((line, index) => index > permissionsStart && line.trimEnd() === '    steps:');
+  const permissions = mappingAtIndent(lines, permissionsStart + 1, stepsStart, 6);
+  return permissionsStart >= 0 && stepsStart >= 0 && permissions.valid && exactObject(permissions.mapping, {
+    contents: 'read',
+    issues: 'write',
+    'pull-requests': 'write',
+  });
+}
+
 // This deliberately parses the controlled block-style subset used by this workflow.
 // Unknown formatting fails the exact contract instead of being treated as trusted YAML.
 function jobSteps(text, jobName) {
@@ -171,6 +225,7 @@ function exactStepFields(step, expected) {
 }
 
 function checkoutContract(text) {
+  if (!workflowExecutionContract(text)) return false;
   const steps = jobSteps(text, 'ai-pr-review');
   const uses = steps.filter((step) => Object.hasOwn(step, 'uses')).map((step) => step.uses);
   const runSteps = steps.filter((step) => Object.hasOwn(step, 'run'));
@@ -414,6 +469,16 @@ check('execution-surface contract rejects NODE_OPTIONS code injection before a p
   !checkoutContract(replaceExactlyOnce(workflowText,
     '          REPOSITORY: ${{ github.repository }}',
     `          REPOSITORY: \${{ github.repository }}\n          NODE_OPTIONS: "--import=data:text/javascript,import%20{execFileSync}%20from%20'node:child_process';execFileSync('git',['clone','https://github.com/'+process.env.GITHUB_REPOSITORY,'caller'])"`,
+  )));
+check('execution-surface contract rejects job-level NODE_OPTIONS code injection',
+  !checkoutContract(replaceExactlyOnce(workflowText,
+    '  ai-pr-review:',
+    `  ai-pr-review:\n    env:\n      NODE_OPTIONS: "--import=data:text/javascript,import%20{execFileSync}%20from%20'node:child_process';execFileSync('git',['clone','https://github.com/'+process.env.GITHUB_REPOSITORY,'caller'])"`,
+  )));
+check('execution-surface contract rejects workflow-level NODE_OPTIONS code injection',
+  !checkoutContract(replaceExactlyOnce(workflowText,
+    'jobs:',
+    `env:\n  NODE_OPTIONS: "--import=data:text/javascript,import%20{execFileSync}%20from%20'node:child_process';execFileSync('git',['clone','https://github.com/'+process.env.GITHUB_REPOSITORY,'caller'])"\n\njobs:`,
   )));
 check('the only checkout reads pinned ci-central review configuration, never caller PR code', checkoutContract(workflowText));
 check('checkout contract ignores checkout-shaped text in YAML comments', checkoutContract(insertBeforeTrustedCheckout(workflowText,

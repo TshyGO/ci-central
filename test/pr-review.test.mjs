@@ -6,8 +6,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const raw = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-review.yml'), 'utf8').split('\n');
-const workflowText = raw.join('\n');
+const workflowSource = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-review.yml'), 'utf8');
+const workflowText = workflowSource.replace(/\r\n/g, '\n');
+if (/[\r\u0085\u2028\u2029]/.test(workflowText)) throw new Error('Workflow contains a non-canonical YAML line break');
 const callerText = fs.readFileSync(path.join(here, '..', '.github', 'workflows', 'pr-agent.yml'), 'utf8');
 const workflowCallInputsBlock = /workflow_call:\n    inputs:\n([\s\S]*?)    secrets:/.exec(workflowText)?.[1] || '';
 const workflowCallInputs = [...workflowCallInputsBlock.matchAll(/^      ([a-z][a-z0-9_]*):$/gm)].map((match) => match[1]);
@@ -225,6 +226,7 @@ function exactStepFields(step, expected) {
 }
 
 function checkoutContract(text) {
+  if (/[\r\u0085\u2028\u2029]/.test(text)) return false;
   if (!workflowExecutionContract(text)) return false;
   const steps = jobSteps(text, 'ai-pr-review');
   const uses = steps.filter((step) => Object.hasOwn(step, 'uses')).map((step) => step.uses);
@@ -480,6 +482,11 @@ check('execution-surface contract rejects workflow-level NODE_OPTIONS code injec
     'jobs:',
     `env:\n  NODE_OPTIONS: "--import=data:text/javascript,import%20{execFileSync}%20from%20'node:child_process';execFileSync('git',['clone','https://github.com/'+process.env.GITHUB_REPOSITORY,'caller'])"\n\njobs:`,
   )));
+check('execution-surface contract rejects YAML line breaks hidden after a comment',
+  ['\r', '\u0085', '\u2028', '\u2029'].every((lineBreak) => !checkoutContract(replaceExactlyOnce(workflowText,
+    '          sparse-checkout: review-action',
+    `          sparse-checkout: review-action #${lineBreak}      - name: Clone caller PR code${lineBreak}        run: git clone https://github.com/\${{ github.repository }} caller`,
+  ))));
 check('the only checkout reads pinned ci-central review configuration, never caller PR code', checkoutContract(workflowText));
 check('checkout contract ignores checkout-shaped text in YAML comments', checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      # - name: Checkout caller PR code\n      #   uses: ${pinnedCheckoutAction}\n      #   with:\n      #     ref: \${{ github.event.pull_request.head.sha }}`)));

@@ -14,6 +14,23 @@ const workflowCallInputs = [...workflowCallInputsBlock.matchAll(/^      ([a-z][a
 const pinnedCheckoutAction = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
 const pinnedGithubScriptAction = 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd';
 const trustedStepUses = [pinnedGithubScriptAction, pinnedCheckoutAction, './.ci-central/review-action', pinnedGithubScriptAction];
+const trustedResolverEnv = {
+  JOB_WORKFLOW_SHA: '${{ github.job_workflow_sha }}',
+  JOB_WORKFLOW_REF: '${{ github.job_workflow_ref }}',
+  CALLER_WORKFLOW_SHA: '${{ inputs.central_workflow_sha }}',
+  EVENT_SHA: '${{ github.sha }}',
+  REPOSITORY: '${{ github.repository }}',
+};
+const trustedReviewEnv = {
+  LANE_A_KEY: '${{ secrets.PR_AGENT_LANE_A_KEY }}',
+  LANE_A_API_BASE: '${{ secrets.PR_AGENT_LANE_A_API_BASE }}',
+  LANE_B_KEY: '${{ secrets.PR_AGENT_LANE_B_KEY }}',
+  LANE_B_API_BASE: '${{ secrets.PR_AGENT_LANE_B_API_BASE }}',
+  LANE_C_KEY: '${{ secrets.PR_AGENT_LANE_C_KEY }}',
+  LANE_C_API_BASE: '${{ secrets.PR_AGENT_LANE_C_API_BASE }}',
+  PR_REVIEW_CONFIG: '${{ steps.review-config.outputs.config }}',
+  PR_REVIEW_WORKFLOW_SHA: '${{ steps.central-ref.outputs.sha }}',
+};
 const runnerValidationScript = `case "\${RUNNER_TIER}" in
   hosted|review|build) ;;
   *)
@@ -50,7 +67,7 @@ function jobSteps(text, jobName) {
     const line = lines[index].trimEnd();
     const firstField = /^      - ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
     if (/^      -(?:\s+.*)?$/.test(line)) {
-      step = { with: {}, start: index, valid: Boolean(firstField) };
+      step = { start: index, valid: Boolean(firstField) };
       if (firstField) step[firstField[1]] = yamlScalar(firstField[2]);
       steps.push(step);
       section = undefined;
@@ -59,16 +76,29 @@ function jobSteps(text, jobName) {
     if (!step) continue;
     const field = /^        ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
     if (field) {
-      if (field[1] === 'with' && field[2] === '') {
-        section = 'with';
+      if (['env', 'with'].includes(field[1]) && field[2] === '') {
+        if (step[`${field[1]}Start`] !== undefined) step.valid = false;
+        step[`${field[1]}Start`] = index;
+        step[field[1]] = {};
+        section = field[1];
         continue;
       }
       section = undefined;
       step[field[1]] = yamlScalar(field[2]);
       continue;
     }
+    if (/^        \S/.test(line) && !/^\s*#/.test(line)) {
+      step.valid = false;
+      section = undefined;
+      continue;
+    }
     const nestedField = /^          ([a-zA-Z0-9_-]+):\s*(.*?)\s*$/.exec(line);
-    if (nestedField && section === 'with') step.with[nestedField[1]] = yamlScalar(nestedField[2]);
+    if (nestedField && ['env', 'with'].includes(section)) {
+      if (Object.hasOwn(step[section], nestedField[1])) step.valid = false;
+      step[section][nestedField[1]] = yamlScalar(nestedField[2]);
+      continue;
+    }
+    if (['env', 'with'].includes(section) && /^          \S/.test(line) && !/^\s*#/.test(line)) step.valid = false;
   }
   return steps;
 }
@@ -84,15 +114,63 @@ function literalBlock(text, step, fieldName) {
   const block = [];
   for (let index = fieldStart + 1; index < end; index++) {
     const line = lines[index].trimEnd();
-    if (line !== '' && !line.startsWith(' '.repeat(10))) return undefined;
+    if (line !== '' && !line.startsWith(' '.repeat(10))) {
+      const trailing = lines.slice(index, end).map((candidate) => candidate.replace(/\r$/, ''));
+      if (/^\s*#/.test(line) && trailing.every((candidate) => candidate === ''
+        || (/^\s*#/.test(candidate) && !candidate.startsWith(' '.repeat(10))))) break;
+      return undefined;
+    }
     block.push(line.slice(10));
   }
   while (block.at(-1) === '') block.pop();
   return block.join('\n');
 }
 
+function withLiteralBlock(text, step, fieldName) {
+  if (step.withStart === undefined) return undefined;
+  const lines = text.split('\n');
+  const stepEnd = lines.findIndex((line, index) => index > step.start && /^      -(?:\s+.*)?$/.test(line.trimEnd()));
+  const end = stepEnd < 0 ? lines.length : stepEnd;
+  const sectionEnd = lines.findIndex((line, index) => index > step.withStart
+    && index < end
+    && /^        [a-zA-Z0-9_-]+:/.test(line.trimEnd()));
+  const withEnd = sectionEnd < 0 ? end : sectionEnd;
+  const fieldStarts = lines.flatMap((line, index) => index > step.withStart
+    && index < withEnd
+    && line.trimEnd() === `          ${fieldName}: |` ? [index] : []);
+  if (fieldStarts.length !== 1) return undefined;
+  const fieldStart = fieldStarts[0];
+  const nextField = lines.findIndex((line, index) => index > fieldStart
+    && index < withEnd
+    && /^          [a-zA-Z0-9_-]+:/.test(line.trimEnd()));
+  const blockEnd = nextField < 0 ? withEnd : nextField;
+  const block = [];
+  for (let index = fieldStart + 1; index < blockEnd; index++) {
+    const line = lines[index].replace(/\r$/, '');
+    if (line !== '' && !line.startsWith(' '.repeat(12))) {
+      const trailing = lines.slice(index, blockEnd).map((candidate) => candidate.replace(/\r$/, ''));
+      if (/^\s*#/.test(line) && trailing.every((candidate) => candidate === ''
+        || (/^\s*#/.test(candidate) && !candidate.startsWith(' '.repeat(12))))) break;
+      return undefined;
+    }
+    block.push(line.slice(12));
+  }
+  while (block.at(-1) === '') block.pop();
+  return block.join('\n');
+}
+
+function exactObject(actual, expected) {
+  return actual !== undefined
+    && Object.keys(actual).sort().join(',') === Object.keys(expected).sort().join(',')
+    && Object.entries(expected).every(([key, value]) => actual[key] === value);
+}
+
+function exactStepFields(step, expected) {
+  const metadata = new Set(['start', 'valid', 'envStart', 'withStart']);
+  return step.valid && Object.keys(step).filter((key) => !metadata.has(key)).sort().join(',') === expected.slice().sort().join(',');
+}
+
 function checkoutContract(text) {
-  if ((text.match(/actions\/checkout@/gi) || []).length !== 1) return false;
   const steps = jobSteps(text, 'ai-pr-review');
   const uses = steps.filter((step) => Object.hasOwn(step, 'uses')).map((step) => step.uses);
   const runSteps = steps.filter((step) => Object.hasOwn(step, 'run'));
@@ -100,7 +178,18 @@ function checkoutContract(text) {
     || steps.some((step) => !step.valid)
     || uses.join('\n') !== trustedStepUses.join('\n')
     || runSteps.length !== 1
-    || literalBlock(text, runSteps[0], 'run') !== runnerValidationScript) return false;
+    || literalBlock(text, runSteps[0], 'run') !== runnerValidationScript
+    || !exactStepFields(steps[0], ['name', 'env', 'run'])
+    || !exactObject(steps[0].env, { RUNNER_TIER: '${{ inputs.runner_tier }}' })
+    || !exactStepFields(steps[1], ['name', 'id', 'uses', 'env', 'with'])
+    || !exactObject(steps[1].env, trustedResolverEnv)
+    || !exactObject(steps[1].with, { script: '|' })
+    || !exactStepFields(steps[2], ['name', 'uses', 'with'])
+    || !exactStepFields(steps[3], ['name', 'id', 'uses', 'with'])
+    || !exactObject(steps[3].with, { repository: '${{ github.repository }}' })
+    || !exactStepFields(steps[4], ['name', 'uses', 'env', 'with'])
+    || !exactObject(steps[4].env, trustedReviewEnv)
+    || !exactObject(steps[4].with, { script: '|' })) return false;
   const checkoutSteps = steps
     .filter((step) => step.uses?.toLowerCase().startsWith('actions/checkout@'));
   if (checkoutSteps.length !== 1) return false;
@@ -131,24 +220,47 @@ function insertBeforeTrustedCheckout(text, insertedStep) {
   lines.splice(stepStart, 0, ...insertedStep.split('\n'), '');
   return lines.join('\n');
 }
-function extractScript(stepName, text = workflowText) {
+
+function githubScriptBodies(text) {
+  const scriptSteps = jobSteps(text, 'ai-pr-review')
+    .filter((step) => step.uses === pinnedGithubScriptAction);
+  if (scriptSteps.length !== 2
+    || scriptSteps.some((step) => !step.valid
+      || !exactObject(step.with, { script: '|' }))
+    || !exactObject(scriptSteps[0].env, trustedResolverEnv)
+    || !exactObject(scriptSteps[1].env, trustedReviewEnv)) return [];
+  return scriptSteps.map((step) => withLiteralBlock(text, step, 'script'));
+}
+
+function insertGithubScriptEnvDecoy(text, scriptIndex, maliciousBody) {
+  const steps = jobSteps(text, 'ai-pr-review');
+  const scriptSteps = steps.filter((step) => step.uses === pinnedGithubScriptAction);
+  const target = scriptSteps[scriptIndex];
+  const trustedBody = target && withLiteralBlock(text, target, 'script');
+  if (!target || trustedBody === undefined) throw new Error(`github-script ${scriptIndex} not found`);
+
   const lines = text.split('\n');
-  const step = lines.findIndex((line) => line.trim() === `- name: ${stepName}`);
-  const start = lines.findIndex((line, index) => index > step && line.trim() === 'script: |');
-  if (step < 0 || start < 0) throw new Error(`${stepName} script block not found`);
-  const scriptLines = [];
-  for (let i = start + 1; i < lines.length; i++) {
-    if (lines[i].trim() !== '' && !lines[i].startsWith(' '.repeat(12))) break;
-    scriptLines.push(lines[i].slice(12).replace(/\r$/, ''));
-  }
-  return scriptLines.join('\n');
+  const decoyLines = ['          script: |', ...trustedBody.split('\n').map((line) => `            ${line}`)];
+  lines.splice(target.withStart, 0, ...decoyLines);
+  const actualWithStart = target.withStart + decoyLines.length;
+  const actualScriptStart = lines.findIndex((line, index) => index > actualWithStart
+    && line.trimEnd() === '          script: |');
+  const stepEnd = lines.findIndex((line, index) => index > actualScriptStart
+    && /^      -(?:\s+.*)?$/.test(line.trimEnd()));
+  if (actualScriptStart < 0 || stepEnd < 0) throw new Error('Executable github-script block not found');
+  lines.splice(actualScriptStart + 1, stepEnd - actualScriptStart - 1,
+    ...maliciousBody.split('\n').map((line) => `            ${line}`), '');
+  return lines.join('\n');
 }
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
-const trustedGithubScriptBodies = (text) =>
-  sha256(extractScript('Resolve matching central ref', text)) === '0acb393291fb0f18cf8772af93fadd26ac9193f166f787aac87d1a838ba4550b'
-  && sha256(extractScript('Review pull request', text)) === '82fdbb1d5a999c7c24421c690b0c051b295c05505b3a587387880bc3cab26a5e';
-const resolverScript = extractScript('Resolve matching central ref');
-const reviewScript = extractScript('Review pull request');
+const trustedGithubScriptBodies = (text) => {
+  const [resolver, review] = githubScriptBodies(text);
+  return resolver !== undefined && review !== undefined
+    && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
+    && sha256(review) === '4de2d65ed9aebc4b4ad3795835a08148cf5ac052503a1776a488684e8e2a076b';
+};
+const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
+if (resolverScript === undefined || reviewScript === undefined) throw new Error('Trusted github-script blocks not found');
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const runResolver = new AsyncFunction('core', 'process', resolverScript);
 const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', reviewScript);
@@ -295,7 +407,21 @@ check('github-script body contract rejects runner-only child_process code', !tru
   '            const shaPattern = /^[0-9a-f]{40}$/;',
   `            if (process.env.GITHUB_ACTIONS) require('node:child_process').execFileSync('git', ['clone', 'https://github.com/TshyGO/NebulaLab']);\n            const shaPattern = /^[0-9a-f]{40}$/;`,
 )));
+check('github-script body contract hashes the executable with.script, not an inert env.script decoy',
+  !trustedGithubScriptBodies(insertGithubScriptEnvDecoy(workflowText, 0,
+    "if (process.env.GITHUB_ACTIONS) require('node:child_process').execFileSync('git', ['clone', 'https://github.com/TshyGO/NebulaLab']);")));
+check('execution-surface contract rejects NODE_OPTIONS code injection before a pinned Action starts',
+  !checkoutContract(replaceExactlyOnce(workflowText,
+    '          REPOSITORY: ${{ github.repository }}',
+    `          REPOSITORY: \${{ github.repository }}\n          NODE_OPTIONS: "--import=data:text/javascript,import%20{execFileSync}%20from%20'node:child_process';execFileSync('git',['clone','https://github.com/'+process.env.GITHUB_REPOSITORY,'caller'])"`,
+  )));
 check('the only checkout reads pinned ci-central review configuration, never caller PR code', checkoutContract(workflowText));
+check('checkout contract ignores checkout-shaped text in YAML comments', checkoutContract(insertBeforeTrustedCheckout(workflowText,
+  `      # - name: Checkout caller PR code\n      #   uses: ${pinnedCheckoutAction}\n      #   with:\n      #     ref: \${{ github.event.pull_request.head.sha }}`)));
+check('checkout contract rejects a commented-out trusted checkout action', !checkoutContract(replaceExactlyOnce(workflowText,
+  `        uses: ${pinnedCheckoutAction} # v5`,
+  `        # uses: ${pinnedCheckoutAction} # v5`,
+)));
 check('checkout contract rejects an additional default checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Checkout caller code\n        uses: ${pinnedCheckoutAction} # v5`)));
 check('checkout contract rejects a quoted, case-varied additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
@@ -304,6 +430,14 @@ check('checkout contract rejects a YAML-escaped additional checkout', !checkoutC
   `      - name: Checkout caller code\n        uses: "actions/check\\u006fut@${pinnedCheckoutAction.split('@')[1]}"`)));
 check('checkout contract rejects a folded-scalar additional checkout', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Checkout caller code\n        uses: >\n          ${pinnedCheckoutAction}`)));
+check('checkout contract rejects a quoted duplicate uses key in a trusted step', !checkoutContract(replaceExactlyOnce(workflowText,
+  `        uses: ${pinnedCheckoutAction} # v5`,
+  `        uses: ${pinnedCheckoutAction} # v5\n        "uses": ${pinnedCheckoutAction}`,
+)));
+check('checkout contract rejects a quoted duplicate repository key', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          repository: TshyGO/ci-central',
+  '          repository: TshyGO/ci-central\n          "repository": TshyGO/NebulaLab',
+)));
 check('checkout contract rejects a shell clone and checkout of the PR head', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Clone caller PR code\n        run: |\n          git clone https://github.com/\${{ github.repository }} caller\n          git -C caller checkout \${{ github.event.pull_request.head.sha }}`)));
 check('checkout contract rejects a bare-dash shell step with quoted keys', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
@@ -311,6 +445,14 @@ check('checkout contract rejects a bare-dash shell step with quoted keys', !chec
 check('checkout contract rejects a pull request head checkout', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: ${{ github.event.pull_request.head.sha }}',
+)));
+check('checkout contract rejects a pull request head branch', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: ${{ github.event.pull_request.head.ref }}',
+)));
+check('checkout contract rejects github.head_ref', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: ${{ github.head_ref }}',
 )));
 check('checkout contract rejects the pull request event merge SHA', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}',
@@ -324,6 +466,10 @@ check('checkout contract rejects an explicit pull request merge ref', !checkoutC
   '          ref: ${{ steps.central-ref.outputs.sha }}',
   '          ref: refs/pull/123/merge',
 )));
+check('checkout contract rejects an explicit pull request head ref', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          ref: ${{ steps.central-ref.outputs.sha }}',
+  '          ref: refs/pull/123/head',
+)));
 check('checkout contract rejects a missing checkout ref', !checkoutContract(replaceExactlyOnce(workflowText,
   '          ref: ${{ steps.central-ref.outputs.sha }}\n',
   '',
@@ -331,6 +477,14 @@ check('checkout contract rejects a missing checkout ref', !checkoutContract(repl
 check('checkout contract rejects the caller repository', !checkoutContract(replaceExactlyOnce(workflowText,
   '          repository: TshyGO/ci-central',
   '          repository: ${{ github.repository }}',
+)));
+check('checkout contract rejects a literal non-central repository', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          repository: TshyGO/ci-central',
+  '          repository: TshyGO/NebulaLab',
+)));
+check('checkout contract rejects an implicit caller-repository checkout', !checkoutContract(replaceExactlyOnce(workflowText,
+  '          repository: TshyGO/ci-central\n',
+  '',
 )));
 check('checkout contract rejects additional checkout credentials', !checkoutContract(replaceExactlyOnce(workflowText,
   '          sparse-checkout: review-action',

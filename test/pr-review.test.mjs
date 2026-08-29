@@ -316,6 +316,7 @@ const trustedGithubScriptBodies = (text) => {
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
     && sha256(review) === '4de2d65ed9aebc4b4ad3795835a08148cf5ac052503a1776a488684e8e2a076b';
 };
+if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
 if (resolverScript === undefined || reviewScript === undefined) throw new Error('Trusted github-script blocks not found');
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
@@ -463,6 +464,10 @@ check('security-critical github-script bodies match their reviewed digests', tru
 check('github-script body contract rejects runner-only child_process code', !trustedGithubScriptBodies(replaceExactlyOnce(workflowText,
   '            const shaPattern = /^[0-9a-f]{40}$/;',
   `            if (process.env.GITHUB_ACTIONS) require('node:child_process').execFileSync('git', ['clone', 'https://github.com/TshyGO/NebulaLab']);\n            const shaPattern = /^[0-9a-f]{40}$/;`,
+)));
+check('github-script digest guard rejects process exit before script compilation', !trustedGithubScriptBodies(replaceExactlyOnce(workflowText,
+  '            const shaPattern = /^[0-9a-f]{40}$/;',
+  `            globalThis.process.exit(0);\n            const shaPattern = /^[0-9a-f]{40}$/;`,
 )));
 check('github-script body contract hashes the executable with.script, not an inert env.script decoy',
   !trustedGithubScriptBodies(insertGithubScriptEnvDecoy(workflowText, 0,

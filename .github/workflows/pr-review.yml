@@ -178,6 +178,17 @@ jobs:
               throw new Error('At least one lane must be required; every configured lane is advisory.');
             }
             const reviewPolicy = reviewConfig.review_policy || {};
+            // A quorum gate, when configured, replaces the per-lane advisory/required
+            // split below. It has to be a whole number of actual lanes: 0 would gate
+            // nothing, and a number larger than the lane count could never be met, so
+            // both are configuration errors rather than a review that silently always
+            // passes or always fails.
+            if (reviewPolicy.min_valid_lanes !== undefined) {
+              const minimum = reviewPolicy.min_valid_lanes;
+              if (!Number.isInteger(minimum) || minimum < 1 || minimum > lanes.length) {
+                throw new Error(`review_policy.min_valid_lanes must be an integer between 1 and the ${lanes.length} configured lane(s).`);
+              }
+            }
             if (typeof reviewPolicy.system_prompt !== 'string' || !reviewPolicy.system_prompt.trim()) {
               throw new Error('Central PR review config is missing review_policy.system_prompt.');
             }
@@ -902,10 +913,40 @@ jobs:
             if (failedAdvisoryLaneIds.length) {
               console.log(`Advisory lane(s) without valid evidence, not gating this run: ${failedAdvisoryLaneIds.map((laneId) => `Lane ${laneId}`).join(', ')}.`);
             }
-            const invalidLaneIds = lanes
-              .filter((lane) => !lane.advisory)
-              .map((lane) => lane.id)
-              .filter((laneId) => !validLaneIds.has(laneId));
-            if (invalidLaneIds.length) {
-              throw new Error(`Required review evidence is not valid for ${invalidLaneIds.map((laneId) => `Lane ${laneId}`).join(', ')} at head ${reviewHeadSha}.`);
+            // Two ways to decide whether enough review landed.
+            //
+            // `min_valid_lanes` counts how many independent reviews arrived, without
+            // caring which lanes produced them. Lanes exist to be redundant, and naming
+            // specific ones as required spends that redundancy: with two required lanes
+            // the review is available only when both providers are, so the run is red
+            // whenever either one is out of quota - a state that lasts until the quota
+            // resets, not a blip. Measured over six consecutive NebulaLab failures, four
+            // were one lane short while two others had published a full review.
+            //
+            // Counting does not lower the bar. A repository that required Lane A and
+            // Lane B needed two reviews before and needs two now; the gate simply stops
+            // insisting on which two. With three lanes, reaching two also guarantees at
+            // least one of the two heavyweight lanes, because the third cannot make a
+            // quorum on its own.
+            //
+            // Without the field, the original rule stands: every non-advisory lane must
+            // have valid evidence. Repositories that have not opted in are unaffected.
+            const minValidLanes = reviewPolicy.min_valid_lanes;
+            if (minValidLanes !== undefined) {
+              const validLanes = lanes.filter((lane) => validLaneIds.has(lane.id));
+              console.log(`Quorum gate: ${validLanes.length}/${lanes.length} lane(s) published valid evidence, ${minValidLanes} required.`);
+              if (validLanes.length < minValidLanes) {
+                const missing = lanes
+                  .map((lane) => lane.id)
+                  .filter((laneId) => !validLaneIds.has(laneId));
+                throw new Error(`Only ${validLanes.length} of ${lanes.length} lanes produced valid review evidence at head ${reviewHeadSha}; ${minValidLanes} required. Without evidence: ${missing.map((laneId) => `Lane ${laneId}`).join(', ')}.`);
+              }
+            } else {
+              const invalidLaneIds = lanes
+                .filter((lane) => !lane.advisory)
+                .map((lane) => lane.id)
+                .filter((laneId) => !validLaneIds.has(laneId));
+              if (invalidLaneIds.length) {
+                throw new Error(`Required review evidence is not valid for ${invalidLaneIds.map((laneId) => `Lane ${laneId}`).join(', ')} at head ${reviewHeadSha}.`);
+              }
             }

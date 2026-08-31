@@ -314,7 +314,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === '4de2d65ed9aebc4b4ad3795835a08148cf5ac052503a1776a488684e8e2a076b';
+    && sha256(review) === '1a14db7ad1f8bf97f9c2a6ff971c89f4628ae47ebcf291b1e171885d70c4290f';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);

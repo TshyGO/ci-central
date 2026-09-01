@@ -81,13 +81,20 @@ for (const repository of repositories) {
 //
 // Two is also the floor that keeps a heavyweight lane in every passing run: with three
 // lanes, no quorum of two can be reached by Lane C alone.
-const quorum = source.loadConfig('TshyGO/NebulaLab', actionPath).review_policy.min_valid_lanes;
-assert.equal(quorum, 2, 'NebulaLab quorum must stay at the two reviews the required lanes already demanded');
-assert.ok(quorum < source.loadConfig('TshyGO/NebulaLab', actionPath).lanes.length,
-  'a quorum equal to the lane count is the all-lanes rule again, with none of the redundancy');
-for (const repository of repositories.filter((name) => name !== 'TshyGO/NebulaLab')) {
-  assert.equal(source.loadConfig(repository, actionPath).review_policy.min_valid_lanes, undefined,
-    `${repository} did not opt into the quorum and must keep the original all-required rule`);
+// Every repository, because the reasoning is structural rather than measured.
+// All four run the same three lanes - two heavyweights and one advisory flash
+// model on a free quota - so all four had the same failure: either named lane
+// out of quota turned the run red while the other two published full reviews.
+// The Lane C budgets deliberately did not spread this way; those numbers came
+// from NebulaLab timings and nobody has measured the others.
+for (const repository of repositories) {
+  const policy = source.loadConfig(repository, actionPath).review_policy;
+  const lanes = source.loadConfig(repository, actionPath).lanes;
+  assert.equal(policy.min_valid_lanes, 2, `${repository} quorum must stay at the two reviews the required lanes already demanded`);
+  assert.ok(policy.min_valid_lanes < lanes.length,
+    `${repository} quorum equal to the lane count is the all-lanes rule again, with none of the redundancy`);
+  assert.equal(lanes.filter((lane) => !lane.advisory).length, 2,
+    `${repository} quorum of 2 assumes two non-advisory lanes; changing that changes what the number means`);
 }
 
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);

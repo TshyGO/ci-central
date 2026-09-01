@@ -818,9 +818,13 @@ check('Lane C falls back only to SenseNova 6.8 Flash Lite after DeepSeek V4 Flas
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure short-circuits only its provider lane', r.captured.filter(({ lane }) => lane === 'A').length === 1
   && !r.captured.some(({ model }) => model === 'qwen3.7-max') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
-check('failed lane publishes a diagnostic and fails the strict aggregate gate', /Lane A/.test(r.error?.message || '')
+// The case the quorum exists for. A provider's quota is exhausted for days, not
+// seconds, so under the old all-required rule every pull request stayed red until it
+// reset - while two other lanes had published complete reviews the whole time.
+check('a quota failure on one lane publishes its diagnostic without failing the quorum', !r.error
   && r.posted.length === 3
-  && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted') && body.includes('status=diagnostic')));
+  && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted') && body.includes('status=diagnostic'))
+  && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
 
 r = await scenario((call) => { if (call.lane === 'A') throw new Error('fetch failed'); return healthy(call); });
 check('DNS or TLS style failures retry primary but do not resend context to fallback', r.captured.filter(({ lane }) => lane === 'A').length === 3
@@ -837,9 +841,19 @@ check('empty final content advances to fallback without publishing reasoning', r
 r = await scenario((call) => call.lane === 'A'
   ? reply(200, chatResult(call.model, '# incomplete', { finish: 'LENGTH' }))
   : healthy(call));
-check('truncated output is marked partial and cannot satisfy the strict aggregate gate', /Lane A/.test(r.error?.message || '')
+check('truncated output is published as partial and the other two lanes carry the quorum', !r.error
   && r.captured.some(({ model }) => model === 'qwen3.7-max')
-  && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial') && body.includes('max_tokens')));
+  && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial') && body.includes('max_tokens'))
+  && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
+
+// Partial must not be quietly counted as a review. Isolating it: one lane truncated,
+// one lane unprovisioned, so the quorum turns on whether `partial` counts. It must not.
+r = await scenario((call) => call.lane === 'A'
+  ? reply(200, chatResult(call.model, '# incomplete', { finish: 'LENGTH' }))
+  : healthy(call), { LANE_C_KEY: '', LANE_C_API_BASE: '' });
+check('a partial review does not count toward the quorum', /1 of 3 lanes/.test(r.error?.message || '')
+  && /Lane A, Lane C/.test(r.error?.message || '')
+  && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial')));
 
 const sameModelConfig = structuredClone(centralConfig);
 sameModelConfig.lanes[1].primary = { ...sameModelConfig.lanes[1].primary, id: 'qwen3.8-max', label: 'Qwen via Lane B' };
@@ -901,7 +915,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidOmitMaxTok
 check('workflow defense rejects a non-boolean omit_max_tokens flag', /omit_max_tokens must be a boolean/.test(r.error?.message || '') && r.captured.length === 0);
 
 r = await scenario(healthy, { LANE_B_KEY: '' });
-check('an unprovisioned lane preserves healthy reviews but fails the strict aggregate gate', /Lane B/.test(r.error?.message || '')
+check('an unprovisioned lane still publishes its diagnostic while the other two carry the quorum', !r.error
   && r.captured.length === 2
   && !r.captured.some(({ lane }) => lane === 'B')
   && r.posted.length === 3
@@ -910,10 +924,11 @@ check('an unprovisioned lane preserves healthy reviews but fails the strict aggr
 r = await scenario(healthy, {
   LANE_A_KEY: '', LANE_A_API_BASE: '', LANE_B_KEY: '', LANE_B_API_BASE: '', LANE_C_KEY: '', LANE_C_API_BASE: '',
 });
-// Lane C is advisory, so it is absent from the gate message even when it also failed:
-// every lane still publishes its diagnostic, but only the required lanes turn the job red.
-check('diagnostic-only execution fails the job after preserving lane diagnostics', /Lane A, Lane B/.test(r.error?.message || '')
-  && !/Lane C/.test(r.error?.message || '')
+// Under a quorum every lane counts, so the message names every lane that came up
+// short rather than hiding the advisory one. Omitting it was right while it could not
+// affect the outcome and is misleading now that it can.
+check('diagnostic-only execution fails the job after preserving lane diagnostics', /0 of 3 lanes/.test(r.error?.message || '')
+  && /Lane A, Lane B, Lane C/.test(r.error?.message || '')
   && r.captured.length === 0 && r.posted.length === 3);
 
 r = await scenario(healthy, { LANE_C_KEY: '', LANE_C_API_BASE: '' });
@@ -925,8 +940,8 @@ check('an advisory lane without evidence publishes its diagnostic without failin
   && r.logs.some((line) => line.includes('Advisory lane(s) without valid evidence')));
 
 r = await scenario(healthy, { LANE_A_KEY: '', LANE_C_KEY: '' });
-check('a required lane still gates the job when an advisory lane fails alongside it', /Lane A/.test(r.error?.message || '')
-  && !/Lane C/.test(r.error?.message || ''));
+check('two lanes short of the quorum fails the job and names both', /1 of 3 lanes/.test(r.error?.message || '')
+  && /Lane A, Lane C/.test(r.error?.message || ''));
 
 const allAdvisoryConfig = structuredClone(centralConfig);
 for (const lane of allAdvisoryConfig.lanes) lane.advisory = true;
@@ -952,7 +967,30 @@ r = await scenario(healthy, {}, { pulls: [pull, pull, newerPull] });
 check('head change during model execution publishes no stale comments', r.captured.length === 3 && r.posted.length === 0 && r.logs.some((line) => line.includes('before comment publishing')));
 
 r = await scenario(healthy, {}, { rejectComment: (body) => body.includes('lane-A') });
-check('one comment failure preserves healthy independent lanes but fails the aggregate gate', /Lane A/.test(r.error?.message || '')
+check('one comment failure leaves the lane without evidence while the other two carry the quorum', !r.error
   && r.posted.length === 2 && r.posted.some((body) => body.includes('lane-B')) && r.posted.some((body) => body.includes('lane-C')));
+
+// A comment that never posted is not evidence, whatever the model returned. Isolating
+// that the same way as the partial case: reject Lane A's comment and unprovision Lane C.
+r = await scenario(healthy, { LANE_C_KEY: '', LANE_C_API_BASE: '' }, { rejectComment: (body) => body.includes('lane-A') });
+check('a lane whose comment failed to publish does not count toward the quorum', /1 of 3 lanes/.test(r.error?.message || '')
+  && /Lane A, Lane C/.test(r.error?.message || ''));
+
+// The quorum is configuration, so a value that would gate nothing or could never be met
+// has to be refused before any model runs, the same as the other config defences.
+for (const [minimum, label] of [[0, 'zero'], [4, 'more than the lane count'], [1.5, 'fractional'], ['2', 'a string']]) {
+  const badQuorumConfig = structuredClone(centralConfig);
+  badQuorumConfig.review_policy.min_valid_lanes = minimum;
+  r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(badQuorumConfig) });
+  check(`workflow defense rejects min_valid_lanes of ${label}`, /min_valid_lanes must be an integer between 1 and the 3 configured lane/.test(r.error?.message || '')
+    && r.captured.length === 0);
+}
+
+// Repositories that have not opted in keep the original rule, so this change cannot
+// quietly relax a gate nobody asked to change.
+const strictConfig = structuredClone(centralConfig);
+delete strictConfig.review_policy.min_valid_lanes;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(strictConfig), LANE_A_KEY: '' });
+check('without min_valid_lanes a single required lane still gates the job', /Required review evidence is not valid for Lane A/.test(r.error?.message || ''));
 
 if (checks.some((value) => !value)) process.exitCode = 1;

@@ -72,6 +72,24 @@ for (const repository of repositories) {
     `${repository} advisory Lane C may run longer than the required Lane B, so it can become the reason a review is slow while being unable to affect its outcome`);
 }
 
+// The quorum keeps the bar where it was. NebulaLab required Lane A and Lane B, so two
+// reviews had to land before a pull request could go green, and two still have to. What
+// changed is that the gate no longer insists on which two, which is the only way three
+// lanes are redundant rather than three chances to be blocked: a provider quota is
+// exhausted for days, and under the old rule either one of the two named lanes running
+// dry turned every pull request red while the other two published full reviews.
+//
+// Two is also the floor that keeps a heavyweight lane in every passing run: with three
+// lanes, no quorum of two can be reached by Lane C alone.
+const quorum = source.loadConfig('TshyGO/NebulaLab', actionPath).review_policy.min_valid_lanes;
+assert.equal(quorum, 2, 'NebulaLab quorum must stay at the two reviews the required lanes already demanded');
+assert.ok(quorum < source.loadConfig('TshyGO/NebulaLab', actionPath).lanes.length,
+  'a quorum equal to the lane count is the all-lanes rule again, with none of the redundancy');
+for (const repository of repositories.filter((name) => name !== 'TshyGO/NebulaLab')) {
+  assert.equal(source.loadConfig(repository, actionPath).review_policy.min_valid_lanes, undefined,
+    `${repository} did not opt into the quorum and must keep the original all-required rule`);
+}
+
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'alibaba');
 assert.equal(nebula.lanes[1].provider, 'tencent');

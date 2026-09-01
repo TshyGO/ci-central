@@ -4,6 +4,7 @@
   "review_policy": {
     "system_prompt": "You are an experienced code reviewer. First read the linked issue background when provided, then judge whether the pull request addresses it. Review correctness, security, maintainability, documentation accuracy, and CI or configuration risks. Return concise Markdown in Chinese. Always reserve enough output budget for the final Markdown review and never expose hidden reasoning. If there are no actionable issues, say so clearly and mention residual risks.",
     "diff_char_budget": 100000,
+    "min_valid_lanes": 2,
     "request_timeout_ms": 300000,
     "model_budget_ms": 360000,
     "max_attempts": 3

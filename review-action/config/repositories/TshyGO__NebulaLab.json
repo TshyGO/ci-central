@@ -3,7 +3,8 @@
   "repository": "TshyGO/NebulaLab",
   "review_policy": {
     "system_prompt": "You are an experienced code reviewer. First read the linked issue background when provided, then judge whether the pull request addresses it. Review correctness, security, maintainability, and CI or configuration risks. Return concise Markdown in Chinese. Always reserve enough output budget for the final Markdown review and never expose hidden reasoning. If there are no actionable issues, say so clearly and mention residual risks.",
-    "diff_char_budget": 100000,
+    "diff_char_budget": 240000,
+    "min_valid_lanes": 2,
     "request_timeout_ms": 300000,
     "model_budget_ms": 360000,
     "max_attempts": 3
@@ -58,8 +59,8 @@
       "provider": "sensenova",
       "protocol": "openai-chat-completions",
       "advisory": true,
-      "request_timeout_ms": 600000,
-      "model_budget_ms": 600000,
+      "request_timeout_ms": 180000,
+      "model_budget_ms": 180000,
       "primary": {
         "id": "deepseek-v4-flash",
         "label": "DeepSeek-V4-Flash",

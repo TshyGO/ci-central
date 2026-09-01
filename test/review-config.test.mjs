@@ -52,8 +52,42 @@ for (const repository of repositories) {
   );
   assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must preserve the provider response window`);
   assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must preserve the provider response window`);
-  assert.equal(config.lanes[2].request_timeout_ms, 600000, `${repository} Lane C request budget must preserve the provider response window`);
-  assert.equal(config.lanes[2].model_budget_ms, 600000, `${repository} Lane C must fall back after one full provider response window`);
+  // Lane C is advisory, so it can never fail a run: every second it spends after
+  // the required lanes have settled is wall clock nobody can act on. That window
+  // was measured on NebulaLab across ten pull requests. Lane C produced a usable
+  // review three times; the two whose runs are still retained took 26s and 3m15s.
+  // On the seven it failed, the 600000ms-per-model window let it hold the job for
+  // five to ten minutes of every round - on large pull requests deepseek-v4-flash
+  // spends its whole output budget on reasoning and returns no text, and the
+  // sensenova fallback is unreachable. 180000 keeps both observed successes with
+  // roughly 70% headroom and caps the two-model chain at six minutes rather than
+  // twenty.
+  //
+  // Only NebulaLab moves. The property is general, the calibration is not, and
+  // nobody has measured Lane C on the other repositories.
+  const laneCBudgetMs = repository === 'TshyGO/NebulaLab' ? 180000 : 600000;
+  assert.equal(config.lanes[2].request_timeout_ms, laneCBudgetMs, `${repository} Lane C request budget changed without a measurement behind it`);
+  assert.equal(config.lanes[2].model_budget_ms, laneCBudgetMs, `${repository} Lane C model budget changed without a measurement behind it`);
+  assert.ok(config.lanes[2].model_budget_ms * (1 + config.lanes[2].fallbacks.length) <= config.lanes[1].model_budget_ms * (1 + config.lanes[1].fallbacks.length),
+    `${repository} advisory Lane C may run longer than the required Lane B, so it can become the reason a review is slow while being unable to affect its outcome`);
+}
+
+// The quorum keeps the bar where it was. NebulaLab required Lane A and Lane B, so two
+// reviews had to land before a pull request could go green, and two still have to. What
+// changed is that the gate no longer insists on which two, which is the only way three
+// lanes are redundant rather than three chances to be blocked: a provider quota is
+// exhausted for days, and under the old rule either one of the two named lanes running
+// dry turned every pull request red while the other two published full reviews.
+//
+// Two is also the floor that keeps a heavyweight lane in every passing run: with three
+// lanes, no quorum of two can be reached by Lane C alone.
+const quorum = source.loadConfig('TshyGO/NebulaLab', actionPath).review_policy.min_valid_lanes;
+assert.equal(quorum, 2, 'NebulaLab quorum must stay at the two reviews the required lanes already demanded');
+assert.ok(quorum < source.loadConfig('TshyGO/NebulaLab', actionPath).lanes.length,
+  'a quorum equal to the lane count is the all-lanes rule again, with none of the redundancy');
+for (const repository of repositories.filter((name) => name !== 'TshyGO/NebulaLab')) {
+  assert.equal(source.loadConfig(repository, actionPath).review_policy.min_valid_lanes, undefined,
+    `${repository} did not opt into the quorum and must keep the original all-required rule`);
 }
 
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);

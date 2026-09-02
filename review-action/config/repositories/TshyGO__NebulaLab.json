@@ -38,8 +38,8 @@
       "request_timeout_ms": 900000,
       "model_budget_ms": 900000,
       "primary": {
-        "id": "glm-5.2",
-        "label": "GLM-5.2",
+        "id": "glm-5.3",
+        "label": "GLM-5.3",
         "context_profile": "full",
         "max_output_tokens": 65536,
         "temperature": 0.2

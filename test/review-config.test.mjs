@@ -19,7 +19,7 @@ for (const repository of repositories) {
   const fromBundle = bundled.loadConfig(repository, actionPath);
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.2', 'deepseek-v4-flash']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.3', 'deepseek-v4-flash']);
   assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606', 'sensenova-6.8-flash-lite']);
   assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
@@ -35,7 +35,7 @@ assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
 assert.deepEqual(
   [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
   [65536, 393216],
-  'ci-central Lane B must use the GLM maximum for its primary and preserve DeepSeek fallback space',
+  'ci-central Lane B must preserve its configured GLM output budget and DeepSeek fallback space',
 );
 
 for (const repository of repositories) {
@@ -48,7 +48,7 @@ for (const repository of repositories) {
   assert.deepEqual(
     [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
     [65536, 393216],
-    `${repository} Lane B must use GLM primary and retain the DeepSeek fallback ceiling`,
+    `${repository} Lane B must preserve the configured GLM output budget and DeepSeek fallback ceiling`,
   );
   assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must preserve the provider response window`);
   assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must preserve the provider response window`);

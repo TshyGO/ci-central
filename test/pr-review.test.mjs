@@ -647,7 +647,7 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 40'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.2,C:deepseek-v4-flash');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.3,C:deepseek-v4-flash');
 check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.7-max', 'deepseek-v4-pro-202606', 'sensenova-6.8-flash-lite'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
@@ -664,8 +664,8 @@ check('Lane C uses OpenAI Chat Completions without Google thinking fields',
   && healthyLaneC?.max_tokens === undefined
   && healthyLaneC?.temperature === 0.2
   && healthyLaneC?.generationConfig === undefined);
-check('Lane B uses GLM maximum output space without lowering model reasoning',
-  healthyLaneB?.model === 'glm-5.2'
+check('Lane B uses the configured GLM output budget without lowering model reasoning',
+  healthyLaneB?.model === 'glm-5.3'
   && healthyLaneB?.max_tokens === 65536
   && healthyLaneB?.reasoning_effort === undefined
   && healthyLaneB?.thinking === undefined);
@@ -801,12 +801,12 @@ const qwenFallback = r.captured.find(({ model }) => model === 'qwen3.7-max')?.bo
 check('Qwen3.7-Max fallback uses the full review contract', qwenFallback?.max_tokens === 16384 && qwenFallback?.temperature === 0.2 && qwenFallback.messages[1].content.includes('Changed files and patches:'));
 check('Qwen3.7-Max still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by qwen3.7-max')));
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.2' ? reply(503, '{"error":"unavailable"}') : healthy(call));
-check('Lane B falls back only to its dated DeepSeek model', r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.2').length === 3
+r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('Lane B falls back only to its dated DeepSeek model', r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 3
   && r.captured.filter(({ model }) => model === 'deepseek-v4-pro-202606').length === 1
   && r.captured.find(({ model }) => model === 'deepseek-v4-pro-202606')?.body.max_tokens === 393216
   && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-202606')
-  && r.posted.some((body) => body.includes('glm-5.2 unavailable -> served by deepseek-v4-pro-202606')));
+  && r.posted.some((body) => body.includes('glm-5.3 unavailable -> served by deepseek-v4-pro-202606')));
 
 r = await scenario((call) => call.lane === 'C' && call.model === 'deepseek-v4-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
 check('Lane C falls back only to SenseNova 6.8 Flash Lite after DeepSeek V4 Flash exhausts retries',

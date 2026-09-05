@@ -639,7 +639,14 @@ check('central repository self-caller exercises the workflow from its own PR rev
   // Without the event_name segment a bot comment cancels the in-flight review; keep
   // the un-keyed form from creeping back in.
   && !callerText.includes('group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}')
-  && callerText.includes('cancel-in-progress: true')
+  // A repeated /review used to cancel the review it was asking for again: the second
+  // comment shares this group. Pushes still supersede, and review-guard keeps the
+  // duplicate from starting at all. NebulaLab #821 has the three-group breakdown.
+  && callerText.includes("cancel-in-progress: \${{ github.event_name != 'issue_comment' }}")
+  && !callerText.includes('cancel-in-progress: true')
+  && callerText.includes('needs: review-guard')
+  && callerText.includes("needs.review-guard.outputs.proceed != 'false'")
+  && callerText.includes('!cancelled()')
   && callerText.includes("github.event.pull_request.author_association == 'OWNER'")
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')

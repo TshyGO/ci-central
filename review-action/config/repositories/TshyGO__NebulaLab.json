@@ -33,7 +33,7 @@
     },
     {
       "id": "B",
-      "provider": "tencent",
+      "provider": "volcengine-ark-coding",
       "protocol": "openai-chat-completions",
       "request_timeout_ms": 900000,
       "model_budget_ms": 900000,
@@ -46,7 +46,7 @@
       },
       "fallbacks": [
         {
-          "id": "deepseek-v4-pro-202606",
+          "id": "deepseek-v4-pro-ga-260813",
           "label": "DeepSeek-V4-Pro",
           "context_profile": "full",
           "max_output_tokens": 393216,

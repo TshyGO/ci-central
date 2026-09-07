@@ -32,9 +32,13 @@ try {
         $headers = @{ Authorization = "Bearer $key" }
         $modelsResponse = Invoke-RestMethod -Method Get -Uri "$base/models" -Headers $headers -TimeoutSec 30
         $available = @($modelsResponse.data.id)
-        if ($available.Count -gt 0 -and $model -notin $available) { throw "Primary model $model is not present in the provider model list." }
+        if ($available.Count -gt 0 -and $model -notin $available) {
+            Write-Warning "Primary model $model is not present in the provider model list; continuing with the generation probe because compatible Coding APIs may omit callable aliases."
+        }
         $request = @{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with OK.' }); stream = $false }
-        if (-not $laneConfig.primary.omit_max_tokens) { $request.max_tokens = 16 }
+        # Reasoning models can spend a tiny ceiling entirely on hidden reasoning and
+        # return no final text. Give the one-time probe enough room to prove usable output.
+        if (-not $laneConfig.primary.omit_max_tokens) { $request.max_tokens = 512 }
         $body = $request | ConvertTo-Json -Depth 6
         $result = Invoke-RestMethod -Method Post -Uri "$base/chat/completions" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
         if ([string]::IsNullOrWhiteSpace($result.choices[0].message.content)) { throw 'Probe returned no final content.' }

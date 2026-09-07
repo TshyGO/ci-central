@@ -18,6 +18,7 @@ const repositories = ['TshyGO/ci-central', 'TshyGO/NebulaLab', 'TshyGO/NebulaLab
 assert.match(probeScript, /provider -ne 'volcengine-ark-coding'/, 'only Ark Coding may tolerate a missing or incomplete /models response');
 assert.match(probeScript, /foreach \(\$modelConfig in \$models\)/, 'provider probe must validate the primary and every configured fallback');
 assert.match(probeScript, /request\.max_tokens = 512\b/, 'provider probe must leave enough output room for reasoning models to return final text');
+assert.match(probeScript, /elseif \(\$laneConfig\.protocol -eq 'google-generate-content'\)[\s\S]*?foreach \(\$modelConfig in \$models\)[\s\S]*?\$model = \$modelConfig\.id/, 'Google provider probe must initialize and validate every configured model');
 for (const repository of repositories) {
   const fromSource = source.loadConfig(repository, actionPath);
   const fromBundle = bundled.loadConfig(repository, actionPath);

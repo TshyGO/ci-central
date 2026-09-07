@@ -25,7 +25,7 @@ $key = [System.Net.NetworkCredential]::new('', $secureKey).Password
 try {
     if ([string]::IsNullOrWhiteSpace($key)) { throw 'The API key must not be empty.' }
     $base = $ApiBase.TrimEnd('/')
-    $models = @($laneConfig.primary) + @($laneConfig.fallbacks)
+    $models = @($laneConfig.primary) + @($laneConfig.fallbacks | Where-Object { $null -ne $_ })
     Write-Host "Probing Lane $Lane provider=$($laneConfig.provider) protocol=$($laneConfig.protocol) models=$($models.id -join ',')"
 
     if ($laneConfig.protocol -eq 'openai-chat-completions') {
@@ -60,22 +60,26 @@ try {
     }
     elseif ($laneConfig.protocol -eq 'google-generate-content') {
         $headers = @{ 'x-goog-api-key' = $key }
-        # A high-thinking Gemini probe needs enough completion room to reach final text;
-        # tiny ceilings can be consumed entirely by private reasoning.
-        $generationConfig = @{ maxOutputTokens = 512 }
-        if (-not [string]::IsNullOrWhiteSpace($laneConfig.primary.thinking_level)) {
-            $generationConfig.thinkingConfig = @{
-                thinkingLevel = $laneConfig.primary.thinking_level.ToUpperInvariant()
+        foreach ($modelConfig in $models) {
+            $model = $modelConfig.id
+            # A high-thinking Gemini probe needs enough completion room to reach final text;
+            # tiny ceilings can be consumed entirely by private reasoning.
+            $generationConfig = @{ maxOutputTokens = 512 }
+            if (-not [string]::IsNullOrWhiteSpace($modelConfig.thinking_level)) {
+                $generationConfig.thinkingConfig = @{
+                    thinkingLevel = $modelConfig.thinking_level.ToUpperInvariant()
+                }
             }
+            $body = @{
+                contents = @(@{ role = 'user'; parts = @(@{ text = 'Reply with OK.' }) })
+                generationConfig = $generationConfig
+            } | ConvertTo-Json -Depth 8
+            $escapedModel = [Uri]::EscapeDataString($model)
+            $result = Invoke-RestMethod -Method Post -Uri "$base/models/${escapedModel}:generateContent" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
+            $final = @($result.candidates[0].content.parts | Where-Object thought -NE $true | ForEach-Object text) -join "`n"
+            if ([string]::IsNullOrWhiteSpace($final)) { throw "Probe returned no final content for $model." }
+            Write-Host "Lane $Lane model $model probe succeeded."
         }
-        $body = @{
-            contents = @(@{ role = 'user'; parts = @(@{ text = 'Reply with OK.' }) })
-            generationConfig = $generationConfig
-        } | ConvertTo-Json -Depth 8
-        $escapedModel = [Uri]::EscapeDataString($model)
-        $result = Invoke-RestMethod -Method Post -Uri "$base/models/${escapedModel}:generateContent" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
-        $final = @($result.candidates[0].content.parts | Where-Object thought -NE $true | ForEach-Object text) -join "`n"
-        if ([string]::IsNullOrWhiteSpace($final)) { throw 'Probe returned no final content.' }
     }
     else {
         throw "Unsupported protocol: $($laneConfig.protocol)"

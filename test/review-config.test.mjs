@@ -10,17 +10,24 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const actionPath = path.join(here, '..', 'review-action');
+const probeScript = fs.readFileSync(path.join(here, '..', 'scripts', 'probe-provider.ps1'), 'utf8');
 const source = require(path.join(actionPath, 'src', 'index.js'));
 const bundled = require(path.join(actionPath, 'dist', 'index.js'));
 
 const repositories = ['TshyGO/ci-central', 'TshyGO/NebulaLab', 'TshyGO/NebulaLab-Docs', 'TshyGO/NebulaLab-Plugins'];
+assert.match(probeScript, /provider -ne 'volcengine-ark-coding'/, 'only Ark Coding may tolerate a missing or incomplete /models response');
+assert.match(probeScript, /foreach \(\$modelConfig in \$models\)/, 'provider probe must validate the primary and every configured fallback');
+assert.match(probeScript, /request\.max_tokens = 512\b/, 'provider probe must leave enough output room for reasoning models to return final text');
+assert.match(probeScript, /elseif \(\$laneConfig\.protocol -eq 'google-generate-content'\)[\s\S]*?foreach \(\$modelConfig in \$models\)[\s\S]*?\$model = \$modelConfig\.id/, 'Google provider probe must initialize and validate every configured model');
 for (const repository of repositories) {
   const fromSource = source.loadConfig(repository, actionPath);
   const fromBundle = bundled.loadConfig(repository, actionPath);
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.3', 'deepseek-v4-flash']);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-202606', 'sensenova-6.8-flash-lite']);
+  assert.equal(fromSource.lanes[1].provider, 'volcengine-ark-coding', `${repository} Lane B must use Volcengine Ark Coding`);
+  assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'deepseek-v4-pro-ga-260813', `${repository} Lane B must use the Ark-hosted fallback`);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite']);
   assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
   assert.ok([fromSource.lanes[2].primary, ...fromSource.lanes[2].fallbacks].every((model) => model.omit_max_tokens === true), `${repository} SenseNova models must follow the provider request shape without max_tokens`);
@@ -35,7 +42,7 @@ assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
 assert.deepEqual(
   [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
   [65536, 393216],
-  'ci-central Lane B must preserve its configured GLM output budget and DeepSeek fallback space',
+  'ci-central Lane B must preserve its configured GLM output budget and Ark-hosted DeepSeek fallback space',
 );
 
 for (const repository of repositories) {
@@ -48,7 +55,7 @@ for (const repository of repositories) {
   assert.deepEqual(
     [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
     [65536, 393216],
-    `${repository} Lane B must preserve the configured GLM output budget and DeepSeek fallback ceiling`,
+    `${repository} Lane B must preserve the configured GLM output budget and Ark-hosted DeepSeek fallback ceiling`,
   );
   assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must preserve the provider response window`);
   assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must preserve the provider response window`);
@@ -99,7 +106,7 @@ for (const repository of repositories) {
 
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'alibaba');
-assert.equal(nebula.lanes[1].provider, 'tencent');
+assert.equal(nebula.lanes[1].provider, 'volcengine-ark-coding');
 assert.equal(nebula.lanes[2].provider, 'sensenova');
 assert.ok(nebula.lanes.every((lane) => lane.protocol === 'openai-chat-completions'));
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');

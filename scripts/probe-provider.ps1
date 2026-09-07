@@ -25,23 +25,38 @@ $key = [System.Net.NetworkCredential]::new('', $secureKey).Password
 try {
     if ([string]::IsNullOrWhiteSpace($key)) { throw 'The API key must not be empty.' }
     $base = $ApiBase.TrimEnd('/')
-    $model = $laneConfig.primary.id
-    Write-Host "Probing Lane $Lane provider=$($laneConfig.provider) protocol=$($laneConfig.protocol) model=$model"
+    $models = @($laneConfig.primary) + @($laneConfig.fallbacks)
+    Write-Host "Probing Lane $Lane provider=$($laneConfig.provider) protocol=$($laneConfig.protocol) models=$($models.id -join ',')"
 
     if ($laneConfig.protocol -eq 'openai-chat-completions') {
         $headers = @{ Authorization = "Bearer $key" }
-        $modelsResponse = Invoke-RestMethod -Method Get -Uri "$base/models" -Headers $headers -TimeoutSec 30
-        $available = @($modelsResponse.data.id)
-        if ($available.Count -gt 0 -and $model -notin $available) {
-            Write-Warning "Primary model $model is not present in the provider model list; continuing with the generation probe because compatible Coding APIs may omit callable aliases."
+        $available = @()
+        try {
+            $modelsResponse = Invoke-RestMethod -Method Get -Uri "$base/models" -Headers $headers -TimeoutSec 30
+            $available = @($modelsResponse.data.id)
         }
-        $request = @{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with OK.' }); stream = $false }
-        # Reasoning models can spend a tiny ceiling entirely on hidden reasoning and
-        # return no final text. Give the one-time probe enough room to prove usable output.
-        if (-not $laneConfig.primary.omit_max_tokens) { $request.max_tokens = 512 }
-        $body = $request | ConvertTo-Json -Depth 6
-        $result = Invoke-RestMethod -Method Post -Uri "$base/chat/completions" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
-        if ([string]::IsNullOrWhiteSpace($result.choices[0].message.content)) { throw 'Probe returned no final content.' }
+        catch {
+            if ($laneConfig.provider -ne 'volcengine-ark-coding') { throw }
+            Write-Warning "GET /models failed for Volcengine Ark Coding; continuing with the generation probe: $($_.Exception.Message)"
+        }
+
+        foreach ($modelConfig in $models) {
+            $model = $modelConfig.id
+            if ($available.Count -gt 0 -and $model -notin $available) {
+                if ($laneConfig.provider -ne 'volcengine-ark-coding') {
+                    throw "Model $model is not present in the provider model list."
+                }
+                Write-Warning "Model $model is not present in the Volcengine Ark Coding model list; continuing with the generation probe because the Coding API may omit callable aliases."
+            }
+            $request = @{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with OK.' }); stream = $false }
+            # Reasoning models can spend a tiny ceiling entirely on hidden reasoning and
+            # return no final text. Give the one-time probe enough room to prove usable output.
+            if (-not $modelConfig.omit_max_tokens) { $request.max_tokens = 512 }
+            $body = $request | ConvertTo-Json -Depth 6
+            $result = Invoke-RestMethod -Method Post -Uri "$base/chat/completions" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60
+            if ([string]::IsNullOrWhiteSpace($result.choices[0].message.content)) { throw "Probe returned no final content for $model." }
+            Write-Host "Lane $Lane model $model probe succeeded."
+        }
     }
     elseif ($laneConfig.protocol -eq 'google-generate-content') {
         $headers = @{ 'x-goog-api-key' = $key }
@@ -65,7 +80,7 @@ try {
     else {
         throw "Unsupported protocol: $($laneConfig.protocol)"
     }
-    Write-Host "Lane $Lane probe succeeded."
+    Write-Host "Lane $Lane provider probe succeeded."
 }
 finally {
     $key = $null

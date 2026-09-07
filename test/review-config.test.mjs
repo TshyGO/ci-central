@@ -15,8 +15,9 @@ const source = require(path.join(actionPath, 'src', 'index.js'));
 const bundled = require(path.join(actionPath, 'dist', 'index.js'));
 
 const repositories = ['TshyGO/ci-central', 'TshyGO/NebulaLab', 'TshyGO/NebulaLab-Docs', 'TshyGO/NebulaLab-Plugins'];
-assert.match(probeScript, /continuing with the generation probe/, 'provider probe must not reject callable Coding API aliases omitted from /models');
-assert.match(probeScript, /request\.max_tokens = 512/, 'provider probe must leave enough output room for reasoning models to return final text');
+assert.match(probeScript, /provider -ne 'volcengine-ark-coding'/, 'only Ark Coding may tolerate a missing or incomplete /models response');
+assert.match(probeScript, /foreach \(\$modelConfig in \$models\)/, 'provider probe must validate the primary and every configured fallback');
+assert.match(probeScript, /request\.max_tokens = 512\b/, 'provider probe must leave enough output room for reasoning models to return final text');
 for (const repository of repositories) {
   const fromSource = source.loadConfig(repository, actionPath);
   const fromBundle = bundled.loadConfig(repository, actionPath);

@@ -790,6 +790,7 @@ check('full-context primaries preserve input while SenseNova omits only max_toke
 
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
+  && r.captured.find(({ lane }) => lane === 'B')?.url === 'https://lane-b.example.test/v1/chat/completions'
   && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
   && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');

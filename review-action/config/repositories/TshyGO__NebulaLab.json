@@ -35,24 +35,16 @@
       "id": "B",
       "provider": "volcengine-ark-coding",
       "protocol": "openai-chat-completions",
-      "request_timeout_ms": 900000,
-      "model_budget_ms": 900000,
+      "request_timeout_ms": 360000,
+      "model_budget_ms": 360000,
       "primary": {
-        "id": "glm-5.3",
-        "label": "GLM-5.3",
+        "id": "ark-code-latest",
+        "label": "Ark Code Auto",
         "context_profile": "full",
-        "max_output_tokens": 65536,
+        "max_output_tokens": 16384,
         "temperature": 0.2
       },
-      "fallbacks": [
-        {
-          "id": "deepseek-v4-pro-ga-260813",
-          "label": "DeepSeek-V4-Pro",
-          "context_profile": "full",
-          "max_output_tokens": 393216,
-          "temperature": 0.2
-        }
-      ]
+      "fallbacks": []
     },
     {
       "id": "C",

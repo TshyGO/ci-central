@@ -46,9 +46,8 @@ jobs:
     # Lane credentials on an unintended machine. The first step rejects the bad value so
     # the misconfiguration still fails loudly instead of silently running hosted.
     runs-on: ${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}
-    # Backstop only. Repository and lane policy bound each model independently and lanes
-    # run in parallel. Lane B may spend up to 15 minutes on each model in its same-lane endpoint
-    # chain, while this cap still prevents an unbounded runner.
+    # Backstop only. Lane B Auto has one six-minute budget. Other lane policies
+    # stay unchanged; completed lanes publish immediately, before this job settles.
     timeout-minutes: 40
     permissions:
       contents: read
@@ -447,6 +446,7 @@ jobs:
             // cap for retries and field-repair loops.
             const defaultRequestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
             const defaultModelBudgetMs = Number(reviewPolicy.model_budget_ms) || 360000;
+            const { requestText } = require('./.ci-central/review-action/src/https-text.js');
 
             // Some upstreams (e.g. MiniMax) inline their chain-of-thought into `content`
             // instead of `reasoning_content`. Never let that reach the PR comment.
@@ -554,13 +554,17 @@ jobs:
                 }
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remaining));
+                const attemptStarted = Date.now();
+                let errorCode = '';
                 try {
                   const credentials = laneCredentials[lane.id];
                   const isGoogle = lane.protocol === 'google-generate-content';
                   const endpoint = isGoogle
                     ? `${credentials.baseUrl}/models/${encodeURIComponent(modelId)}:generateContent`
                     : `${credentials.baseUrl}/chat/completions`;
-                  response = await fetch(endpoint, {
+                  const transport = lane.id === 'B' && lane.provider === 'volcengine-ark-coding'
+                    ? requestText : fetch;
+                  response = await transport(endpoint, {
                     method: 'POST',
                     signal: controller.signal,
                     headers: isGoogle ? {
@@ -578,11 +582,16 @@ jobs:
                   });
                   responseText = await response.text();
                 } catch (error) {
+                  // Codes identify transport failures without printing nested causes,
+                  // which may contain credentials, endpoint URLs, or request data.
+                  const code = error?.cause?.code || error?.code;
+                  errorCode = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
                   requestError = error?.name === 'AbortError'
                     ? 'AI endpoint request aborted (per-attempt timeout or model budget reached).'
                     : (error?.message || String(error));
                 } finally {
                   clearTimeout(timeout);
+                  console.log(`[Lane ${lane.id}/${modelId}] attempt ${attempt}/${maxAttempts} elapsed_ms=${Date.now() - attemptStarted} status=${response?.status ?? 'request failed'} error_code=${errorCode || 'none'}`);
                 }
                 const failure = classifyFailure(response, responseText, requestError);
                 if (response?.ok && failure.kind !== 'gateway-blocked') break;
@@ -819,33 +828,22 @@ jobs:
 
             const reviewedHeadShortSha = reviewHeadSha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            // Run lanes independently in parallel. A healthy lane emits exactly one comment;
-            // fallbacks are sequential inside that lane and can never cross credentials.
-            const settled = await Promise.allSettled(lanesToReview.map((lane) => requestReview(lane)));
-
-            // Model calls can outlive the commit they reviewed. Do not attach completed
-            // results to a newer head (or to a PR that was closed while they were running).
-            const { data: publishPull } = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: pullNumber,
-            });
-            if (publishPull.head.sha !== reviewHeadSha || publishPull.state !== 'open') {
-              console.log(`Skip stale review before comment publishing: reviewed=${reviewHeadSha.slice(0, 7)} current=${publishPull.head.sha.slice(0, 7)} state=${publishPull.state || 'unknown'}.`);
-              return;
-            }
-
-            const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
             let posted = 0;
+            let staleReview = false;
             const validLaneIds = new Set(isManualReview ? [] : reusableLaneIds);
-            for (let i = 0; i < settled.length; i++) {
-              const lane = lanesToReview[i];
+            async function reviewAndPublish(lane) {
               const primary = lane.primary;
-              if (settled[i].status === 'rejected') {
-                console.log(`[Lane ${lane.id}/${primary.id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
-                continue;
+              const result = await requestReview(lane);
+              // Each lane validates freshness immediately before its own publication.
+              // A slow lane must never delay an already-completed review.
+              const { data: publishPull } = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
+              if (publishPull.head.sha !== reviewHeadSha || publishPull.state !== 'open') {
+                staleReview = true;
+                console.log(`Skip stale review before comment publishing: reviewed=${reviewHeadSha.slice(0, 7)} current=${publishPull.head.sha.slice(0, 7)} state=${publishPull.state || 'unknown'}.`);
+                return;
               }
-              const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = settled[i].value;
+              const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+              const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = result;
               const modelLine = degraded
                 ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
                 : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
@@ -900,6 +898,13 @@ jobs:
                 console.log(`Failed to post comment for Lane ${lane.id}: ${error?.message || error}`);
               }
             }
+            const settled = await Promise.allSettled(lanesToReview.map(reviewAndPublish));
+            for (let i = 0; i < settled.length; i++) {
+              if (settled[i].status === 'rejected') {
+                console.log(`[Lane ${lanesToReview[i].id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
+              }
+            }
+            if (staleReview) return;
             if (posted === 0) {
               throw new Error('No AI PR Review comment could be posted for any configured model.');
             }

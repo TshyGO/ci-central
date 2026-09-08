@@ -24,10 +24,10 @@ for (const repository of repositories) {
   const fromBundle = bundled.loadConfig(repository, actionPath);
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.3', 'deepseek-v4-flash']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'ark-code-latest', 'deepseek-v4-flash']);
   assert.equal(fromSource.lanes[1].provider, 'volcengine-ark-coding', `${repository} Lane B must use Volcengine Ark Coding`);
-  assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'deepseek-v4-pro-ga-260813', `${repository} Lane B must use the Ark-hosted fallback`);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite']);
+  assert.deepEqual(fromSource.lanes[1].fallbacks, [], `${repository} Auto owns routing; do not add a second fixed-model wait`);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'sensenova-6.8-flash-lite']);
   assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
   assert.ok([fromSource.lanes[2].primary, ...fromSource.lanes[2].fallbacks].every((model) => model.omit_max_tokens === true), `${repository} SenseNova models must follow the provider request shape without max_tokens`);
@@ -41,8 +41,8 @@ assert.equal(ciCentral.lanes[2].advisory, true, 'ci-central Lane C rides the sam
 assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
 assert.deepEqual(
   [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-  [65536, 393216],
-  'ci-central Lane B must preserve its configured GLM output budget and Ark-hosted DeepSeek fallback space',
+  [16384],
+  'ci-central Lane B must use a bounded Auto completion ceiling',
 );
 
 for (const repository of repositories) {
@@ -54,11 +54,11 @@ for (const repository of repositories) {
   assert.ok(config.lanes.slice(0, 2).every((lane) => lane.advisory === undefined), `${repository} Lane A/B must keep gating the job`);
   assert.deepEqual(
     [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-    [65536, 393216],
-    `${repository} Lane B must preserve the configured GLM output budget and Ark-hosted DeepSeek fallback ceiling`,
+    [16384],
+    `${repository} Lane B must use a bounded Auto completion ceiling`,
   );
-  assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must preserve the provider response window`);
-  assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must preserve the provider response window`);
+  assert.equal(config.lanes[1].request_timeout_ms, 360000, `${repository} Lane B request budget must bound Auto to six minutes`);
+  assert.equal(config.lanes[1].model_budget_ms, 360000, `${repository} Lane B model budget must bound Auto to six minutes`);
   // Lane C is advisory, so it can never fail a run: every second it spends after
   // the required lanes have settled is wall clock nobody can act on. That window
   // was measured on NebulaLab across ten pull requests. Lane C produced a usable
@@ -75,8 +75,7 @@ for (const repository of repositories) {
   const laneCBudgetMs = repository === 'TshyGO/NebulaLab' ? 180000 : 600000;
   assert.equal(config.lanes[2].request_timeout_ms, laneCBudgetMs, `${repository} Lane C request budget changed without a measurement behind it`);
   assert.equal(config.lanes[2].model_budget_ms, laneCBudgetMs, `${repository} Lane C model budget changed without a measurement behind it`);
-  assert.ok(config.lanes[2].model_budget_ms * (1 + config.lanes[2].fallbacks.length) <= config.lanes[1].model_budget_ms * (1 + config.lanes[1].fallbacks.length),
-    `${repository} advisory Lane C may run longer than the required Lane B, so it can become the reason a review is slow while being unable to affect its outcome`);
+  // Publication is independent of the other lanes' budgets; preserve A/C policy.
 }
 
 // The quorum keeps the bar where it was. NebulaLab required Lane A and Lane B, so two

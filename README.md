@@ -27,7 +27,7 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | Lane | 当前供应商 | 协议 | 模型链 | 是否阻塞 |
 |---|---|---|---|---|
 | A | 阿里 | OpenAI Chat Completions | Qwen3.8-Max → Qwen3.7-Max | 阻塞 |
-| B | 腾讯 | OpenAI Chat Completions | GLM-5.3 → DeepSeek-V4-Pro-202606 | 阻塞 |
+| B | 火山方舟 Coding Plan | OpenAI Chat Completions | ark-code-latest（控制台 Auto 路由） | 计入两路有效审核门槛 |
 | C | SenseNova | OpenAI Chat Completions | DeepSeek-V4-Flash → SenseNova-6.8-Flash-Lite | **advisory，不阻塞** |
 
 Lane C 走的是免费额度，额度耗尽时返回 429 属于预期行为。它仍然会发布评论和诊断，但不参与聚合门禁——否则每次额度用尽都会让整个 PR 检查变红，而一个长期红的检查会被人学会忽略。
@@ -119,11 +119,13 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
 - Lane 主模型成功时绝不调用 fallback。
 - 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
-- Qwen、DeepSeek、GLM 保留完整审核上下文。Lane B 通过固定 `PR_AGENT_LANE_B_API_BASE`/`PR_AGENT_LANE_B_KEY` 槽位使用火山方舟 Coding API 的 OpenAI Chat Completions 兼容端点 `https://ark.cn-beijing.volces.com/api/coding/v3`，主模型为 `glm-5.3`，同供应商 fallback 为 `deepseek-v4-pro-ga-260813`。两者已分别通过真实生成请求，reviewer 保留主模型 65536-token completion ceiling、fallback 393216-token ceiling 与每模型 15 分钟请求/模型预算；不再复用腾讯专属 `deepseek-v4-pro-202606`。Lane A 仍继承原有 5/6 分钟和 16384 输出上限。
+- Lane B 通过原有固定 Secret 槽位使用 `https://ark.cn-beijing.volces.com/api/coding/v3`，请求模型为 `ark-code-latest`。账户控制台应启用 Auto；只切控制台不会改变显式发送的其他 model ID。保留完整审核上下文，输出上限为 16384 tokens，不覆盖 thinking 设置。Auto 在方舟账户内部调度，本地不再串接固定 DeepSeek fallback；所有请求、重试、字段修复共用一个 6 分钟预算，避免原来的两段 15 分钟叠加。A/C 配置与 Secret 映射保持不变。
+- 仅 Ark Lane B 使用 `review-action/src/https-text.js` 的专用原生 HTTPS 请求：外部 AbortSignal 覆盖连接到完整响应体，避开 Node fetch 默认 300 秒响应头超时；拒绝重定向与 URL 内凭据、校验证书，并限制响应体为 8 MiB。不修改全局 dispatcher、代理或其他 Lane 的 fetch 行为。仍是非流式请求，不把 reasoning 流写入日志或评论。
+- 各 Lane 完成后立即检查 head/state 并发布，不等待其他 Lane。每次调用记录耗时、状态与安全格式的底层错误码，不输出嵌套错误对象或凭据。所有 Lane 结束后仍按原有 quorum/required 规则判断门禁；提早显示评论不等于提前放行。
 - Lane C 使用 `PR_AGENT_LANE_C_API_BASE` 指定的 SenseNova OpenAI Chat Completions 地址，主模型为 `deepseek-v4-flash`，不再使用 Google endpoint、协议或 thinking 配置。SenseNova 端点显式传入 `max_tokens` 曾被错误地按 workspace quota 拒绝，所以 Lane C 主备请求均省略该字段并使用 10 分钟请求/模型预算。
 - Lane C 的同供应商 fallback 为 `sensenova-6.8-flash-lite`。仅模型超时、5xx、解析失败、空正文或不完整输出进入 fallback；配额、认证、HTML 验证页、DNS、TLS 和共享端点故障仍短路当前 Lane，避免把完整 PR 重发到同一故障 Workspace。
 - Qwen3.7-Max 只在 Qwen3.8-Max 失败时调用，并使用同一阿里 Lane A 凭据、完整审核上下文和 16384 输出上限。
-- reusable job 的 40 分钟硬上限允许 Lane B 在 15 分钟主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
+- reusable job 仍保留 40 分钟总兜底上限，以免未经授权改变其他 Lane 的预算；B 路自身最多 6 分钟，不再消耗半小时。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。
 
@@ -145,6 +147,10 @@ pwsh ./scripts/set-lane-secret.ps1 -Lane B -ApiBase https://example.invalid/v1
 # 离线验证
 node ./test/review-config.test.mjs
 node ./test/pr-review.test.mjs
+node ./test/https-text.test.mjs
+
+# 可选：真实延迟 310 秒的本机连接测试，验证不会在 300 秒被截断
+$env:LONG_REVIEW_TRANSPORT_TEST = '1'; node ./test/https-text.test.mjs
 git diff --check
 ```
 

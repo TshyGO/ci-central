@@ -46,7 +46,7 @@ jobs:
     # Lane credentials on an unintended machine. The first step rejects the bad value so
     # the misconfiguration still fails loudly instead of silently running hosted.
     runs-on: ${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}
-    # Backstop only. Lane B Auto has one six-minute budget. Other lane policies
+    # Backstop only. Lane B Auto has one ten-minute budget. Other lane policies
     # stay unchanged; completed lanes publish immediately, before this job settles.
     timeout-minutes: 40
     permissions:
@@ -579,6 +579,7 @@ jobs:
                       'user-agent': 'GitHubActions-AI-PR-Review',
                     },
                     body: requestBody,
+                    onHeaders: (status) => console.log(`[Lane ${lane.id}/${modelId}] headers_ms=${Date.now() - attemptStarted} status=${status}`),
                   });
                   responseText = await response.text();
                 } catch (error) {
@@ -631,6 +632,7 @@ jobs:
                 return callOnce(lane, model, null, deadline, requestTimeoutMs, modelBudgetMs);
               }
               const payload = basePayload(model);
+              if (lane.id === 'B' && lane.provider === 'volcengine-ark-coding') payload.stream = true;
               for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
                 const result = await callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs);
                 if (result.response?.status !== 400) return result;

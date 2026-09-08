@@ -35,8 +35,8 @@
       "id": "B",
       "provider": "volcengine-ark-coding",
       "protocol": "openai-chat-completions",
-      "request_timeout_ms": 360000,
-      "model_budget_ms": 360000,
+      "request_timeout_ms": 600000,
+      "model_budget_ms": 600000,
       "primary": {
         "id": "ark-code-latest",
         "label": "Ark Code Auto",

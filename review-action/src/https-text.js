@@ -6,7 +6,7 @@ const https = require('node:https');
 // headers timeout. Use a dedicated HTTPS request, bounded from connection through
 // complete body by the caller's AbortSignal. No redirects, proxy mutation, or
 // global dispatcher changes; credentials can only reach the configured URL.
-function requestText(endpoint, { signal, headers, body }, request = https.request) {
+function requestText(endpoint, { signal, headers, body, onHeaders }, request = https.request) {
   const url = new URL(endpoint);
   if (url.protocol !== 'https:' || url.username || url.password) {
     throw new Error('Review endpoint must be HTTPS without URL credentials.');
@@ -16,6 +16,7 @@ function requestText(endpoint, { signal, headers, body }, request = https.reques
     const req = request(url, {
       method: 'POST', signal, headers, agent: false,
     }, (res) => {
+      onHeaders?.(res.statusCode);
       const chunks = [];
       let size = 0;
       res.on('data', (chunk) => {
@@ -39,7 +40,12 @@ function requestText(endpoint, { signal, headers, body }, request = https.reques
       res.on('end', () => {
         const status = res.statusCode;
         const text = Buffer.concat(chunks).toString('utf8');
-        resolve({ status, ok: status >= 200 && status < 300, text: async () => text });
+        const ok = status >= 200 && status < 300;
+        try {
+          const normalized = ok && String(res.headers['content-type']).includes('text/event-stream')
+            ? normalizeStream(text) : text;
+          resolve({ status, ok, text: async () => normalized });
+        } catch (error) { reject(error); }
       });
     });
     req.on('error', reject);
@@ -47,4 +53,28 @@ function requestText(endpoint, { signal, headers, body }, request = https.reques
   });
 }
 
-module.exports = { requestText };
+// Parse only after the bounded response finishes. No deltas or private reasoning
+// are ever published. An interrupted/malformed stream cannot become valid evidence.
+function normalizeStream(text) {
+  let content = '', reasoning = '', model, usage, finish;
+  for (const event of text.replace(/\r\n/g, '\n').split('\n\n')) {
+    const data = event.split('\n').filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).replace(/^ /, '')).join('\n');
+    if (!data || data === '[DONE]') continue;
+    const payload = JSON.parse(data);
+    if (payload.error) throw new Error('Ark streaming response reported an API error.');
+    model = payload.model || model;
+    usage = payload.usage || usage;
+    const choice = payload.choices?.find((item) => item.index === 0);
+    if (!choice) continue;
+    if (typeof choice.delta?.content === 'string') content += choice.delta.content;
+    if (typeof choice.delta?.reasoning_content === 'string') reasoning += choice.delta.reasoning_content;
+    if (choice.finish_reason != null) finish = choice.finish_reason;
+  }
+  if (!finish) throw new Error('Ark stream ended without a completion marker.');
+  return JSON.stringify({ model, usage, choices: [{
+    finish_reason: finish, message: { content, reasoning_content: reasoning },
+  }] });
+}
+
+module.exports = { requestText, normalizeStream };

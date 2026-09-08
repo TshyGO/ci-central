@@ -57,8 +57,8 @@ for (const repository of repositories) {
     [16384],
     `${repository} Lane B must use a bounded Auto completion ceiling`,
   );
-  assert.equal(config.lanes[1].request_timeout_ms, 360000, `${repository} Lane B request budget must bound Auto to six minutes`);
-  assert.equal(config.lanes[1].model_budget_ms, 360000, `${repository} Lane B model budget must bound Auto to six minutes`);
+  assert.equal(config.lanes[1].request_timeout_ms, 600000, `${repository} Lane B request budget must bound Auto to ten minutes`);
+  assert.equal(config.lanes[1].model_budget_ms, 600000, `${repository} Lane B model budget must bound Auto to ten minutes`);
   // Lane C is advisory, so it can never fail a run: every second it spends after
   // the required lanes have settled is wall clock nobody can act on. That window
   // was measured on NebulaLab across ten pull requests. Lane C produced a usable
@@ -67,7 +67,7 @@ for (const repository of repositories) {
   // five to ten minutes of every round - on large pull requests deepseek-v4-flash
   // spends its whole output budget on reasoning and returns no text, and the
   // sensenova fallback is unreachable. 180000 keeps both observed successes with
-  // roughly 70% headroom and caps the two-model chain at six minutes rather than
+  // roughly 70% headroom and caps the two-model chain at ten minutes rather than
   // twenty.
   //
   // Only NebulaLab moves. The property is general, the calibration is not, and

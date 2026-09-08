@@ -314,7 +314,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === 'a640778ecef9f5a1b7c413583a238d545ea68d4b5a366b47f6c05e35b4277aeb';
+    && sha256(review) === '63756dd7e5156f0080dc860d1fadce72df14eb35cf4e31c20804b4811f75dae8';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -680,6 +680,9 @@ check('Lane C uses OpenAI Chat Completions without Google thinking fields',
 check('Lane B uses bounded Auto output without overriding thinking settings',
   healthyLaneB?.model === 'ark-code-latest'
   && healthyLaneB?.max_tokens === 16384
+  && healthyLaneB?.stream === true
+  && healthyLaneA?.stream === false
+  && healthyLaneC?.stream === false
   && healthyLaneB?.reasoning_effort === undefined
   && healthyLaneB?.thinking === undefined);
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3

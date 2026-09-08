@@ -580,6 +580,7 @@ jobs:
                     },
                     body: requestBody,
                     onHeaders: (status) => console.log(`[Lane ${lane.id}/${modelId}] headers_ms=${Date.now() - attemptStarted} status=${status}`),
+                    onProgress: (bytes) => console.log(`[Lane ${lane.id}/${modelId}] body_elapsed_ms=${Date.now() - attemptStarted} received_bytes=${bytes}`),
                   });
                   responseText = await response.text();
                 } catch (error) {

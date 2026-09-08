@@ -30,12 +30,12 @@ const server = http.createServer(async (req, res) => {
     setTimeout(() => res.end('审核正文'), delay);
   } else if (req.url === '/hang') {
     // The caller's absolute deadline must close this connection.
-  } else if (req.url === '/stream') {
+  } else if (req.url === '/stream' || req.url === '/stream-hang') {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const bytes = Buffer.from(streamText);
     // Byte fragments can split a UTF-8 character or an SSE separator.
     for (let offset = 0; offset < bytes.length; offset += 7) res.write(bytes.subarray(offset, offset + 7));
-    res.end();
+    if (req.url === '/stream') res.end();
   } else if (req.url === '/body-hang') {
     res.writeHead(200);
     res.write('partial body');
@@ -82,6 +82,7 @@ try {
   await assert.rejects(send('/hang', AbortSignal.abort()), { name: 'AbortError' });
   await assert.rejects(send('/body-hang', AbortSignal.timeout(30)), /aborted|before its body completed/);
   assert.deepEqual(JSON.parse(await (await send('/stream')).text()), parsed);
+  assert.deepEqual(JSON.parse(await (await send('/stream-hang', AbortSignal.timeout(1000))).text()), parsed);
   await assert.rejects(send('/partial'), /aborted|before its body completed/);
   await assert.rejects(send('/large'), { code: 'REVIEW_RESPONSE_TOO_LARGE' });
   const redirect = await send('/redirect');

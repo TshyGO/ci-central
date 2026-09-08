@@ -67,7 +67,7 @@ for (const repository of repositories) {
   // five to ten minutes of every round - on large pull requests deepseek-v4-flash
   // spends its whole output budget on reasoning and returns no text, and the
   // sensenova fallback is unreachable. 180000 keeps both observed successes with
-  // roughly 70% headroom and caps the two-model chain at ten minutes rather than
+  // roughly 70% headroom and caps the two-model chain at six minutes rather than
   // twenty.
   //
   // Only NebulaLab moves. The property is general, the calibration is not, and

@@ -31,6 +31,9 @@ function validateModel(model, location) {
   if (!Number.isInteger(model.max_output_tokens) || model.max_output_tokens < 1) {
     throw new Error(`${location}.max_output_tokens must be a positive integer.`);
   }
+  if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
+    throw new Error(`${location}.request_timeout_ms must be a positive integer when configured.`);
+  }
   if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
     throw new Error(`${location}.omit_max_tokens must be a boolean.`);
   }

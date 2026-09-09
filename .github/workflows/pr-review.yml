@@ -231,6 +231,9 @@ jobs:
                 throw new Error(`Lane ${lane.id} model_budget_ms must be greater than or equal to request_timeout_ms.`);
               }
               for (const model of chain) {
+                if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
+                  throw new Error(`Lane ${lane.id}/${model.id} request_timeout_ms must be a positive integer when configured.`);
+                }
                 if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
                   throw new Error(`Lane ${lane.id}/${model.id} omit_max_tokens must be a boolean.`);
                 }
@@ -523,7 +526,7 @@ jobs:
             // Exactly one request per model. No retry, backoff, optional-field
             // repair, or redirect can silently send the same review again.
             async function callModel(lane, model) {
-              const requestTimeoutMs = Number(lane.request_timeout_ms) || defaultRequestTimeoutMs;
+              const requestTimeoutMs = model.request_timeout_ms ?? lane.request_timeout_ms ?? defaultRequestTimeoutMs;
               const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, modelBudgetMs));

@@ -314,7 +314,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === '2bac43f73262aba6228fe76ca41463a2bcbb8b1e5c4698909a81cd1ff0c26aa8';
+    && sha256(review) === 'c6a10cd800a4904e22267d9c919df536b7bba3ccab9e4c661842f00af9d0757b';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -372,7 +372,7 @@ function laneForUrl(url) {
 }
 
 async function scenario(route, overrides = {}, options = {}) {
-  const posted = [], captured = [], logs = [];
+  const posted = [], captured = [], logs = [], timeouts = [];
   const comments = (options.comments || []).map((comment, index) => ({
     id: index + 1,
     user: { login: 'github-actions[bot]' },
@@ -420,11 +420,11 @@ async function scenario(route, overrides = {}, options = {}) {
   };
   let error;
   try {
-    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn) => setTimeout(fn, 0), clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) });
+    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) });
   } catch (caught) {
     error = caught;
   }
-  return { posted, captured, comments, logs, error, pullGets };
+  return { posted, captured, comments, logs, error, pullGets, timeouts };
 }
 
 const checks = [];
@@ -1056,4 +1056,27 @@ r = await scenario(healthy, {}, { pulls: [pull, pull, pull, newerPull] });
 check('each publication rechecks freshness; later lanes cannot publish after head changes',
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 
+
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call));
+check('B primary gets six minutes and fallback gets five, without changing A/C deadlines',
+  !r.error && r.timeouts.join(',') === '300000,360000,180000,300000');
+const inheritedTimeoutConfig = structuredClone(centralConfig);
+delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+  { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
+check('models without an override still inherit their lane deadline',
+  r.timeouts.join(',') === '300000,360000,180000,360000');
+const cappedTimeoutConfig = structuredClone(centralConfig);
+cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 900000;
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+  { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
+check('a model override cannot extend the lane model-budget cap',
+  r.timeouts.join(',') === '300000,360000,180000,360000');
+for (const invalid of [0, -1, 1.5, '300000', null]) {
+  const config = structuredClone(centralConfig);
+  config.lanes[1].fallbacks[0].request_timeout_ms = invalid;
+  r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(config) });
+  check(`invalid per-model timeout ${invalid} fails before dispatch`,
+    r.captured.length === 0 && /request_timeout_ms must be a positive integer/.test(r.error?.message || ''));
+}
 if (checks.some((value) => !value)) process.exitCode = 1;

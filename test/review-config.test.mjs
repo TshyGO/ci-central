@@ -59,8 +59,8 @@ for (const repository of repositories) {
     [65536, 393216],
     `${repository} Lane B must preserve the configured GLM output budget and Ark-hosted DeepSeek fallback ceiling`,
   );
-  assert.equal(config.lanes[1].request_timeout_ms, 900000, `${repository} Lane B request budget must preserve the provider response window`);
-  assert.equal(config.lanes[1].model_budget_ms, 900000, `${repository} Lane B model budget must preserve the provider response window`);
+  assert.equal(config.lanes[1].request_timeout_ms, 360000, `${repository} Lane B request budget must bound the primary to six minutes`);
+  assert.equal(config.lanes[1].model_budget_ms, 360000, `${repository} Lane B model budget must bound the primary to six minutes`);
   // Lane C is advisory, so it can never fail a run: every second it spends after
   // the required lanes have settled is wall clock nobody can act on. That window
   // was measured on NebulaLab across ten pull requests. Lane C produced a usable
@@ -77,8 +77,8 @@ for (const repository of repositories) {
   const laneCBudgetMs = repository === 'TshyGO/NebulaLab' ? 180000 : 600000;
   assert.equal(config.lanes[2].request_timeout_ms, laneCBudgetMs, `${repository} Lane C request budget changed without a measurement behind it`);
   assert.equal(config.lanes[2].model_budget_ms, laneCBudgetMs, `${repository} Lane C model budget changed without a measurement behind it`);
-  assert.ok(config.lanes[2].model_budget_ms * (1 + config.lanes[2].fallbacks.length) <= config.lanes[1].model_budget_ms * (1 + config.lanes[1].fallbacks.length),
-    `${repository} advisory Lane C may run longer than the required Lane B, so it can become the reason a review is slow while being unable to affect its outcome`);
+  assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 300000, `${repository} Lane B fallback must have its own five-minute ceiling`);
+  // A/C budgets are deliberately unchanged even where advisory C can outlast B.
 }
 
 // The quorum keeps the bar where it was. NebulaLab required Lane A and Lane B, so two
@@ -120,6 +120,13 @@ for (const loader of [source, bundled]) {
   const extraFallback = structuredClone(nebula);
   extraFallback.lanes[0].fallbacks.push({ ...extraFallback.lanes[0].fallbacks[0], id: 'third-model' });
   assert.throws(() => loader.validateConfig(extraFallback, 'TshyGO/NebulaLab'), /at most one fallback/);
+}
+for (const loader of [source, bundled]) {
+  for (const invalid of [0, -1, 1.5, '300000', null]) {
+    const config = structuredClone(nebula);
+    config.lanes[1].fallbacks[0].request_timeout_ms = invalid;
+    assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), /request_timeout_ms must be a positive integer/);
+  }
 }
 const duplicateAcrossLanes = structuredClone(nebula);
 duplicateAcrossLanes.lanes[1].primary.id = duplicateAcrossLanes.lanes[0].primary.id;

@@ -19,6 +19,9 @@ function validateModel(model, location) {
   if (typeof model.label !== 'string' || !model.label.trim()) throw new Error(`${location}.label must be a non-empty string.`);
   if (!['full', 'kimi-k3-throttled'].includes(model.context_profile || 'full')) throw new Error(`${location}.context_profile is not supported.`);
   if (!Number.isInteger(model.max_output_tokens) || model.max_output_tokens < 1) throw new Error(`${location}.max_output_tokens must be a positive integer.`);
+  if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
+    throw new Error(`${location}.request_timeout_ms must be a positive integer when configured.`);
+  }
   if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') throw new Error(`${location}.omit_max_tokens must be a boolean.`);
 }
 function validateConfig(config, repository) {

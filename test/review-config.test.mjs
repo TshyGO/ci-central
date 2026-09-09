@@ -22,6 +22,8 @@ assert.match(probeScript, /elseif \(\$laneConfig\.protocol -eq 'google-generate-
 for (const repository of repositories) {
   const fromSource = source.loadConfig(repository, actionPath);
   const fromBundle = bundled.loadConfig(repository, actionPath);
+  assert.equal(fromSource.review_policy.max_attempts, 1);
+  assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 1));
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'glm-5.3', 'deepseek-v4-flash']);
@@ -111,6 +113,14 @@ assert.equal(nebula.lanes[2].provider, 'sensenova');
 assert.ok(nebula.lanes.every((lane) => lane.protocol === 'openai-chat-completions'));
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
+for (const loader of [source, bundled]) {
+  const badAttempts = structuredClone(nebula);
+  badAttempts.review_policy.max_attempts = 3;
+  assert.throws(() => loader.validateConfig(badAttempts, 'TshyGO/NebulaLab'), /max_attempts must be 1/);
+  const extraFallback = structuredClone(nebula);
+  extraFallback.lanes[0].fallbacks.push({ ...extraFallback.lanes[0].fallbacks[0], id: 'third-model' });
+  assert.throws(() => loader.validateConfig(extraFallback, 'TshyGO/NebulaLab'), /at most one fallback/);
+}
 const duplicateAcrossLanes = structuredClone(nebula);
 duplicateAcrossLanes.lanes[1].primary.id = duplicateAcrossLanes.lanes[0].primary.id;
 assert.doesNotThrow(() => source.validateConfig(duplicateAcrossLanes, 'TshyGO/NebulaLab'), 'routing must be lane-scoped, not keyed globally by model id');

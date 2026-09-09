@@ -7,7 +7,7 @@
     "min_valid_lanes": 2,
     "request_timeout_ms": 300000,
     "model_budget_ms": 360000,
-    "max_attempts": 3
+    "max_attempts": 1
   },
   "lanes": [
     { "id": "A", "provider": "alibaba", "protocol": "openai-chat-completions", "primary": { "id": "qwen3.8-max", "label": "Qwen3.8-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }, "fallbacks": [{ "id": "qwen3.7-max", "label": "Qwen3.7-Max", "context_profile": "full", "max_output_tokens": 16384, "temperature": 0.2 }] },

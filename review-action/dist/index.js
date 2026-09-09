@@ -19,6 +19,9 @@ function validateModel(model, location) {
   if (typeof model.label !== 'string' || !model.label.trim()) throw new Error(`${location}.label must be a non-empty string.`);
   if (!['full', 'kimi-k3-throttled'].includes(model.context_profile || 'full')) throw new Error(`${location}.context_profile is not supported.`);
   if (!Number.isInteger(model.max_output_tokens) || model.max_output_tokens < 1) throw new Error(`${location}.max_output_tokens must be a positive integer.`);
+  if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
+    throw new Error(`${location}.request_timeout_ms must be a positive integer when configured.`);
+  }
   if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') throw new Error(`${location}.omit_max_tokens must be a boolean.`);
 }
 function validateConfig(config, repository) {
@@ -29,6 +32,7 @@ function validateConfig(config, repository) {
   for (const field of ['diff_char_budget', 'request_timeout_ms', 'model_budget_ms', 'max_attempts']) {
     if (!Number.isInteger(config.review_policy[field]) || config.review_policy[field] < 1) throw new Error(`review_policy.${field} must be a positive integer.`);
   }
+  if (config.review_policy.max_attempts !== 1) throw new Error('review_policy.max_attempts must be 1; model retries are disabled.');
   if (!Array.isArray(config.lanes) || config.lanes.length === 0) throw new Error('Config must contain at least one lane.');
   const laneIds = new Set();
   for (const [index, lane] of config.lanes.entries()) {
@@ -46,6 +50,7 @@ function validateConfig(config, repository) {
     if (lane.request_timeout_ms !== undefined && lane.model_budget_ms !== undefined && lane.model_budget_ms < lane.request_timeout_ms) throw new Error(`${location}.model_budget_ms must be greater than or equal to request_timeout_ms.`);
     validateModel(lane.primary, `${location}.primary`);
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
+    if (lane.fallbacks.length > 1) throw new Error(`${location} supports at most one fallback.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
     for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
       const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;

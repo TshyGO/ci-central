@@ -213,6 +213,7 @@ jobs:
               if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') {
                 throw new Error(`Lane ${lane.id} advisory must be a boolean.`);
               }
+              if (lane.fallbacks.length > 1) throw new Error(`Lane ${lane.id} supports at most one fallback.`);
               const chain = [lane.primary, ...lane.fallbacks];
               if (!lane.primary || chain.some((model) => !model?.id || !model?.label)) {
                 throw new Error(`Lane ${lane.id} has an invalid primary or fallback model.`);
@@ -230,6 +231,9 @@ jobs:
                 throw new Error(`Lane ${lane.id} model_budget_ms must be greater than or equal to request_timeout_ms.`);
               }
               for (const model of chain) {
+                if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
+                  throw new Error(`Lane ${lane.id}/${model.id} request_timeout_ms must be a positive integer when configured.`);
+                }
                 if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
                   throw new Error(`Lane ${lane.id}/${model.id} omit_max_tokens must be a boolean.`);
                 }
@@ -440,11 +444,13 @@ jobs:
 
             // Model ids are scoped to a lane, never globally. The same model id may be routed
             // through two providers without changing credentials or fallback ownership.
-            const maxAttempts = Number(reviewPolicy.max_attempts) || 3;
+            if (reviewPolicy.max_attempts !== 1) {
+              throw new Error('review_policy.max_attempts must be 1; model retries are disabled.');
+            }
             // A healthy response with heavy reasoning has been observed beyond 300s. Repository
             // policy supplies defaults while a slow Lane can raise its own request and model
             // windows without changing the others. The model budget remains the hard wall-clock
-            // cap for retries and field-repair loops.
+            // cap for the single request, including reading its complete response body.
             const defaultRequestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
             const defaultModelBudgetMs = Number(reviewPolicy.model_budget_ms) || 360000;
 
@@ -457,17 +463,6 @@ jobs:
                 .replace(/<\/?think>/gi, '')
                 .trim();
             }
-
-            // Optional request fields an upstream may reject outright. Dropping one and
-            // retrying is always safe; `model`/`messages`/`stream` never are.
-            const DROPPABLE_FIELDS = new Set([
-              'enable_thinking', 'temperature', 'top_p', 'max_tokens', 'max_output_tokens',
-            ]);
-            const EXTRA_FIELD_REJECTED = [
-              /Extra inputs are not permitted, field: '([^']+)'/i,
-              /unknown field:? '?([a-z_]+)'?/i,
-              /unsupported parameter:? '?([a-z_]+)'?/i,
-            ];
 
             function basePayload(model) {
               const throttled = model.context_profile === 'kimi-k3-throttled';
@@ -521,118 +516,60 @@ jobs:
                 /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text)
               );
 
-              if (quotaExhausted) return { kind: 'quota-exhausted', stopRetries: true, stopFallbacks: true };
-              if (authenticationFailed) return { kind: 'authentication-failed', stopRetries: true, stopFallbacks: true };
-              if (gatewayBlocked) return { kind: 'gateway-blocked', stopRetries: true, stopFallbacks: true };
-              if (endpointUnavailable) return { kind: 'endpoint-unavailable', stopRetries: false, stopFallbacks: true };
-              return { kind: 'model-or-upstream-failure', stopRetries: false, stopFallbacks: false };
+              if (quotaExhausted) return { kind: 'quota-exhausted' };
+              if (authenticationFailed) return { kind: 'authentication-failed' };
+              if (gatewayBlocked) return { kind: 'gateway-blocked' };
+              if (endpointUnavailable) return { kind: 'endpoint-unavailable' };
+              return { kind: 'model-or-upstream-failure' };
             }
 
-            async function callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs) {
-              const modelId = model.id;
-              const requestBody = JSON.stringify(
-                lane.protocol === 'google-generate-content' ? googlePayload(model) : payload
-              );
+            // Exactly one request per model. No retry, backoff, optional-field
+            // repair, or redirect can silently send the same review again.
+            async function callModel(lane, model) {
+              const requestTimeoutMs = model.request_timeout_ms ?? lane.request_timeout_ms ?? defaultRequestTimeoutMs;
+              const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, modelBudgetMs));
+              const startedAt = Date.now();
               let response;
               let responseText = '';
               let requestError = '';
-              let failureKind = '';
-              let stopFallbacks = false;
-              let attempts = 0;
-              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                attempts = attempt;
-                response = undefined;
-                responseText = '';
-                requestError = '';
-                // Never let a single attempt run past the model's wall-clock budget: cap it to
-                // whatever time is left, and give up rather than starting an attempt with none.
-                const remaining = deadline - Date.now();
-                if (remaining <= 0) {
-                  requestError = `Gave up on ${modelId} after its ${modelBudgetMs / 1000}s budget was exhausted (upstream likely hung).`;
-                  console.log(`[Lane ${lane.id}/${modelId}] attempt ${attempt}/${maxAttempts} skipped: model budget exhausted`);
-                  break;
-                }
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remaining));
-                try {
-                  const credentials = laneCredentials[lane.id];
-                  const isGoogle = lane.protocol === 'google-generate-content';
-                  const endpoint = isGoogle
-                    ? `${credentials.baseUrl}/models/${encodeURIComponent(modelId)}:generateContent`
-                    : `${credentials.baseUrl}/chat/completions`;
-                  response = await fetch(endpoint, {
-                    method: 'POST',
-                    signal: controller.signal,
-                    headers: isGoogle ? {
-                      'x-goog-api-key': credentials.apiKey,
-                      'content-type': 'application/json',
-                      accept: 'application/json',
-                      'user-agent': 'GitHubActions-AI-PR-Review',
-                    } : {
-                      authorization: `Bearer ${credentials.apiKey}`,
-                      'content-type': 'application/json',
-                      accept: 'application/json',
-                      'user-agent': 'GitHubActions-AI-PR-Review',
-                    },
-                    body: requestBody,
-                  });
-                  responseText = await response.text();
-                } catch (error) {
-                  requestError = error?.name === 'AbortError'
-                    ? 'AI endpoint request aborted (per-attempt timeout or model budget reached).'
-                    : (error?.message || String(error));
-                } finally {
-                  clearTimeout(timeout);
-                }
-                const failure = classifyFailure(response, responseText, requestError);
-                if (response?.ok && failure.kind !== 'gateway-blocked') break;
-                const status = response?.status ?? 'request failed';
-                const diag = (responseText || requestError || '').slice(0, 1000);
-                console.log(`[Lane ${lane.id}/${modelId}] provider=${lane.provider} protocol=${lane.protocol} attempt ${attempt}/${maxAttempts} failed: status=${status} body=${diag}`);
-                failureKind = failure.kind;
-                stopFallbacks = failure.stopFallbacks;
-                // Retry transient failures only (5xx, 429, network/timeout); other 4xx are
-                // request/auth problems that will not fix themselves on retry.
-                const retriable = !response || response.status >= 500 || response.status === 429;
-                if (failure.stopRetries || !retriable || attempt === maxAttempts) break;
-                // Exponential backoff with jitter (~3s, ~9s): rides out short upstream blips.
-                // Skip the wait entirely if it would eat into the budget — better to spend the
-                // remaining time on a real attempt (or on the fallback) than on sleeping.
-                const backoff = 3000 * Math.pow(3, attempt - 1) + Math.floor(Math.random() * 1000);
-                if (Date.now() + backoff >= deadline) break;
-                await new Promise((resolve) => setTimeout(resolve, backoff));
+              let errorCode = '';
+              try {
+                const credentials = laneCredentials[lane.id];
+                const isGoogle = lane.protocol === 'google-generate-content';
+                const endpoint = isGoogle
+                  ? `${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`
+                  : `${credentials.baseUrl}/chat/completions`;
+                response = await fetch(endpoint, {
+                  method: 'POST',
+                  redirect: 'error',
+                  signal: controller.signal,
+                  headers: {
+                    ...(isGoogle ? { 'x-goog-api-key': credentials.apiKey } : { authorization: `Bearer ${credentials.apiKey}` }),
+                    'content-type': 'application/json',
+                    accept: 'application/json',
+                    'user-agent': 'GitHubActions-AI-PR-Review',
+                  },
+                  body: JSON.stringify(isGoogle ? googlePayload(model) : basePayload(model)),
+                });
+                responseText = await response.text();
+              } catch (error) {
+                const code = error?.cause?.code || error?.code;
+                errorCode = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
+                requestError = error?.name === 'AbortError'
+                  ? 'AI endpoint request aborted (per-attempt timeout or model budget reached).'
+                  : (error?.message || String(error));
+              } finally {
+                clearTimeout(timeout);
               }
-              if (response?.ok && !failureKind) {
-                return { response, responseText, requestError, attempts, failureKind: '', stopFallbacks: false };
+              const failure = classifyFailure(response, responseText, requestError);
+              const usable = response?.ok && !requestError && failure.kind !== 'gateway-blocked';
+              console.log(`[Lane ${lane.id}/${model.id}] attempt 1/1 elapsed_ms=${Date.now() - startedAt} status=${response?.status ?? 'request failed'} error_code=${errorCode || 'none'}`);
+              if (!usable) {
+                console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${lane.protocol} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
               }
-              return { response, responseText, requestError, attempts, failureKind, stopFallbacks };
-            }
-
-            // The gateway silently re-routes a model between upstreams, and upstreams disagree
-            // about which optional fields exist. When one rejects a field by name, drop it and
-            // retry rather than losing the whole review.
-            async function callModel(lane, model) {
-              // One budget per model covers all its attempts and field-repair retries. Each
-              // model in a fallback chain gets a fresh budget, so a hung primary is abandoned
-              // in bounded time and the fallback still gets its own full window.
-              const requestTimeoutMs = Number(lane.request_timeout_ms) || defaultRequestTimeoutMs;
-              const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
-              const deadline = Date.now() + modelBudgetMs;
-              if (lane.protocol === 'google-generate-content') {
-                return callOnce(lane, model, null, deadline, requestTimeoutMs, modelBudgetMs);
-              }
-              const payload = basePayload(model);
-              for (let repair = 0; repair <= DROPPABLE_FIELDS.size; repair++) {
-                const result = await callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs);
-                if (result.response?.status !== 400) return result;
-                const text = result.responseText || '';
-                const matched = EXTRA_FIELD_REJECTED.map((re) => re.exec(text)).find(Boolean);
-                const field = matched?.[1];
-                if (!field || !DROPPABLE_FIELDS.has(field) || !(field in payload)) return result;
-                console.log(`[Lane ${lane.id}/${model.id}] upstream rejected optional field '${field}'; dropping it and retrying.`);
-                delete payload[field];
-              }
-              return callOnce(lane, model, payload, deadline, requestTimeoutMs, modelBudgetMs);
+              return { response, responseText, requestError, attempts: 1, failureKind: usable ? '' : failure.kind };
             }
 
             function extractReview(lane, model, responseText) {
@@ -680,8 +617,7 @@ jobs:
               return { review, reasoningLength: reasoning.length, reasoningUnit: reasoning.length ? 'chars' : null, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
             }
 
-            // Try the primary model, then same-provider fallbacks. Shared provider failures
-            // short-circuit the lane so the full context is not resent to the same endpoint.
+            // Primary once, then the same-lane fallback once on failure; never retry either.
             async function requestReview(lane) {
               const primary = lane.primary;
               const chain = [primary, ...lane.fallbacks];
@@ -709,16 +645,15 @@ jobs:
               let lastResponseText = '';
               let lastRequestError = '';
               let lastFailureKind = '';
-              let stoppedSharedLane = false;
               let bestPartial = null;
 
               for (const model of chain) {
-                const { response, responseText, requestError, attempts, failureKind, stopFallbacks } = await callModel(lane, model);
+                const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
                 lastResponse = response;
                 lastResponseText = responseText;
                 lastRequestError = requestError;
                 lastFailureKind = failureKind;
-                if (response?.ok) {
+                if (response?.ok && !requestError && failureKind !== 'gateway-blocked') {
                   try {
                     const { review, reasoningLength, reasoningUnit, complete } = extractReview(lane, model, responseText);
                     if (review && complete) {
@@ -753,11 +688,6 @@ jobs:
                   }
                 }
                 tried.push(`${model.id} -> HTTP ${response?.status ?? 'request failed'} (${attempts ?? 0} attempt(s))`);
-                if (stopFallbacks && model !== chain[chain.length - 1]) {
-                  stoppedSharedLane = true;
-                  console.log(`[Lane ${lane.id}/${primary.id}] ${failureKind} affects provider ${lane.provider}; skipping fallback requests in this lane.`);
-                  break;
-                }
                 if (model !== chain[chain.length - 1]) {
                   console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
                 }
@@ -770,9 +700,7 @@ jobs:
               const upstreamExhausted = failText.includes('failover_exhausted');
               const status = lastResponse?.status ?? 'request failed';
               const isServerSide = typeof status === 'number' && status >= 500;
-              const stoppedSummary = stoppedSharedLane
-                ? `The failure applies to the shared Lane ${lane.id} ${lane.provider} endpoint, so this lane's fallbacks were skipped to avoid duplicate requests. Reason: ${lastFailureKind}.`
-                : `Review attempts did not produce a usable response. Tried: ${tried.join('; ')}.`;
+              const stoppedSummary = `Review attempts did not produce a usable response. Tried: ${tried.join('; ')}.`;
               const fence = '```';
               const snippet = failText.replace(/`/g, "'").slice(0, 600);
               const review = [
@@ -793,7 +721,7 @@ jobs:
                     : lastFailureKind === 'authentication-failed'
                       ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.`
                       : lastFailureKind === 'endpoint-unavailable'
-                        ? `Action needed: Lane ${lane.id} endpoint remained unreachable after retries. Models sharing that Lane cannot bypass its network failure.`
+                        ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.`
                   : upstreamExhausted
                     ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.`
                     : isServerSide
@@ -819,33 +747,22 @@ jobs:
 
             const reviewedHeadShortSha = reviewHeadSha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            // Run lanes independently in parallel. A healthy lane emits exactly one comment;
-            // fallbacks are sequential inside that lane and can never cross credentials.
-            const settled = await Promise.allSettled(lanesToReview.map((lane) => requestReview(lane)));
-
-            // Model calls can outlive the commit they reviewed. Do not attach completed
-            // results to a newer head (or to a PR that was closed while they were running).
-            const { data: publishPull } = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: pullNumber,
-            });
-            if (publishPull.head.sha !== reviewHeadSha || publishPull.state !== 'open') {
-              console.log(`Skip stale review before comment publishing: reviewed=${reviewHeadSha.slice(0, 7)} current=${publishPull.head.sha.slice(0, 7)} state=${publishPull.state || 'unknown'}.`);
-              return;
-            }
-
-            const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
             let posted = 0;
+            let staleReview = false;
             const validLaneIds = new Set(isManualReview ? [] : reusableLaneIds);
-            for (let i = 0; i < settled.length; i++) {
-              const lane = lanesToReview[i];
+            async function reviewAndPublish(lane) {
               const primary = lane.primary;
-              if (settled[i].status === 'rejected') {
-                console.log(`[Lane ${lane.id}/${primary.id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
-                continue;
+              const result = await requestReview(lane);
+              // Each lane validates freshness immediately before its own publication.
+              // A slow lane must never delay an already-completed review.
+              const { data: publishPull } = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
+              if (publishPull.head.sha !== reviewHeadSha || publishPull.state !== 'open') {
+                staleReview = true;
+                console.log(`Skip stale review before comment publishing: reviewed=${reviewHeadSha.slice(0, 7)} current=${publishPull.head.sha.slice(0, 7)} state=${publishPull.state || 'unknown'}.`);
+                return;
               }
-              const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = settled[i].value;
+              const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+              const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = result;
               const modelLine = degraded
                 ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
                 : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
@@ -900,6 +817,13 @@ jobs:
                 console.log(`Failed to post comment for Lane ${lane.id}: ${error?.message || error}`);
               }
             }
+            const settled = await Promise.allSettled(lanesToReview.map(reviewAndPublish));
+            for (let i = 0; i < settled.length; i++) {
+              if (settled[i].status === 'rejected') {
+                console.log(`[Lane ${lanesToReview[i].id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
+              }
+            }
+            if (staleReview) return;
             if (posted === 0) {
               throw new Error('No AI PR Review comment could be posted for any configured model.');
             }

@@ -94,13 +94,14 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 
 每个仓库 JSON 包含：
 
-- `review_policy`：系统 prompt、diff 预算、单次请求超时、单模型总预算和重试次数。
+- `review_policy`：系统 prompt、diff 预算、单次请求超时和单模型总预算。`max_attempts` 必须为 `1`，禁止同模型重试。
 - `lanes[].id`：固定 `A`、`B` 或 `C`，也是 Secret 槽位。
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
 - `lanes[].protocol`：`openai-chat-completions` 或 `google-generate-content`。
 - `lanes[].advisory`：可选布尔值，默认 `false`。标记为 `true` 的 Lane 照常发布评论与诊断，但不进入聚合门禁——用于免费额度或尽力而为的供应商。至少要保留一条非 advisory 的 Lane，否则整份配置会失败关闭（全部 advisory 等于没有门禁）。
 - `lanes[].request_timeout_ms` 与 `lanes[].model_budget_ms`：可选的 Lane 级预算覆盖；未配置时继承 `review_policy`，因此放大慢模型预算不会改变其他 Lane。
-- `primary` 与 `fallbacks`：Lane 内有序模型链。
+- 模型的 `request_timeout_ms`：可选单模型请求上限，优先于 Lane/仓库默认值，但仍受 Lane 的 `model_budget_ms` 限制。B 主模型继承 360000 ms，备用显式设为 300000 ms。
+- `primary` 与 `fallbacks`：主模型加最多一个同 Lane 备用模型。主模型一次、失败切备用一次，备用失败即结束；配置第三个模型会被拒绝。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、DeepSeek、GLM 均使用完整上下文。
 - `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点；当前 SenseNova Lane C 主备模型按该端点的请求形状启用，其他 Lane 不启用。
 - Google 协议仍保留通用兼容代码，但当前没有活动 Lane 使用它；`thinking_level` 只允许配置在 `google-generate-content` 协议，其他协议会失败关闭。
@@ -118,12 +119,14 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 自动触发只复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；缺失、旧版、诊断和不完整 Lane 会单独重跑。
 - 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
 - Lane 主模型成功时绝不调用 fallback。
-- 配额、认证、HTML 验证页、DNS、TLS 和共享端点故障会短路当前 Lane，不影响其他 Lane。
-- Qwen、DeepSeek、GLM 保留完整审核上下文。Lane B 通过固定 `PR_AGENT_LANE_B_API_BASE`/`PR_AGENT_LANE_B_KEY` 槽位使用火山方舟 Coding API 的 OpenAI Chat Completions 兼容端点 `https://ark.cn-beijing.volces.com/api/coding/v3`，主模型为 `glm-5.3`，同供应商 fallback 为 `deepseek-v4-pro-ga-260813`。两者已分别通过真实生成请求，reviewer 保留主模型 65536-token completion ceiling、fallback 393216-token ceiling 与每模型 15 分钟请求/模型预算；不再复用腾讯专属 `deepseek-v4-pro-202606`。Lane A 仍继承原有 5/6 分钟和 16384 输出上限。
+- 所有模型请求失败（包括超时、限流、认证、HTML 验证页、DNS/TLS、解析失败、空正文和不完整输出）都只进入同 Lane 备用一次；备用失败后发布诊断或明确标记的不完整结果，不计为有效审核。未配置该 Lane 凭据时仍直接发布配置诊断，不发送请求。
+- 不做退避重试，不做可选参数修复后重发，不跟随 HTTP 重定向。A/B/C 并行，每路一旦完整成功或主备均结束就立即校验 PR head/state 并发布稳定评论；不等待其他 Lane。最终 job 仍等待各路结束后执行原有 quorum/required 门禁，不因提早发布而提早放行。
+- 此次改变调用次数、发布时机和 B 路预算：模型、供应商、输出上限、A/C 超时预算、Secret 槽位和 Claude 不变；B 预算按用户要求改为主 6 分钟、备 5 分钟，不包含尚未通过验收的 Auto/流式传输实验。底层传输可能提前失败，上述预算是上限，不保证每个请求都能持续到该时限。
+- Qwen、DeepSeek、GLM 保留完整审核上下文。Lane B 通过固定 `PR_AGENT_LANE_B_API_BASE`/`PR_AGENT_LANE_B_KEY` 槽位使用火山方舟 Coding API 的 OpenAI Chat Completions 兼容端点 `https://ark.cn-beijing.volces.com/api/coding/v3`，主模型为 `glm-5.3`，同供应商 fallback 为 `deepseek-v4-pro-ga-260813`。两者已分别通过真实生成请求，reviewer 保留主模型 65536-token completion ceiling、fallback 393216-token ceiling；主模型最多 6 分钟，备用最多 5 分钟，B 路总计最多约 11 分钟；不再复用腾讯专属 `deepseek-v4-pro-202606`。Lane A 仍继承原有 5/6 分钟和 16384 输出上限。
 - Lane C 使用 `PR_AGENT_LANE_C_API_BASE` 指定的 SenseNova OpenAI Chat Completions 地址，主模型为 `deepseek-v4-flash`，不再使用 Google endpoint、协议或 thinking 配置。SenseNova 端点显式传入 `max_tokens` 曾被错误地按 workspace quota 拒绝，所以 Lane C 主备请求均省略该字段并使用 10 分钟请求/模型预算。
-- Lane C 的同供应商 fallback 为 `sensenova-6.8-flash-lite`。仅模型超时、5xx、解析失败、空正文或不完整输出进入 fallback；配额、认证、HTML 验证页、DNS、TLS 和共享端点故障仍短路当前 Lane，避免把完整 PR 重发到同一故障 Workspace。
+- Lane C 的同供应商 fallback 为 `sensenova-6.8-flash-lite`，同样执行主模型一次、备用一次的规则，不影响其他 Lane。
 - Qwen3.7-Max 只在 Qwen3.8-Max 失败时调用，并使用同一阿里 Lane A 凭据、完整审核上下文和 16384 输出上限。
-- reusable job 的 40 分钟硬上限允许 Lane B 在 15 分钟主模型后执行同 Lane fallback；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
+- reusable job 保留 40 分钟兜底上限；B 路主备合计最多约 11 分钟。NebulaLab 的 A/B/C 并行阶段上限约 11 分钟（不含排队、准备与发布）；其他仓库 C 路预算未改，不能据此声称整轮都只需 11 分钟；正常模型主动 `stop` 时不会因为 ceiling 提高而强制消耗更多 tokens。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；任一必需 Lane 没有 `valid` 证据时，job 在发布其他健康 Lane 后明确失败。
 

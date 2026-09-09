@@ -31,6 +31,9 @@ function validateModel(model, location) {
   if (!Number.isInteger(model.max_output_tokens) || model.max_output_tokens < 1) {
     throw new Error(`${location}.max_output_tokens must be a positive integer.`);
   }
+  if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
+    throw new Error(`${location}.request_timeout_ms must be a positive integer when configured.`);
+  }
   if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
     throw new Error(`${location}.omit_max_tokens must be a boolean.`);
   }
@@ -52,6 +55,7 @@ function validateConfig(config, repository) {
       throw new Error(`review_policy.${field} must be a positive integer.`);
     }
   }
+  if (config.review_policy.max_attempts !== 1) throw new Error('review_policy.max_attempts must be 1; model retries are disabled.');
   if (!Array.isArray(config.lanes) || config.lanes.length === 0) {
     throw new Error('Config must contain at least one lane.');
   }
@@ -77,6 +81,7 @@ function validateConfig(config, repository) {
     }
     validateModel(lane.primary, `${location}.primary`);
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
+    if (lane.fallbacks.length > 1) throw new Error(`${location} supports at most one fallback.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
     for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
       const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;

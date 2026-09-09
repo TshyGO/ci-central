@@ -314,7 +314,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === '1a14db7ad1f8bf97f9c2a6ff971c89f4628ae47ebcf291b1e171885d70c4290f';
+    && sha256(review) === 'c6a10cd800a4904e22267d9c919df536b7bba3ccab9e4c661842f00af9d0757b';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -372,7 +372,7 @@ function laneForUrl(url) {
 }
 
 async function scenario(route, overrides = {}, options = {}) {
-  const posted = [], captured = [], logs = [];
+  const posted = [], captured = [], logs = [], timeouts = [];
   const comments = (options.comments || []).map((comment, index) => ({
     id: index + 1,
     user: { login: 'github-actions[bot]' },
@@ -414,17 +414,17 @@ async function scenario(route, overrides = {}, options = {}) {
     const lane = laneForUrl(url);
     const match = /\/models\/([^/:]+):generateContent$/.exec(url);
     const model = match ? decodeURIComponent(match[1]) : body.model;
-    const call = { lane, model, body, headers: request.headers, url };
+    const call = { lane, model, body, headers: request.headers, url, signal: request.signal, redirect: request.redirect };
     captured.push(call);
-    return route(call);
+    return route(call, { posted, logs });
   };
   let error;
   try {
-    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn) => setTimeout(fn, 0), clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) });
+    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) });
   } catch (caught) {
     error = caught;
   }
-  return { posted, captured, comments, logs, error, pullGets };
+  return { posted, captured, comments, logs, error, pullGets, timeouts };
 }
 
 const checks = [];
@@ -804,14 +804,14 @@ check('repository configuration supplied through the environment remains authori
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(503, '{"error":"unavailable"}') : healthy(call));
-check('Lane A uses Qwen3.7-Max only after Qwen3.8-Max exhausts retries', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 3 && r.captured.filter(({ model }) => model === 'qwen3.7-max').length === 1);
+check('Lane A uses Qwen3.7-Max only after one failed Qwen3.8-Max request', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 1 && r.captured.filter(({ model }) => model === 'qwen3.7-max').length === 1);
 const qwenFallback = r.captured.find(({ model }) => model === 'qwen3.7-max')?.body;
 check('Qwen3.7-Max fallback uses the full review contract', qwenFallback?.max_tokens === 16384 && qwenFallback?.temperature === 0.2 && qwenFallback.messages[1].content.includes('Changed files and patches:'));
 check('Qwen3.7-Max still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by qwen3.7-max')));
 
 r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back only to its Ark-hosted DeepSeek model',
-  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 3
+  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 1
   && r.captured.filter(({ model }) => model === 'deepseek-v4-pro-ga-260813').length === 1
   && r.captured.find(({ model }) => model === 'deepseek-v4-pro-ga-260813')?.body.max_tokens === 393216
   && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-ga-260813')
@@ -819,15 +819,15 @@ check('Lane B falls back only to its Ark-hosted DeepSeek model',
   && r.posted.some((body) => body.includes('glm-5.3 unavailable -> served by deepseek-v4-pro-ga-260813')));
 
 r = await scenario((call) => call.lane === 'C' && call.model === 'deepseek-v4-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to SenseNova 6.8 Flash Lite after DeepSeek V4 Flash exhausts retries',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'deepseek-v4-flash').length === 3
+check('Lane C falls back only to SenseNova 6.8 Flash Lite after one failed DeepSeek V4 Flash request',
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'deepseek-v4-flash').length === 1
   && r.captured.filter(({ model }) => model === 'sensenova-6.8-flash-lite').length === 1
   && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'sensenova-6.8-flash-lite')
   && r.posted.some((body) => body.includes('deepseek-v4-flash unavailable -> served by sensenova-6.8-flash-lite')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
-check('quota failure short-circuits only its provider lane', r.captured.filter(({ lane }) => lane === 'A').length === 1
-  && !r.captured.some(({ model }) => model === 'qwen3.7-max') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
+check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
+  && r.captured.some(({ model }) => model === 'qwen3.7-max') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
 // The case the quorum exists for. A provider's quota is exhausted for days, not
 // seconds, so under the old all-required rule every pull request stayed red until it
 // reset - while two other lanes had published complete reviews the whole time.
@@ -837,13 +837,14 @@ check('a quota failure on one lane publishes its diagnostic without failing the 
   && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
 
 r = await scenario((call) => { if (call.lane === 'A') throw new Error('fetch failed'); return healthy(call); });
-check('DNS or TLS style failures retry primary but do not resend context to fallback', r.captured.filter(({ lane }) => lane === 'A').length === 3
-  && !r.captured.some(({ model }) => model === 'qwen3.7-max') && r.logs.some((line) => line.includes('endpoint-unavailable') && line.includes('Lane A')));
+check('network failures try primary and fallback exactly once', r.captured.filter(({ lane }) => lane === 'A').length === 2
+  && r.captured.some(({ model }) => model === 'qwen3.7-max') && r.posted.some((body) => body.includes('one attempt per configured model')));
 
 r = await scenario((call) => call.model === 'qwen3.8-max' && 'temperature' in call.body
   ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}') : healthy(call));
 const repairedQwen = r.captured.filter(({ model }) => model === 'qwen3.8-max').map(({ body }) => body);
-check('optional-field rejection repairs the request inside the same lane', repairedQwen.length === 2 && !('temperature' in repairedQwen[1]));
+check('optional-field rejection never reissues the same model request', repairedQwen.length === 1
+  && repairedQwen[0].temperature === 0.2 && r.captured.some((call) => call.model === 'qwen3.7-max'));
 
 r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(200, chatResult(call.model, '')) : healthy(call));
 check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'qwen3.7-max') && !r.posted.some((body) => body.includes('private thinking')));
@@ -1003,4 +1004,79 @@ delete strictConfig.review_policy.min_valid_lanes;
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(strictConfig), LANE_A_KEY: '' });
 check('without min_valid_lanes a single required lane still gates the job', /Required review evidence is not valid for Lane A/.test(r.error?.message || ''));
 
+
+check('automatic redirects cannot reissue a model request', r.captured.every((call) => call.redirect === 'error'));
+for (const [label, fail] of [
+  ['server error', () => reply(503, '{"error":"unavailable"}')],
+  ['rate limit', () => reply(429, '{"error":"rate limit"}')],
+  ['authentication', () => reply(401, '{"error":"invalid key"}')],
+  ['verification page', () => reply(200, '<html>verification</html>')],
+  ['empty content', (call) => reply(200, chatResult(call.model, ''))],
+  ['invalid JSON', () => reply(200, 'not JSON')],
+  ['body failure', () => ({ ok: true, status: 200, text: async () => { throw new Error('body read failed'); } })],
+  ['timeout', (call) => new Promise((resolve, reject) => call.signal.addEventListener('abort', () => {
+    const error = new Error('deadline'); error.name = 'AbortError'; reject(error);
+  }, { once: true }))],
+]) {
+  r = await scenario((call) => fail(call));
+  check(`${label}: every lane makes only primary once and fallback once, then fails`,
+    r.captured.length === 6 && /0 of 3 lanes/.test(r.error?.message || '')
+    && ['A', 'B', 'C'].every((lane) => {
+      const calls = r.captured.filter((call) => call.lane === lane);
+      return calls.length === 2 && new Set(calls.map((call) => call.model)).size === 2;
+    }));
+}
+for (const invalidAttempts of [undefined, 0, 2, 3, '1']) {
+  const config = structuredClone(centralConfig);
+  config.review_policy.max_attempts = invalidAttempts;
+  r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(config) });
+  check(`retry policy ${invalidAttempts} fails closed before dispatch`, r.captured.length === 0 && /max_attempts must be 1/.test(r.error?.message || ''));
+}
+const extraFallback = structuredClone(centralConfig);
+extraFallback.lanes[0].fallbacks.push({ ...extraFallback.lanes[0].fallbacks[0], id: 'third-model' });
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(extraFallback) });
+check('a third model cannot silently extend a lane', r.captured.length === 0 && /at most one fallback/.test(r.error?.message || ''));
+
+// Make B slower, while C and A finish in that order. The final publication order
+// must reflect completion, not the fixed config order or allSettled barrier.
+let cPublishedWhileBRunning = false;
+r = await scenario(async (call, state) => {
+  if (call.lane === 'A') await new Promise((resolve) => setTimeout(resolve, 10));
+  if (call.lane === 'B') {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    cPublishedWhileBRunning = state.posted.some((body) => body.includes('lane-C'));
+  }
+  return healthy(call);
+});
+check('lanes publish in completion order without waiting for the slowest',
+  !r.error && cPublishedWhileBRunning
+  && r.posted.map((body) => /ai-pr-review-bot:lane-([ABC])/.exec(body)?.[1]).join(',') === 'C,A,B');
+
+r = await scenario(healthy, {}, { pulls: [pull, pull, pull, newerPull] });
+check('each publication rechecks freshness; later lanes cannot publish after head changes',
+  r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
+
+
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call));
+check('B primary gets six minutes and fallback gets five, without changing A/C deadlines',
+  !r.error && r.timeouts.join(',') === '300000,360000,180000,300000');
+const inheritedTimeoutConfig = structuredClone(centralConfig);
+delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+  { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
+check('models without an override still inherit their lane deadline',
+  r.timeouts.join(',') === '300000,360000,180000,360000');
+const cappedTimeoutConfig = structuredClone(centralConfig);
+cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 900000;
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+  { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
+check('a model override cannot extend the lane model-budget cap',
+  r.timeouts.join(',') === '300000,360000,180000,360000');
+for (const invalid of [0, -1, 1.5, '300000', null]) {
+  const config = structuredClone(centralConfig);
+  config.lanes[1].fallbacks[0].request_timeout_ms = invalid;
+  r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(config) });
+  check(`invalid per-model timeout ${invalid} fails before dispatch`,
+    r.captured.length === 0 && /request_timeout_ms must be a positive integer/.test(r.error?.message || ''));
+}
 if (checks.some((value) => !value)) process.exitCode = 1;

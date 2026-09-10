@@ -564,7 +564,7 @@ jobs:
                   responseText = JSON.stringify({ error: { code: error.providerCode, type: error.providerType } });
                 }
                 const code = error?.cause?.code || error?.code;
-                errorCode = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
+                errorCode = typeof code === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : '';
                 requestError = error?.name === 'AbortError'
                   ? 'AI endpoint request aborted (per-attempt timeout or model budget reached).'
                   : (error?.message || String(error));

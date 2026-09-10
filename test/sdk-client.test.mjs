@@ -95,6 +95,19 @@ for (const [name, implementation] of [
     }
   });
 
+  test(`${name}: empty finish_reason on initial/intermediate deltas is not completion`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame(delta('', '')));
+      await delay(10);
+      res.write(frame(delta('complete review', '')));
+      res.write(frame(delta('', 'stop')));
+    });
+    const result = JSON.parse(await (await f.invoke()).text());
+    assert.equal(result.choices[0].message.content, 'complete review');
+    assert.equal(result.choices[0].finish_reason, 'stop');
+  });
+
   for (const status of [400, 401, 403, 429, 500, 503, 307]) {
     test(`${name}: HTTP ${status} sends once, never retries/redirects or logs response secrets`, async (t) => {
       const f = await fixture(t, implementation, async (_req, res) => {
@@ -161,6 +174,26 @@ for (const [name, implementation] of [
     });
     assert.equal((await f.invoke({ timeoutMs: 2500 })).status, 200);
     assert.ok(f.logs.at(-1).headers_ms >= 1000);
+  });
+
+  test(`${name}: unframed oversized SSE is bounded before SDK decoding`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end('data: ' + 'x'.repeat(33 * 1024 * 1024));
+    });
+    await assert.rejects(f.invoke({ timeoutMs: 5000 }), (error) => error.code === 'REVIEW_RESPONSE_TOO_LARGE');
+    assert.equal(f.calls.length, 1);
+  });
+
+  test(`${name}: unsafe endpoints are rejected before any request`, async () => {
+    for (const baseURL of ['PRIVATE INVALID URL', 'http://example.test/v1', 'https://user:password@example.test/v1', 'https://example.test/v1?key=x', 'https://example.test/v1#fragment']) {
+      await assert.rejects(implementation.requestChatCompletion({ apiKey: 'test-only', baseURL,
+        payload: basePayload, signal: new AbortController().signal, timeoutMs: 100 }), (error) => {
+          assert.equal(error.code, 'REVIEW_INVALID_ENDPOINT');
+          assert.ok(!JSON.stringify(error).includes(baseURL));
+          return true;
+        });
+    }
   });
 }
 

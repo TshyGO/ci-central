@@ -314,14 +314,14 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === 'c6a10cd800a4904e22267d9c919df536b7bba3ccab9e4c661842f00af9d0757b';
+    && sha256(review) === 'a541ddb8224cb36e1e216f69d0d2637212095b964d511d0bf84a7fba3b99b112';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
 if (resolverScript === undefined || reviewScript === undefined) throw new Error('Trusted github-script blocks not found');
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const runResolver = new AsyncFunction('core', 'process', resolverScript);
-const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', reviewScript);
+const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', 'require', reviewScript);
 
 const centralConfig = JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', 'TshyGO__NebulaLab.json'), 'utf8'));
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
@@ -420,7 +420,15 @@ async function scenario(route, overrides = {}, options = {}) {
   };
   let error;
   try {
-    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) });
+    // Policy tests stub the SDK boundary; sdk-client.test.mjs exercises the
+    // actual bundled SDK against real socket/SSE responses separately.
+    const requireSdk = (name) => {
+      if (name !== './.ci-central/review-action/dist/sdk-client.js') throw new Error('Unexpected workflow require');
+      return { requestChatCompletion: ({ apiKey, baseURL, payload, signal }) => fetch(`${baseURL}/chat/completions`, {
+        body: JSON.stringify(payload), signal, redirect: 'error', headers: { authorization: `Bearer ${apiKey}` },
+      }) };
+    };
+    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
   } catch (caught) {
     error = caught;
   }
@@ -654,7 +662,7 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 40'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:glm-5.3,C:deepseek-v4-flash');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:ark-code-latest,C:deepseek-v4-flash');
 check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.7-max', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
@@ -671,8 +679,8 @@ check('Lane C uses OpenAI Chat Completions without Google thinking fields',
   && healthyLaneC?.max_tokens === undefined
   && healthyLaneC?.temperature === 0.2
   && healthyLaneC?.generationConfig === undefined);
-check('Lane B uses the configured GLM output budget without lowering model reasoning',
-  healthyLaneB?.model === 'glm-5.3'
+check('Lane B uses the configured Auto output budget without lowering model reasoning',
+  healthyLaneB?.model === 'ark-code-latest'
   && healthyLaneB?.max_tokens === 65536
   && healthyLaneB?.reasoning_effort === undefined
   && healthyLaneB?.thinking === undefined);
@@ -809,14 +817,14 @@ const qwenFallback = r.captured.find(({ model }) => model === 'qwen3.7-max')?.bo
 check('Qwen3.7-Max fallback uses the full review contract', qwenFallback?.max_tokens === 16384 && qwenFallback?.temperature === 0.2 && qwenFallback.messages[1].content.includes('Changed files and patches:'));
 check('Qwen3.7-Max still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by qwen3.7-max')));
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+r = await scenario((call) => call.lane === 'B' && call.model === 'ark-code-latest' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back only to its Ark-hosted DeepSeek model',
-  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 1
+  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'ark-code-latest').length === 1
   && r.captured.filter(({ model }) => model === 'deepseek-v4-pro-ga-260813').length === 1
   && r.captured.find(({ model }) => model === 'deepseek-v4-pro-ga-260813')?.body.max_tokens === 393216
   && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'deepseek-v4-pro-ga-260813')
   && !r.captured.some(({ model }) => model === 'deepseek-v4-pro-202606')
-  && r.posted.some((body) => body.includes('glm-5.3 unavailable -> served by deepseek-v4-pro-ga-260813')));
+  && r.posted.some((body) => body.includes('ark-code-latest unavailable -> served by deepseek-v4-pro-ga-260813')));
 
 r = await scenario((call) => call.lane === 'C' && call.model === 'deepseek-v4-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
 check('Lane C falls back only to SenseNova 6.8 Flash Lite after one failed DeepSeek V4 Flash request',
@@ -1057,18 +1065,18 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 
 
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call));
+r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call));
 check('B primary gets six minutes and fallback gets five, without changing A/C deadlines',
   !r.error && r.timeouts.join(',') === '300000,360000,180000,300000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
   r.timeouts.join(',') === '300000,360000,180000,360000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 900000;
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
   r.timeouts.join(',') === '300000,360000,180000,360000');

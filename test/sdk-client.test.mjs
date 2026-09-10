@@ -72,7 +72,8 @@ for (const [name, implementation] of [
     assert.notEqual(f.logs.at(-1).first_content_ms, null);
     assert.equal(f.logs.at(-1).event, 'finished');
     assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE REASONING'));
-    assert.deepEqual(f.dispatcherOptions, [{ headersTimeout: 2000, bodyTimeout: 2000 }]);
+    assert.deepEqual(f.dispatcherOptions, [{ headersTimeout: 2000, bodyTimeout: 2000,
+      connectTimeout: 2000, autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 1000 }]);
   });
 
   test(`${name}: A/B/C use isolated credentials and preserve provider parameters`, async (t) => {

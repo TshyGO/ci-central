@@ -36,6 +36,8 @@ Lane C 走的是免费额度，额度耗尽时返回 429 属于预期行为。�
 
 A/B/C 共用官方 `openai` JavaScript SDK 的 `chat.completions.create({ stream: true })`。每次请求创建独立 client 和 Undici dispatcher，明确 `maxRetries: 0`、禁止重定向、按当前模型预算配置响应头/正文超时；外层 AbortSignal 覆盖连接、接收和完整流迭代。没有全局 dispatcher、跨 Lane 连接/密钥共享或参数修复重发。
 
+连接阶段最多 30 秒且不超过模型总预算；IPv4/IPv6 地址探测间隔为 1 秒，避免跨区域连接被 Node 默认 250ms 探测窗口过早放弃。地址探测不重复发送审核请求，也不会增加模型的总时间预算。
+
 SDK 负责 SSE 分帧、UTF-8 和 JSON 解码。适配层逐事件累计最终正文，只计数而不保存 `reasoning_content`；收到 choice 0 的 `finish_reason` 即结束，无需等待 `[DONE]`、usage 尾帧或 TCP EOF。只有正文非空且 `finish_reason=stop` 才计入有效审核；断流、缺少结束原因、截断、错误事件均不能变成有效证据。usage 只报告完成前已收到的值，不为等待统计延长审核。
 
 安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 的主模型改为 `ark-code-latest`；原有输出上限 65536、备用 DeepSeek 的 393216、6+5 分钟预算保持不变。A/C 的模型、参数和时间预算不变，包括 C 省略 `max_tokens`；不添加关闭思考的参数。

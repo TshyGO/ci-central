@@ -33,7 +33,13 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     if (!signal || !Number.isInteger(timeoutMs) || timeoutMs < 1) {
       const error = new Error('SDK request requires a deadline.'); error.code = 'REVIEW_INVALID_DEADLINE'; throw error;
     }
-    dispatcher = createDispatcher({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+    dispatcher = createDispatcher({
+      headersTimeout: timeoutMs, bodyTimeout: timeoutMs,
+      connectTimeout: Math.min(30000, timeoutMs),
+      // Cross-region endpoints can exceed Node's 250ms per-address default.
+      // Address selection is connection setup, not an extra inference attempt.
+      autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 1000,
+    });
     const client = new OpenAI({
       apiKey, baseURL, maxRetries: 0, timeout: timeoutMs, logLevel: 'off',
       fetch: async (url, init) => {
@@ -104,6 +110,9 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     sanitized.providerCode = safeCode(error.error?.code) || code;
     sanitized.providerType = safeCode(error.error?.type);
     timing.error_code = code || (signal?.aborted ? 'DEADLINE' : 'SDK_ERROR');
+    timing.error_name = safeCode(error.name) || 'unknown';
+    timing.provider_code = sanitized.providerCode;
+    timing.provider_type = sanitized.providerType;
     throw sanitized;
   } finally {
     clearInterval(progressTimer);

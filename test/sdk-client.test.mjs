@@ -35,11 +35,11 @@ async function fixture(t, implementation, route) {
     dispatcherOptions.push(options);
     return new Agent({ ...options, connect: { ca: certificate.cert } });
   } });
-  const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B' } = {}) => {
+  const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B', onProgress = (entry) => logs.push(entry) } = {}) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try { return await request({ apiKey: `test-only-${lane}`, baseURL: `https://127.0.0.1:${server.address().port}/v1/${lane}`,
-      payload, timeoutMs, signal: controller.signal, onProgress: (entry) => logs.push(entry) }); }
+      payload, timeoutMs, signal: controller.signal, onProgress }); }
     finally { clearTimeout(timer); }
   };
   return { invoke, calls, logs, dispatcherOptions };
@@ -195,6 +195,35 @@ for (const [name, implementation] of [
           return true;
         });
     }
+  });
+
+  test(`${name}: explicit Lane credentials cannot fall back to OpenAI environment defaults`, async (t) => {
+    const names = ['OPENAI_API_KEY', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID'];
+    const previous = names.map((name) => process.env[name]);
+    names.forEach((name) => { process.env[name] = 'test-only-unrelated-environment'; });
+    t.after(() => names.forEach((name, i) => {
+      if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i];
+    }));
+    for (const apiKey of [undefined, null, '', '  ', 17]) {
+      await assert.rejects(implementation.requestChatCompletion({ apiKey, baseURL: 'https://example.test/v1',
+        payload: basePayload, signal: new AbortController().signal, timeoutMs: 100 }),
+      (error) => error.code === 'REVIEW_INVALID_CREDENTIAL');
+    }
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(frame(delta('OK', 'stop')));
+    });
+    await f.invoke();
+    assert.equal(f.calls[0].headers.authorization, 'Bearer test-only-B');
+    assert.equal(f.calls[0].headers['openai-organization'], undefined);
+    assert.equal(f.calls[0].headers['openai-project'], undefined);
+  });
+
+  test(`${name}: diagnostic callback failures do not mask completion`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(frame(delta('OK', 'stop')));
+    });
+    const response = await f.invoke({ onProgress: () => { throw new Error('test-only logger failure'); } });
+    assert.equal(JSON.parse(await response.text()).choices[0].message.content, 'OK');
   });
 }
 

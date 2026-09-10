@@ -13,13 +13,14 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
   const started = Date.now();
   const timing = { transport: 'openai-sdk', headers_ms: null, first_event_ms: null, first_content_ms: null,
     elapsed_ms: 0, bytes: 0, content_chars: 0, reasoning_chars: 0, finish_reason: null, upstream: null };
+  const report = (entry) => { try { onProgress(entry); } catch { /* Diagnostics cannot alter review results. */ } };
   let stream;
   let dispatcher;
   let content = '';
   let usage;
   const progressTimer = setInterval(() => {
     timing.elapsed_ms = Date.now() - started;
-    onProgress({ ...timing, event: 'progress' });
+    report({ ...timing, event: 'progress' });
   }, 30000);
   progressTimer.unref();
   try {
@@ -33,6 +34,9 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     if (!signal || !Number.isInteger(timeoutMs) || timeoutMs < 1) {
       const error = new Error('SDK request requires a deadline.'); error.code = 'REVIEW_INVALID_DEADLINE'; throw error;
     }
+    if (typeof apiKey !== 'string' || !apiKey.trim()) {
+      const error = new Error('SDK request requires an explicit Lane key.'); error.code = 'REVIEW_INVALID_CREDENTIAL'; throw error;
+    }
     dispatcher = createDispatcher({
       headersTimeout: timeoutMs, bodyTimeout: timeoutMs,
       connectTimeout: Math.min(30000, timeoutMs),
@@ -41,12 +45,13 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
       autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 1000,
     });
     const client = new OpenAI({
-      apiKey, baseURL, maxRetries: 0, timeout: timeoutMs, logLevel: 'off',
+      apiKey, baseURL, organization: null, project: null,
+      maxRetries: 0, timeout: timeoutMs, logLevel: 'off',
       fetch: async (url, init) => {
         const response = await undiciFetch(url, { ...init, dispatcher, redirect: 'error' });
         timing.headers_ms = Date.now() - started;
         timing.status = response.status;
-        onProgress({ ...timing, event: 'headers' });
+        report({ ...timing, event: 'headers' });
         // Bound the raw bytes, including malformed/unframed SSE, before the SDK
         // decoder buffers them. Framing and JSON parsing remain the SDK's job.
         const bounded = response.body?.pipeThrough(new TransformStream({
@@ -87,8 +92,8 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
         }
       }
     }
-    signal.throwIfAborted();
     if (!timing.finish_reason) {
+      signal.throwIfAborted();
       const error = new Error('SDK stream ended without a finish_reason.');
       error.code = 'REVIEW_INCOMPLETE_STREAM';
       throw error;
@@ -121,7 +126,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     // and connections whose stream was never constructed.
     try { await dispatcher?.destroy(); } catch { timing.cleanup_error = 'DISPATCHER_DESTROY'; }
     timing.elapsed_ms = Date.now() - started;
-    onProgress({ ...timing, event: 'finished' });
+    report({ ...timing, event: 'finished' });
   }
 };
 }

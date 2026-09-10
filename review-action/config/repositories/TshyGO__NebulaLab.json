@@ -38,8 +38,8 @@
       "request_timeout_ms": 360000,
       "model_budget_ms": 360000,
       "primary": {
-        "id": "glm-5.3",
-        "label": "GLM-5.3",
+        "id": "ark-code-latest",
+        "label": "Ark Code Auto",
         "context_profile": "full",
         "max_output_tokens": 65536,
         "temperature": 0.2

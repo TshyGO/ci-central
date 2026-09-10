@@ -1,0 +1,20 @@
+{
+  "name": "ci-central-review",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build-sdk.mjs",
+    "test": "node test/review-config.test.mjs && node test/pr-review.test.mjs && node --test test/sdk-client.test.mjs"
+  },
+  "dependencies": {
+    "openai": "7.13.0",
+    "undici": "8.10.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "selfsigned": "5.5.0"
+  }
+}

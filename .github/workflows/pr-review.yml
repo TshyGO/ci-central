@@ -47,8 +47,7 @@ jobs:
     # the misconfiguration still fails loudly instead of silently running hosted.
     runs-on: ${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}
     # Backstop only. Repository and lane policy bound each model independently and lanes
-    # run in parallel. Lane B may spend up to 15 minutes on each model in its same-lane endpoint
-    # chain, while this cap still prevents an unbounded runner.
+    # run in parallel. Lane B is bounded to primary six minutes plus fallback five.
     timeout-minutes: 40
     permissions:
       contents: read
@@ -453,6 +452,7 @@ jobs:
             // cap for the single request, including reading its complete response body.
             const defaultRequestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
             const defaultModelBudgetMs = Number(reviewPolicy.model_budget_ms) || 360000;
+            const { requestChatCompletion } = require('./.ci-central/review-action/dist/sdk-client.js');
 
             // Some upstreams (e.g. MiniMax) inline their chain-of-thought into `content`
             // instead of `reasoning_content`. Never let that reach the PR comment.
@@ -473,7 +473,7 @@ jobs:
               const payload = {
                 model: model.id,
                 messages,
-                stream: false,
+                stream: true,
               };
               if (!model.omit_max_tokens) payload.max_tokens = model.max_output_tokens;
               if (Number.isFinite(model.temperature)) payload.temperature = model.temperature;
@@ -538,25 +538,33 @@ jobs:
               try {
                 const credentials = laneCredentials[lane.id];
                 const isGoogle = lane.protocol === 'google-generate-content';
-                const endpoint = isGoogle
-                  ? `${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`
-                  : `${credentials.baseUrl}/chat/completions`;
-                response = await fetch(endpoint, {
+                response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
                   method: 'POST',
                   redirect: 'error',
                   signal: controller.signal,
                   headers: {
-                    ...(isGoogle ? { 'x-goog-api-key': credentials.apiKey } : { authorization: `Bearer ${credentials.apiKey}` }),
+                    'x-goog-api-key': credentials.apiKey,
                     'content-type': 'application/json',
                     accept: 'application/json',
                     'user-agent': 'GitHubActions-AI-PR-Review',
                   },
-                  body: JSON.stringify(isGoogle ? googlePayload(model) : basePayload(model)),
+                  body: JSON.stringify(googlePayload(model)),
+                }) : await requestChatCompletion({
+                  apiKey: credentials.apiKey,
+                  baseURL: credentials.baseUrl,
+                  payload: basePayload(model),
+                  signal: controller.signal,
+                  timeoutMs: Math.min(requestTimeoutMs, modelBudgetMs),
+                  onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
                 });
                 responseText = await response.text();
               } catch (error) {
+                if (Number.isInteger(error?.status)) {
+                  response = { status: error.status, ok: false };
+                  responseText = JSON.stringify({ error: { code: error.providerCode, type: error.providerType } });
+                }
                 const code = error?.cause?.code || error?.code;
-                errorCode = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
+                errorCode = typeof code === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : '';
                 requestError = error?.name === 'AbortError'
                   ? 'AI endpoint request aborted (per-attempt timeout or model budget reached).'
                   : (error?.message || String(error));
@@ -606,15 +614,16 @@ jobs:
               const finishReason = choice?.finish_reason;
               const normalizedFinishReason = typeof finishReason === 'string' ? finishReason.toLowerCase() : '';
               const reasoning = message?.reasoning_content || '';
+              const reasoningLength = Number.isFinite(payload?.reasoning_chars) ? payload.reasoning_chars : reasoning.length;
               const content = stripThinking(message?.content);
               // Never publish provider reasoning as a review. An empty final response makes
               // the caller continue to its configured fallback instead.
               let review = content;
-              console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoning.length} usage=${JSON.stringify(payload?.usage)}`);
+              console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
               if (review && normalizedFinishReason === 'length') {
                 review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
               }
-              return { review, reasoningLength: reasoning.length, reasoningUnit: reasoning.length ? 'chars' : null, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+              return { review, reasoningLength, reasoningUnit: reasoningLength ? 'chars' : null, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
             }
 
             // Primary once, then the same-lane fallback once on failure; never retry either.

@@ -1,0 +1,3 @@
+# Minified dependency bundle can contain meaningful whitespace in string literals.
+# Review source/lockfile; CI rebuilds and byte-compares the deployed artifact.
+review-action/dist/sdk-client.js -diff linguist-generated=true

@@ -100,8 +100,16 @@ async function probe({ label, payload, timeoutMs, originalDeadline }, credential
         break;
       }
     }
-    stats.valid = stats.finish_reason === 'stop' && Boolean(content.trim()) && !/<think>/i.test(content);
+    if (!stats.finish_reason) {
+      controller.signal.throwIfAborted();
+      const error = new Error('No completion boundary'); error.code = 'INCOMPLETE_STREAM'; throw error;
+    }
+    stats.valid = stats.finish_reason === 'stop' && Boolean(content.trim()) && !/<\/?think\b/i.test(content);
     stats.final_sha256 = hash(content);
+    if (stats.valid && process.env.DIAG_MODE === 'B-original-long') {
+      fs.mkdirSync('diagnostic-output', { recursive: true });
+      fs.writeFileSync('diagnostic-output/final-review.md', content, { mode: 0o600 });
+    }
   } catch (error) {
     stats.valid = false;
     stats.error = controller.signal.aborted ? 'DEADLINE' : code(error.code) || code(error.name) || 'ERROR';
@@ -114,6 +122,10 @@ async function probe({ label, payload, timeoutMs, originalDeadline }, credential
     try { await dispatcher?.destroy(); } catch {}
     content = '';
     report('result');
+    if (process.env.DIAG_MODE === 'B-original-long') {
+      fs.mkdirSync('diagnostic-output', { recursive: true });
+      fs.writeFileSync('diagnostic-output/metrics.json', JSON.stringify({ ...stats, elapsed_ms: Date.now() - started }, null, 2), { mode: 0o600 });
+    }
   }
   return stats;
 }
@@ -125,7 +137,9 @@ async function run(github) {
   const credentials = { apiKey: process.env.DIAG_KEY, baseURL: process.env.DIAG_BASE };
   const payload = (model, extra = {}) => ({ model: model.id, messages: input.messages, stream: true,
     ...(model.omit_max_tokens ? {} : { max_tokens: model.max_output_tokens }), temperature: model.temperature, ...extra });
-  const cases = laneId === 'B' ? [
+  const cases = process.env.DIAG_MODE === 'B-original-long' && laneId === 'B' ? [
+    { label: 'B-auto-original-30min', payload: payload(lane.primary), timeoutMs: 1800000, originalDeadline: 360000 },
+  ] : laneId === 'B' ? [
     { label: 'B-auto-original-extended', payload: payload(lane.primary), timeoutMs: 600000, originalDeadline: 360000 },
     { label: 'B-auto-low', payload: payload(lane.primary, { reasoning_effort: 'low' }), timeoutMs: 360000 },
     { label: 'B-pro-low', payload: payload(lane.fallbacks[0], { reasoning_effort: 'low' }), timeoutMs: 300000 },

@@ -11,9 +11,9 @@ on:
       PR_AGENT_LANE_B_API_BASE:
         required: true
       PR_AGENT_LANE_C_KEY:
-        required: true
+        required: false
       PR_AGENT_LANE_C_API_BASE:
-        required: true
+        required: false
 permissions:
   contents: read
   pull-requests: read
@@ -25,11 +25,11 @@ jobs:
   probe:
     if: github.repository == 'TshyGO/NebulaLab' && github.actor == 'TshyGO' && github.ref == 'refs/heads/diagnostic/pr877-bc-20260912'
     runs-on: ai-pr-review
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        lane: [B, C]
+        lane: [B]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -40,9 +40,18 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
         env:
           DIAG_LANE: ${{ matrix.lane }}
+          DIAG_MODE: B-original-long
           DIAG_KEY: ${{ secrets[format('PR_AGENT_LANE_{0}_KEY', matrix.lane)] }}
           DIAG_BASE: ${{ secrets[format('PR_AGENT_LANE_{0}_API_BASE', matrix.lane)] }}
         with:
           script: |
             try { await require('./diagnostics/pr877-bc.bundle.cjs').run(github); }
             catch (error) { core.setFailed(`Diagnostic setup failed; status=${error.status || 'none'} name=${error.name || 'Error'}`); }
+      - name: Retain private final review and safe metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr877-b-original-long
+          path: diagnostic-output/
+          retention-days: 3
+          if-no-files-found: warn

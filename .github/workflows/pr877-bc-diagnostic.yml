@@ -1,19 +1,30 @@
 name: Temporary PR877 B-C diagnostic
 on:
-  push:
-    branches: [diagnostic/pr877-bc-20260912]
-    paths:
-      - diagnostics/**
-      - .github/workflows/pr877-bc-diagnostic.yml
+  workflow_call:
+    inputs:
+      central_sha:
+        required: true
+        type: string
+    secrets:
+      PR_AGENT_LANE_B_KEY:
+        required: true
+      PR_AGENT_LANE_B_API_BASE:
+        required: true
+      PR_AGENT_LANE_C_KEY:
+        required: true
+      PR_AGENT_LANE_C_API_BASE:
+        required: true
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
 concurrency:
   group: isolated-pr877-bc-diagnostic
   cancel-in-progress: false
 jobs:
   probe:
-    if: github.repository == 'TshyGO/ci-central' && github.actor == 'TshyGO'
-    runs-on: ubuntu-latest
+    if: github.repository == 'TshyGO/NebulaLab' && github.actor == 'TshyGO' && github.ref == 'refs/heads/diagnostic/pr877-bc-20260912'
+    runs-on: ai-pr-review
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -22,7 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: ${{ github.sha }}
+          repository: TshyGO/ci-central
+          ref: ${{ inputs.central_sha }}
           persist-credentials: false
       - name: Probe only the selected lane
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
@@ -32,4 +44,5 @@ jobs:
           DIAG_BASE: ${{ secrets[format('PR_AGENT_LANE_{0}_API_BASE', matrix.lane)] }}
         with:
           script: |
-            await require('./diagnostics/pr877-bc.bundle.cjs').run(github);
+            try { await require('./diagnostics/pr877-bc.bundle.cjs').run(github); }
+            catch (error) { core.setFailed(`Diagnostic setup failed; status=${error.status || 'none'} name=${error.name || 'Error'}`); }

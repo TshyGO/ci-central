@@ -1,0 +1,35 @@
+name: Temporary PR877 B-C diagnostic
+on:
+  push:
+    branches: [diagnostic/pr877-bc-20260912]
+    paths:
+      - diagnostics/**
+      - .github/workflows/pr877-bc-diagnostic.yml
+permissions:
+  contents: read
+concurrency:
+  group: isolated-pr877-bc-diagnostic
+  cancel-in-progress: false
+jobs:
+  probe:
+    if: github.repository == 'TshyGO/ci-central' && github.actor == 'TshyGO'
+    runs-on: ai-pr-review
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [B, C]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Probe only the selected lane
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          DIAG_LANE: ${{ matrix.lane }}
+          DIAG_KEY: ${{ secrets[format('PR_AGENT_LANE_{0}_KEY', matrix.lane)] }}
+          DIAG_BASE: ${{ secrets[format('PR_AGENT_LANE_{0}_API_BASE', matrix.lane)] }}
+        with:
+          script: |
+            await require('./diagnostics/pr877-bc.bundle.cjs').run(github);

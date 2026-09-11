@@ -13,7 +13,7 @@ concurrency:
 jobs:
   probe:
     if: github.repository == 'TshyGO/ci-central' && github.actor == 'TshyGO'
-    runs-on: ai-pr-review
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false

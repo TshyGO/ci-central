@@ -1,15 +1,17 @@
 'use strict';
 
 const OpenAI = require('openai').default;
-const { Agent, fetch: undiciFetch } = require('undici');
+const { Agent, ProxyAgent, fetch: undiciFetch } = require('undici');
 
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const safeCode = (value) => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value) ? value : undefined;
 
 // One SDK client per request: credentials, connection settings and cancellation
 // cannot bleed between lanes. Retry/fallback orchestration stays in the workflow.
-function createChatRequester({ createDispatcher = (options) => new Agent(options) } = {}) {
-return async function requestChatCompletion({ apiKey, baseURL, payload, signal, timeoutMs, onProgress = () => {} }) {
+function createChatRequester({ createDispatcher = (options) => new Agent(options),
+  createProxyDispatcher = (options) => new ProxyAgent(options) } = {}) {
+return async function requestChatCompletion({ apiKey, baseURL, payload, signal, timeoutMs,
+  protocol = 'openai-chat-completions', sessionId, proxyUrl, onProgress = () => {} }) {
   const started = Date.now();
   const timing = { transport: 'openai-sdk', headers_ms: null, first_event_ms: null, first_content_ms: null,
     elapsed_ms: 0, bytes: 0, content_chars: 0, reasoning_chars: 0, finish_reason: null, upstream: null };
@@ -37,15 +39,31 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     if (typeof apiKey !== 'string' || !apiKey.trim()) {
       const error = new Error('SDK request requires an explicit Lane key.'); error.code = 'REVIEW_INVALID_CREDENTIAL'; throw error;
     }
-    dispatcher = createDispatcher({
+    if (!['openai-chat-completions', 'openai-responses'].includes(protocol)) {
+      const error = new Error('Unsupported SDK protocol.'); error.code = 'REVIEW_INVALID_PROTOCOL'; throw error;
+    }
+    if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[A-Za-z0-9_.-]{1,120}$/.test(sessionId))) {
+      const error = new Error('Invalid coding session identifier.'); error.code = 'REVIEW_INVALID_SESSION'; throw error;
+    }
+    if (proxyUrl !== undefined) {
+      let proxy;
+      try { proxy = new URL(proxyUrl); } catch { /* reject below */ }
+      if (!proxy || !['http:', 'https:'].includes(proxy.protocol) || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
+        const error = new Error('Invalid explicit proxy.'); error.code = 'REVIEW_INVALID_PROXY'; throw error;
+      }
+    }
+    const connectionOptions = {
       headersTimeout: timeoutMs, bodyTimeout: timeoutMs,
       connectTimeout: Math.min(30000, timeoutMs),
       // Cross-region endpoints can exceed Node's 250ms per-address default.
       // Address selection is connection setup, not an extra inference attempt.
       autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 1000,
-    });
-    const client = new OpenAI({
-      apiKey, baseURL, organization: null, project: null,
+    };
+    dispatcher = proxyUrl === undefined ? createDispatcher(connectionOptions)
+      : createProxyDispatcher({ ...connectionOptions, uri: proxyUrl });
+    const options = {
+      apiKey, baseURL,
+      ...(sessionId ? { defaultHeaders: { 'user-agent': 'NebulaLab-CI-Review/1.0', 'x-opencode-session': sessionId } } : {}),
       maxRetries: 0, timeout: timeoutMs, logLevel: 'off',
       fetch: async (url, init) => {
         const response = await undiciFetch(url, { ...init, dispatcher, redirect: 'error' });
@@ -67,11 +85,47 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
         }));
         return new Response(bounded, { status: response.status, statusText: response.statusText, headers: response.headers });
       },
-    });
-    stream = await client.chat.completions.create({ ...payload, stream: true }, { signal, maxRetries: 0 });
+    };
+    const client = new OpenAI({ ...options, organization: null, project: null });
+    stream = protocol === 'openai-responses'
+      ? await client.responses.create({ ...payload, stream: true }, { signal, maxRetries: 0 })
+      : await client.chat.completions.create({ ...payload, stream: true }, { signal, maxRetries: 0 });
     for await (const event of stream) {
       signal.throwIfAborted();
       timing.first_event_ms ??= Date.now() - started;
+      if (protocol === 'openai-responses') {
+        timing.upstream = safeCode(event.response?.model) || timing.upstream;
+        usage = event.response?.usage || usage;
+        if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+          if (event.delta) timing.first_content_ms ??= Date.now() - started;
+          content += event.delta;
+          timing.content_chars = content.length;
+        }
+        if (event.type === 'response.reasoning_text.delta' && typeof event.delta === 'string') timing.reasoning_chars += event.delta.length;
+        if (event.type === 'response.completed' && event.response?.status === 'completed') {
+          const output = event.response.output;
+          if (Array.isArray(output)) {
+            content = output.filter((item) => item.type === 'message')
+              .flatMap((item) => Array.isArray(item.content) ? item.content : [])
+              .filter((part) => part.type === 'output_text' && typeof part.text === 'string')
+              .map((part) => part.text).join('\n');
+            if (content) timing.first_content_ms ??= Date.now() - started;
+            timing.content_chars = content.length;
+          }
+          timing.finish_reason = Array.isArray(output) && output.some((item) => item.type !== 'message' && item.type !== 'reasoning') ? 'tool_calls' : 'stop';
+          break;
+        }
+        if (event.type === 'response.incomplete') {
+          timing.finish_reason = event.response?.incomplete_details?.reason === 'max_output_tokens' ? 'length' : 'incomplete';
+          break;
+        }
+        if (event.type === 'response.failed' || event.type === 'error') {
+          const error = new Error('Responses stream failed.');
+          error.code = safeCode(event.response?.error?.code || event.code) || 'REVIEW_RESPONSE_FAILED';
+          throw error;
+        }
+        continue;
+      }
       timing.upstream = safeCode(event.model) || timing.upstream;
       usage = event.usage || usage;
       const choice = event.choices?.find((item) => item.index === 0);
@@ -81,7 +135,11 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
           content += choice.delta.content;
           timing.content_chars = content.length;
         }
-        if (typeof choice.delta?.reasoning_content === 'string') timing.reasoning_chars += choice.delta.reasoning_content.length;
+        // SenseNova uses `reasoning`; count either representation without storing it.
+        // Prefer the canonical field if a gateway duplicates both fields.
+        const reasoning = typeof choice.delta?.reasoning_content === 'string'
+          ? choice.delta.reasoning_content : choice.delta?.reasoning;
+        if (typeof reasoning === 'string') timing.reasoning_chars += reasoning.length;
         // Some compatible gateways send an empty finish_reason on ordinary
         // deltas. It is not a terminal event and must not truncate the review.
         if (typeof choice.finish_reason === 'string' && choice.finish_reason.trim()) {
@@ -114,6 +172,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     sanitized.status = Number.isInteger(error.status) ? error.status : undefined;
     sanitized.providerCode = safeCode(error.error?.code) || code;
     sanitized.providerType = safeCode(error.error?.type);
+    if (signal?.aborted) sanitized.code = 'REVIEW_DEADLINE';
     timing.error_code = code || (signal?.aborted ? 'DEADLINE' : 'SDK_ERROR');
     timing.error_name = safeCode(error.name) || 'unknown';
     timing.provider_code = sanitized.providerCode;

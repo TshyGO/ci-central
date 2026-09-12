@@ -26,10 +26,10 @@ for (const repository of repositories) {
   assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 1));
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['qwen3.8-max', 'ark-code-latest', 'deepseek-v4-flash']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'ark-code-latest', 'deepseek-v4-flash']);
   assert.equal(fromSource.lanes[1].provider, 'volcengine-ark-coding', `${repository} Lane B must use Volcengine Ark Coding`);
   assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'deepseek-v4-pro-ga-260813', `${repository} Lane B must use the Ark-hosted fallback`);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['qwen3.7-max', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite']);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['muse-spark-1.2-contributor', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite']);
   assert.ok(fromSource.lanes.every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined)), `${repository} active OpenAI-compatible lanes must not configure Google thinking`);
   assert.ok([fromSource.lanes[2].primary, ...fromSource.lanes[2].fallbacks].every((model) => model.omit_max_tokens === true), `${repository} SenseNova models must follow the provider request shape without max_tokens`);
@@ -59,8 +59,8 @@ for (const repository of repositories) {
     [65536, 393216],
     `${repository} Lane B must preserve the configured Auto output budget and Ark-hosted DeepSeek fallback ceiling`,
   );
-  assert.equal(config.lanes[1].request_timeout_ms, 360000, `${repository} Lane B request budget must bound the primary to six minutes`);
-  assert.equal(config.lanes[1].model_budget_ms, 360000, `${repository} Lane B model budget must bound the primary to six minutes`);
+  assert.equal(config.lanes[1].request_timeout_ms, 1800000, `${repository} Lane B preserves reasoning with a thirty-minute request ceiling`);
+  assert.equal(config.lanes[1].model_budget_ms, 1800000, `${repository} Lane B model budget matches its request ceiling`);
   // Lane C is advisory, so it can never fail a run: every second it spends after
   // the required lanes have settled is wall clock nobody can act on. That window
   // was measured on NebulaLab across ten pull requests. Lane C produced a usable
@@ -77,7 +77,7 @@ for (const repository of repositories) {
   const laneCBudgetMs = repository === 'TshyGO/NebulaLab' ? 180000 : 600000;
   assert.equal(config.lanes[2].request_timeout_ms, laneCBudgetMs, `${repository} Lane C request budget changed without a measurement behind it`);
   assert.equal(config.lanes[2].model_budget_ms, laneCBudgetMs, `${repository} Lane C model budget changed without a measurement behind it`);
-  assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 300000, `${repository} Lane B fallback must have its own five-minute ceiling`);
+  assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 1800000, `${repository} Lane B fallback preserves reasoning with its own thirty-minute ceiling`);
   // A/C budgets are deliberately unchanged even where advisory C can outlast B.
 }
 
@@ -107,10 +107,11 @@ for (const repository of repositories) {
 }
 
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
-assert.equal(nebula.lanes[0].provider, 'alibaba');
+assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'volcengine-ark-coding');
 assert.equal(nebula.lanes[2].provider, 'sensenova');
-assert.ok(nebula.lanes.every((lane) => lane.protocol === 'openai-chat-completions'));
+assert.equal(nebula.lanes[0].protocol, 'openai-responses');
+assert.ok(nebula.lanes.slice(1).every((lane) => lane.protocol === 'openai-chat-completions'));
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
 for (const loader of [source, bundled]) {

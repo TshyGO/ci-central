@@ -46,9 +46,9 @@ jobs:
     # Lane credentials on an unintended machine. The first step rejects the bad value so
     # the misconfiguration still fails loudly instead of silently running hosted.
     runs-on: ${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}
-    # Backstop only. Repository and lane policy bound each model independently and lanes
-    # run in parallel. Lane B is bounded to primary six minutes plus fallback five.
-    timeout-minutes: 40
+    # Backstop includes B primary + fallback (30 minutes each), setup and publication.
+    # Lanes publish independently; no reduction of model reasoning to meet deadlines.
+    timeout-minutes: 70
     permissions:
       contents: read
       issues: write
@@ -206,6 +206,9 @@ jobs:
               },
             };
             for (const lane of lanes) {
+              if (!['openai-chat-completions', 'openai-responses', 'google-generate-content'].includes(lane.protocol)) {
+                throw new Error(`Lane ${lane.id} protocol is not supported.`);
+              }
               if (!Array.isArray(lane.fallbacks)) {
                 throw new Error(`Lane ${lane.id} fallbacks must be an array.`);
               }
@@ -496,6 +499,11 @@ jobs:
               };
             }
 
+            function responsesPayload(model) {
+              const chat = basePayload(model);
+              return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false };
+            }
+
             function classifyFailure(response, responseText, requestError) {
               const status = response?.status;
               const rawText = `${responseText || ''}\n${requestError || ''}`;
@@ -537,6 +545,16 @@ jobs:
               let errorCode = '';
               try {
                 const credentials = laneCredentials[lane.id];
+                let proxyUrl;
+                if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
+                  proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || undefined;
+                  let proxy;
+                  try { proxy = new URL(proxyUrl); } catch { /* Reject without exposing credentials. */ }
+                  if (!proxy || proxy.protocol !== 'http:' || proxy.hostname !== '177.201.224.95' || proxy.port !== '13128'
+                      || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
+                    throw new Error('Lane A requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.');
+                  }
+                }
                 const isGoogle = lane.protocol === 'google-generate-content';
                 response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
                   method: 'POST',
@@ -552,7 +570,11 @@ jobs:
                 }) : await requestChatCompletion({
                   apiKey: credentials.apiKey,
                   baseURL: credentials.baseUrl,
-                  payload: basePayload(model),
+                  protocol: lane.protocol,
+                  proxyUrl,
+                  sessionId: lane.provider === 'opencode-go'
+                    ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}` : undefined,
+                  payload: lane.protocol === 'openai-responses' ? responsesPayload(model) : basePayload(model),
                   signal: controller.signal,
                   timeoutMs: Math.min(requestTimeoutMs, modelBudgetMs),
                   onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
@@ -566,7 +588,7 @@ jobs:
                 const code = error?.cause?.code || error?.code;
                 errorCode = typeof code === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : '';
                 requestError = error?.name === 'AbortError'
-                  ? 'AI endpoint request aborted (per-attempt timeout or model budget reached).'
+                  ? 'Local review deadline reached before a complete final response; this is not proof of an upstream outage.'
                   : (error?.message || String(error));
               } finally {
                 clearTimeout(timeout);

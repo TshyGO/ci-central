@@ -1,0 +1,62 @@
+name: Muse deployed-SDK full-review acceptance
+on:
+  workflow_call:
+    inputs:
+      central_sha:
+        required: true
+        type: string
+    secrets:
+      GO_KEY:
+        required: true
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+jobs:
+  probe:
+    if: github.repository == 'TshyGO/NebulaLab' && github.actor == 'TshyGO'
+    runs-on: ai-pr-review
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: TshyGO/ci-central
+          ref: ${{ inputs.central_sha }}
+          persist-credentials: false
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          GO_KEY: ${{ secrets.GO_KEY }}
+        with:
+          script: |
+            const fs=require('node:fs'); const crypto=require('node:crypto');
+            const owner='TshyGO',repo='NebulaLab',pullNumber=877;
+            const {data:pull}=await github.rest.pulls.get({owner,repo,pull_number:pullNumber});
+            const config=JSON.parse(fs.readFileSync('review-action/config/repositories/TshyGO__NebulaLab.json','utf8'));
+            const source=fs.readFileSync('.github/workflows/pr-review.yml','utf8').replace(/\r\n/g,'\n');
+            const start=source.indexOf('            const files = await github.paginate(github.rest.pulls.listFiles,');
+            const end=source.indexOf('            // Model ids are scoped to a lane',start);
+            if(start<0||end<start)throw new Error('Packer boundary changed');
+            const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+            const {system,user}=await new AsyncFunction('github','pull','owner','repo','pullNumber','reviewPolicy',source.slice(start,end)+'; return {system,user};')(github,pull,owner,repo,pullNumber,config.review_policy);
+            const input=[{role:'system',content:system},{role:'user',content:user}];
+            const proxy=process.env.https_proxy||process.env.HTTPS_PROXY;
+            if(!proxy)throw new Error('Original runner proxy missing');
+            const {requestChatCompletion}=require('./review-action/dist/sdk-client.js');
+            const lane=config.lanes[0];fs.mkdirSync('muse-acceptance',{recursive:true});
+            for(const model of [lane.primary,...lane.fallbacks]){
+              const started=Date.now();
+              try{
+                const result=await requestChatCompletion({apiKey:process.env.GO_KEY,baseURL:'https://opencode.ai/zen/go/v1',protocol:'openai-responses',sessionId:'TshyGO-NebulaLab-pr-877-lane-A',proxyUrl:proxy,
+                  payload:{model:model.id,input,max_output_tokens:model.max_output_tokens,store:false},timeoutMs:300000,signal:AbortSignal.timeout(300000),onProgress:p=>console.log(JSON.stringify({model:model.id,...p}))});
+                const data=JSON.parse(await result.text());const choice=data.choices[0];
+                fs.writeFileSync('muse-acceptance/'+model.id+'.md',choice.message.content,{mode:0o600});
+                console.log(JSON.stringify({result:true,model:model.id,head:pull.head.sha,input_hash:crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex'),chars:choice.message.content.length,finish:choice.finish_reason,elapsed_ms:Date.now()-started}));
+                if(choice.finish_reason!=='stop'||!choice.message.content.trim())core.setFailed('Incomplete review '+model.id);
+              }catch(e){console.log(JSON.stringify({result:false,model:model.id,error:e.code||e.name,http:e.status,elapsed_ms:Date.now()-started}));core.setFailed('No complete response '+model.id);}
+            }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: muse-full-acceptance
+          path: muse-acceptance/
+          retention-days: 3

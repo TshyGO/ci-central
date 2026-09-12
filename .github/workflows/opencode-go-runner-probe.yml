@@ -1,0 +1,32 @@
+name: Temporary OpenCode Go runner probe
+on:
+  workflow_call:
+    inputs:
+      central_sha:
+        required: true
+        type: string
+    secrets:
+      GO_SAVED_BASE:
+        required: false
+      GO_SAVED_KEY:
+        required: false
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.repository == 'TshyGO/NebulaLab' && github.actor == 'TshyGO' && github.ref == 'refs/heads/diagnostic/pr877-bc-20260912'
+    runs-on: ai-pr-review
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: TshyGO/ci-central
+          ref: ${{ inputs.central_sha }}
+          persist-credentials: false
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          GO_SAVED_BASE: ${{ secrets.GO_SAVED_BASE }}
+          GO_SAVED_KEY: ${{ secrets.GO_SAVED_KEY }}
+        with:
+          script: |
+            await require('./diagnostics/opencode-go.cjs')();

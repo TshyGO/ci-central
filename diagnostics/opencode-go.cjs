@@ -1,6 +1,7 @@
 'use strict';
 const { requestChatCompletion } = require('../review-action/dist/sdk-client.js');
 const BASE = 'https://opencode.ai/zen/go/v1';
+const codingHeaders = { 'user-agent': 'NebulaLab-CI-Review/1.0', 'x-opencode-session': 'nebula-go-synthetic-20260912' };
 const emit = (x) => console.log(JSON.stringify(x));
 const safeCode = (s) => typeof s === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(s) ? s : undefined;
 async function boundedBody(response) {
@@ -21,7 +22,7 @@ async function boundedBody(response) {
 async function jsonProbe(label, path, init, timeoutMs) {
   const started = Date.now();
   try {
-    const response = await fetch(BASE + path, { ...init, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetch(BASE + path, { ...init, headers: { ...init.headers, ...codingHeaders }, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
     let data;
     try { data = await boundedBody(response); } catch {}
     const error = data?.error;
@@ -69,5 +70,9 @@ module.exports = async function run() {
   await jsonProbe('qwen-anthropic-messages', '/messages', { method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({ model: 'qwen3.8-max', max_tokens: 2048,
+      messages: [{ role: 'user', content: 'Reply with exactly GO_RUNNER_OK, no other text.' }] }) }, 120000);
+  await jsonProbe('qwen37-anthropic-messages', '/messages', { method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model: 'qwen3.7-max', max_tokens: 2048,
       messages: [{ role: 'user', content: 'Reply with exactly GO_RUNNER_OK, no other text.' }] }) }, 120000);
 };

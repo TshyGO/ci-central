@@ -66,7 +66,7 @@ CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央�
 
 Muse Contributor 会允许供应商将提示词及回答用于训练，非 ZDR；仅在用户明确选择并在 Go 后台 opt-in 后启用。发送 `store:false` 不会撤销 Contributor 的训练许可。地区与数据政策拒绝保持诊断，不降级为批准。
 
-Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A 的固定 base 为 `https://opencode.ai/zen/go/v1`。自托管 runner 必须显式使用已有 HTTPS 代理，缺失时拒绝直连；SDK 使用独立 ProxyAgent，认证只发往代理。B/C 仍为原有直接 Agent，不继承 A 代理。GitHub 托管 runner 无代理时使用直接连接并接受供应商准入检查。
+Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A 的固定 base 为 `https://opencode.ai/zen/go/v1`。仅当 `RUNNER_ENVIRONMENT=github-hosted` 明确时使用直接连接（忽略 ambient proxy）并接受供应商准入检查；其他情况必须使用已批准的 VPS HTTP 代理 `177.201.224.95:13128`，缺失或地址不匹配时拒绝直连。SDK 使用独立 ProxyAgent，认证只发往代理。B/C 仍为原有直接 Agent，不继承 A 代理。
 
 VPS 的已有 Squid 只为 `opencode.ai` 配置 Mihomo parent 且 `never_direct`；GitHub 维持原路由。Mihomo 订阅更新、健康切换、故障不直连的服务器部署独立于本仓库，不保存节点、订阅或代理密码。
 
@@ -176,7 +176,7 @@ node --test ./test/sdk-client.test.mjs
 git diff --check
 ```
 
-`probe-provider.ps1` 会依据中央配置选择协议，对 OpenAI 兼容端点先读取 `/models` 再发极小 Chat Completions 请求；配置 `omit_max_tokens` 时按端点要求省略该字段。Google Lane 发送 `generateContent` 请求并带上配置的 thinking level。Google probe 预留 512 completion tokens，避免高思考模式把过小预算全部耗在私有 reasoning 而没有最终 `OK`。脚本不输出 Key。
+`probe-provider.ps1` 会依据中央配置选择协议，对 OpenAI 兼容端点先读取 `/models` 再发极小 Chat Completions 请求；配置 `omit_max_tokens` 时按端点要求省略该字段。Responses 使用 `/responses` 并校验 completed 正文。这个本地运维探针使用 PowerShell 网络环境，不代表自托管 runner 的专用代理路径；生产验收必须用固定 SDK 在原 runner 上执行。Google Lane 发送 `generateContent` 请求并带上配置的 thinking level。Google probe 预留 512 completion tokens，避免高思考模式把过小预算全部耗在私有 reasoning 而没有最终 `OK`。脚本不输出 Key。
 
 Gemini thinking 字段以 Google 官方 [`generateContent` API reference](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Gemini thinking guide](https://ai.google.dev/gemini-api/docs/thinking) 为准；不要同时配置 legacy `thinkingBudget` 与 `thinkingLevel`。
 

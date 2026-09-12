@@ -545,10 +545,15 @@ jobs:
               let errorCode = '';
               try {
                 const credentials = laneCredentials[lane.id];
-                const proxyUrl = lane.provider === 'opencode-go'
-                  ? process.env.https_proxy || process.env.HTTPS_PROXY || undefined : undefined;
-                if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT === 'self-hosted' && !proxyUrl) {
-                  throw new Error('Lane A requires the configured self-hosted runner proxy; refusing direct fallback.');
+                let proxyUrl;
+                if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
+                  proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || undefined;
+                  let proxy;
+                  try { proxy = new URL(proxyUrl); } catch { /* Reject without exposing credentials. */ }
+                  if (!proxy || proxy.protocol !== 'http:' || proxy.hostname !== '177.201.224.95' || proxy.port !== '13128'
+                      || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
+                    throw new Error('Lane A requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.');
+                  }
                 }
                 const isGoogle = lane.protocol === 'google-generate-content';
                 response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {

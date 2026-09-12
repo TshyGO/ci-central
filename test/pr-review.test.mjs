@@ -314,7 +314,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === 'c4b2ce1d62fe189721f9ab158273e5d9958c552a9fd0a94f0d1daeab80c44937';
+    && sha256(review) === 'c19e0369c2d16ff63d0a4ba3105ab87c142daee041b69205f924e3e1467169db';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -428,7 +428,7 @@ async function scenario(route, overrides = {}, options = {}) {
         body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl, headers: { authorization: `Bearer ${apiKey}`, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) },
       }) };
     };
-    await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
+    await runScript(github, options.context || context, { env: { RUNNER_ENVIRONMENT: 'github-hosted', ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
   } catch (caught) {
     error = caught;
   }
@@ -803,14 +803,22 @@ check('protocol and credentials come from lanes', r.captured.find(({ lane }) => 
   && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
-r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://proxy.example:13128' });
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
 check('only Go Lane A uses the explicit runner proxy and stable coding session',
-  !r.error && r.captured.find(c => c.lane === 'A')?.proxy === 'http://proxy.example:13128'
+  !r.error && r.captured.find(c => c.lane === 'A')?.proxy === 'http://177.201.224.95:13128'
   && r.captured.filter(c => c.lane !== 'A').every(c => c.proxy === undefined)
   && Boolean(r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session']));
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: '', HTTPS_PROXY: '' });
 check('missing self-hosted Go proxy cannot silently become a direct request',
   !r.captured.some(c => c.lane === 'A') && r.posted.some(b => b.includes('lane-A') && b.includes('status=diagnostic')));
+for (const runtime of ['', 'custom-runner']) {
+  r = await scenario(healthy, { RUNNER_ENVIRONMENT: runtime, https_proxy: '', HTTPS_PROXY: '' });
+  check(`unknown runtime ${runtime || 'missing'} cannot bypass the Go proxy requirement`, !r.captured.some(c => c.lane === 'A'));
+}
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://unapproved.example:13128' });
+check('self-hosted Go rejects an unapproved proxy destination', !r.captured.some(c => c.lane === 'A'));
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'github-hosted', https_proxy: 'http://unapproved.example:13128' });
+check('explicit GitHub-hosted runtime ignores ambient proxy for Go', !r.error && r.captured.every(c => c.proxy === undefined));
 
 const overriddenConfig = structuredClone(centralConfig);
 overriddenConfig.lanes[0].primary.max_output_tokens = 8192;

@@ -42,6 +42,6 @@ jobs:
                 let data; try { data = JSON.parse(raw); } catch {}
                 const text = data?.output?.filter(x=>x.type==='message').flatMap(x=>x.content||[]).filter(x=>x.type==='output_text').map(x=>x.text).join('\n') || data?.output_text || '';
                 const errorCode = data?.error?.code || data?.error?.type || data?.name;
-                console.log(JSON.stringify({model,http:response.status,elapsed_ms:Date.now()-start,status:data?.status,code:typeof errorCode==='string'&&/^[A-Za-z0-9_.-]{1,80}$/.test(errorCode)?errorCode:undefined,region_rejected:!response.ok&&/region|geograph|country|location/i.test(raw),chars:text.length,synthetic_review:text.slice(0,3500)}));
+                console.log(JSON.stringify({model,http:response.status,elapsed_ms:Date.now()-start,status:data?.status,code:typeof errorCode==='string'&&/^[A-Za-z0-9_.-]{1,80}$/.test(errorCode)?errorCode:undefined,policy_message:errorCode==='DataPolicyError'?String(data?.error?.message||data?.message||'').replaceAll(process.env.GO_KEY,'[redacted]').slice(0,700):undefined,region_rejected:!response.ok&&/region|geograph|country|location/i.test(raw),chars:text.length,synthetic_review:text.slice(0,3500)}));
               } catch (e) { console.log(JSON.stringify({model,elapsed_ms:Date.now()-start,error:e.name})); }
             }

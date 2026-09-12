@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:https';
+import { createServer as createProxyServer } from 'node:http';
+import { connect } from 'node:net';
 import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import selfsigned from 'selfsigned';
-import { Agent } from 'undici';
+import { Agent, ProxyAgent } from 'undici';
 
 const require = createRequire(import.meta.url);
 const certificate = await selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
@@ -35,11 +37,11 @@ async function fixture(t, implementation, route) {
     dispatcherOptions.push(options);
     return new Agent({ ...options, connect: { ca: certificate.cert } });
   } });
-  const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B', onProgress = (entry) => logs.push(entry) } = {}) => {
+  const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B', protocol, sessionId, onProgress = (entry) => logs.push(entry) } = {}) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try { return await request({ apiKey: `test-only-${lane}`, baseURL: `https://127.0.0.1:${server.address().port}/v1/${lane}`,
-      payload, timeoutMs, signal: controller.signal, onProgress }); }
+      payload, timeoutMs, protocol, sessionId, signal: controller.signal, onProgress }); }
     finally { clearTimeout(timer); }
   };
   return { invoke, calls, logs, dispatcherOptions };
@@ -49,6 +51,88 @@ for (const [name, implementation] of [
   ['source', require('../review-action/src/sdk-client.js')],
   ['bundled', require('../review-action/dist/sdk-client.js')],
 ]) {
+  for (const rejectProxy of [false, true]) {
+    test(`${name}: explicit authenticated proxy ${rejectProxy ? 'failure never falls back direct' : 'tunnels TLS without leaking proxy credentials'}`, async (t) => {
+      const calls=[], connections=[], sockets=new Set();
+      const target=createServer({key:certificate.private,cert:certificate.cert},(req,res)=>{
+        calls.push(req.headers); res.writeHead(200,{'content-type':'text/event-stream'}); res.end(frame(delta('OK','stop')));
+      });
+      target.listen(0,'127.0.0.1'); await once(target,'listening');
+      const proxy=createProxyServer();
+      proxy.on('connect',(req,socket,head)=>{
+        connections.push(req.headers);sockets.add(socket);socket.on('error',()=>{});
+        if(rejectProxy){socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n');return;}
+        const upstream=connect(target.address().port,'127.0.0.1',()=>{
+          socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)upstream.write(head);socket.pipe(upstream);upstream.pipe(socket);
+        });sockets.add(upstream);upstream.on('error',()=>socket.destroy());
+      });
+      proxy.listen(0,'127.0.0.1');await once(proxy,'listening');
+      t.after(()=>{for(const s of sockets)s.destroy();target.closeAllConnections();target.close();proxy.close();});
+      let directCalls=0;const logs=[];
+      const request=implementation.createChatRequester({createDispatcher:()=>{directCalls++;throw new Error('direct forbidden');},
+        createProxyDispatcher:(options)=>new ProxyAgent({...options,requestTls:{ca:certificate.cert}})});
+      const promise=request({apiKey:'model-test-key',baseURL:`https://127.0.0.1:${target.address().port}/v1`,payload:basePayload,
+        timeoutMs:2000,signal:AbortSignal.timeout(2000),proxyUrl:`http://proxy-user:proxy-password@127.0.0.1:${proxy.address().port}`,onProgress:p=>logs.push(p)});
+      if(rejectProxy)await assert.rejects(promise);else assert.equal(JSON.parse(await (await promise).text()).choices[0].message.content,'OK');
+      assert.equal(directCalls,0);assert.equal(connections.length,1);assert.equal(calls.length,rejectProxy?0:1);
+      assert.equal(connections[0]['proxy-authorization'],'Basic '+Buffer.from('proxy-user:proxy-password').toString('base64'));
+      if(!rejectProxy){assert.equal(calls[0]['proxy-authorization'],undefined);assert.equal(calls[0].authorization,'Bearer model-test-key');}
+      assert.ok(!JSON.stringify(logs).includes('proxy-password'));
+    });
+  }
+  test(`${name}: SenseNova reasoning alias is counted but never published`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame(delta('', null, { reasoning: 'PRIVATE' })));
+      res.write(frame(delta('', null, { reasoning_content: 'CANONICAL', reasoning: 'DUPLICATE' })));
+      res.end(frame(delta('final review', 'stop')));
+    });
+    const result = JSON.parse(await (await f.invoke()).text());
+    assert.equal(result.reasoning_chars, 16);
+    assert.equal(result.choices[0].message.content, 'final review');
+    assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE'));
+  });
+  test(`${name}: Responses uses final text only, coding headers and completion without EOF`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame({ type: 'response.reasoning_text.delta', delta: 'PRIVATE THOUGHT' }));
+      res.write(frame({ type: 'response.output_text.delta', delta: '中文审核' }));
+      res.write(frame({ type: 'response.completed', response: { status: 'completed', model: 'muse-spark-1.3-contributor',
+        output: [{ type: 'reasoning', summary: [{ text: 'PRIVATE THOUGHT' }] },
+          { type: 'message', content: [{ type: 'output_text', text: '中文审核' }] }], usage: { input_tokens: 20 } } }));
+    });
+    const result = JSON.parse(await (await f.invoke({ protocol: 'openai-responses', sessionId: 'repo-pr-877-lane-A',
+      payload: { model: 'muse-spark-1.3-contributor', input: 'synthetic code', max_output_tokens: 16384, store: false } })).text());
+    assert.equal(result.choices[0].message.content, '中文审核');
+    assert.equal(result.choices[0].finish_reason, 'stop');
+    assert.equal(result.reasoning_chars, 15);
+    assert.equal(result.usage.input_tokens, 20);
+    assert.equal(f.calls[0].url, '/v1/B/responses');
+    assert.equal(f.calls[0].headers.authorization, 'Bearer test-only-B');
+    assert.equal(f.calls[0].headers['x-opencode-session'], 'repo-pr-877-lane-A');
+    assert.equal(f.calls[0].headers['user-agent'], 'NebulaLab-CI-Review/1.0');
+    assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE THOUGHT'));
+  });
+  for (const mode of ['incomplete', 'tool', 'missing', 'failed', 'error', 'wrong_status']) {
+    test(`${name}: Responses ${mode} cannot become a valid complete review`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        const event = mode === 'error' ? { type: 'error', code: 'upstream_error', message: 'PRIVATE ERROR' }
+          : mode === 'failed' ? { type: 'response.failed', response: { error: { code: 'upstream_error', message: 'PRIVATE ERROR' } } }
+          : mode === 'incomplete' ? { type: 'response.incomplete', response: { incomplete_details: { reason: 'max_output_tokens' } } }
+          : mode === 'tool' ? { type: 'response.completed', response: { status: 'completed', output: [{ type: 'function_call' }] } }
+          : mode === 'wrong_status' ? { type: 'response.completed', response: { status: 'in_progress' } }
+          : { type: 'response.output_text.delta', delta: 'partial' };
+        res.end(frame(event));
+      });
+      if (['tool','incomplete'].includes(mode)) {
+        const result=JSON.parse(await (await f.invoke({ protocol: 'openai-responses' })).text());
+        assert.notEqual(result.choices[0].finish_reason, 'stop');
+      } else await assert.rejects(f.invoke({ protocol: 'openai-responses' }));
+      assert.equal(f.calls.length, 1);
+      assert.ok(!JSON.stringify(f.logs).includes('PRIVATE ERROR'));
+    });
+  }
   test(`${name}: real TLS + SDK SSE, split UTF-8, finish without DONE/EOF`, async (t) => {
     const f = await fixture(t, implementation, async (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });

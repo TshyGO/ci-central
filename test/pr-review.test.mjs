@@ -80,7 +80,7 @@ function workflowExecutionContract(text) {
   if (jobStart < 0 || !job.valid || !exactObject(job.mapping, {
     concurrency: '',
     'runs-on': "${{ inputs.runner_tier == 'review' && 'ai-pr-review' || inputs.runner_tier == 'build' && 'nebulalab-build' || 'ubuntu-latest' }}",
-    'timeout-minutes': '40',
+    'timeout-minutes': '70',
     permissions: '',
     steps: '',
   })) return false;
@@ -314,7 +314,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === 'e69a553444fac841d6cfd944a7cbbe8517443c438f4fbe173ab116d7aadd8d01';
+    && sha256(review) === 'c4b2ce1d62fe189721f9ab158273e5d9958c552a9fd0a94f0d1daeab80c44937';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -414,7 +414,7 @@ async function scenario(route, overrides = {}, options = {}) {
     const lane = laneForUrl(url);
     const match = /\/models\/([^/:]+):generateContent$/.exec(url);
     const model = match ? decodeURIComponent(match[1]) : body.model;
-    const call = { lane, model, body, headers: request.headers, url, signal: request.signal, redirect: request.redirect };
+    const call = { lane, model, body, headers: request.headers, url, signal: request.signal, redirect: request.redirect, proxy: request.requestProxy };
     captured.push(call);
     return route(call, { posted, logs });
   };
@@ -424,8 +424,8 @@ async function scenario(route, overrides = {}, options = {}) {
     // actual bundled SDK against real socket/SSE responses separately.
     const requireSdk = (name) => {
       if (name !== './.ci-central/review-action/dist/sdk-client.js') throw new Error('Unexpected workflow require');
-      return { requestChatCompletion: ({ apiKey, baseURL, payload, signal }) => fetch(`${baseURL}/chat/completions`, {
-        body: JSON.stringify(payload), signal, redirect: 'error', headers: { authorization: `Bearer ${apiKey}` },
+      return { requestChatCompletion: ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => fetch(`${baseURL}/${protocol === 'openai-responses' ? 'responses' : 'chat/completions'}`, {
+        body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl, headers: { authorization: `Bearer ${apiKey}`, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) },
       }) };
     };
     await runScript(github, options.context || context, { env: { ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
@@ -659,19 +659,19 @@ check('central repository self-caller exercises the workflow from its own PR rev
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
   && workflowText.includes('cancel-in-progress: true')
-  && workflowText.includes('timeout-minutes: 40'));
+  && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:qwen3.8-max,B:ark-code-latest,C:deepseek-v4-flash');
-check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['qwen3.7-max', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite'].includes(model)));
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:ark-code-latest,C:deepseek-v4-flash');
+check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
-check('all active OpenAI-compatible lanes receive the repository review prompt',
-  healthyLaneA?.messages[0].content === centralConfig.review_policy.system_prompt
+check('all active protocols receive the repository review prompt',
+  healthyLaneA?.input[0].content === centralConfig.review_policy.system_prompt
   && healthyLaneB?.messages[0].content === centralConfig.review_policy.system_prompt
   && healthyLaneC?.messages[0].content === centralConfig.review_policy.system_prompt
-  && !healthyLaneA?.messages[0].content.includes('two independent internal review passes')
+  && !healthyLaneA?.input[0].content.includes('two independent internal review passes')
   && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
   && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
 check('Lane C uses OpenAI Chat Completions without Google thinking fields',
@@ -791,31 +791,40 @@ check('finish reasons are normalized across provider casing', r.error === undefi
 
 r = await scenario(healthy);
 check('full-context primaries preserve input while SenseNova omits only max_tokens',
-  r.captured.every(({ body }) => body.messages[1].content.includes('Changed files and patches:'))
-  && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 16384
+  r.captured.every(({ body }) => (body.input || body.messages)[1].content.includes('Changed files and patches:'))
+  && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 16384
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 
-check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/chat/completions')
+check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.url === 'https://lane-b.example.test/v1/chat/completions'
   && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
   && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://proxy.example:13128' });
+check('only Go Lane A uses the explicit runner proxy and stable coding session',
+  !r.error && r.captured.find(c => c.lane === 'A')?.proxy === 'http://proxy.example:13128'
+  && r.captured.filter(c => c.lane !== 'A').every(c => c.proxy === undefined)
+  && Boolean(r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session']));
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: '', HTTPS_PROXY: '' });
+check('missing self-hosted Go proxy cannot silently become a direct request',
+  !r.captured.some(c => c.lane === 'A') && r.posted.some(b => b.includes('lane-A') && b.includes('status=diagnostic')));
+
 const overriddenConfig = structuredClone(centralConfig);
 overriddenConfig.lanes[0].primary.max_output_tokens = 8192;
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig) });
 check('repository configuration supplied through the environment remains authoritative', r.error === undefined
-  && r.captured.find(({ lane }) => lane === 'A')?.body.max_tokens === 8192
+  && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 8192
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
 
-r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(503, '{"error":"unavailable"}') : healthy(call));
-check('Lane A uses Qwen3.7-Max only after one failed Qwen3.8-Max request', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 1 && r.captured.filter(({ model }) => model === 'qwen3.7-max').length === 1);
-const qwenFallback = r.captured.find(({ model }) => model === 'qwen3.7-max')?.body;
-check('Qwen3.7-Max fallback uses the full review contract', qwenFallback?.max_tokens === 16384 && qwenFallback?.temperature === 0.2 && qwenFallback.messages[1].content.includes('Changed files and patches:'));
-check('Qwen3.7-Max still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('qwen3.8-max unavailable -> served by qwen3.7-max')));
+r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('Lane A uses Muse 1.2 only after one failed Muse 1.3 request', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 1 && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1);
+const qwenFallback = r.captured.find(({ model }) => model === 'muse-spark-1.2-contributor')?.body;
+check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 16384 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
+check('Muse 1.2 still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor')));
 
 r = await scenario((call) => call.lane === 'B' && call.model === 'ark-code-latest' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back only to its Ark-hosted DeepSeek model',
@@ -835,7 +844,7 @@ check('Lane C falls back only to SenseNova 6.8 Flash Lite after one failed DeepS
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
-  && r.captured.some(({ model }) => model === 'qwen3.7-max') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
+  && r.captured.some(({ model }) => model === 'muse-spark-1.2-contributor') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
 // The case the quorum exists for. A provider's quota is exhausted for days, not
 // seconds, so under the old all-required rule every pull request stayed red until it
 // reset - while two other lanes had published complete reviews the whole time.
@@ -846,22 +855,22 @@ check('a quota failure on one lane publishes its diagnostic without failing the 
 
 r = await scenario((call) => { if (call.lane === 'A') throw new Error('fetch failed'); return healthy(call); });
 check('network failures try primary and fallback exactly once', r.captured.filter(({ lane }) => lane === 'A').length === 2
-  && r.captured.some(({ model }) => model === 'qwen3.7-max') && r.posted.some((body) => body.includes('one attempt per configured model')));
+  && r.captured.some(({ model }) => model === 'muse-spark-1.2-contributor') && r.posted.some((body) => body.includes('one attempt per configured model')));
 
-r = await scenario((call) => call.model === 'qwen3.8-max' && 'temperature' in call.body
+r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' && 'store' in call.body
   ? reply(400, '{"error":{"message":"Extra inputs are not permitted, field: \'temperature\'"}}') : healthy(call));
-const repairedQwen = r.captured.filter(({ model }) => model === 'qwen3.8-max').map(({ body }) => body);
+const repairedQwen = r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').map(({ body }) => body);
 check('optional-field rejection never reissues the same model request', repairedQwen.length === 1
-  && repairedQwen[0].temperature === 0.2 && r.captured.some((call) => call.model === 'qwen3.7-max'));
+  && repairedQwen[0].store === false && r.captured.some((call) => call.model === 'muse-spark-1.2-contributor'));
 
-r = await scenario((call) => call.model === 'qwen3.8-max' ? reply(200, chatResult(call.model, '')) : healthy(call));
-check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'qwen3.7-max') && !r.posted.some((body) => body.includes('private thinking')));
+r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(200, chatResult(call.model, '')) : healthy(call));
+check('empty final content advances to fallback without publishing reasoning', r.captured.some(({ model }) => model === 'muse-spark-1.2-contributor') && !r.posted.some((body) => body.includes('private thinking')));
 
 r = await scenario((call) => call.lane === 'A'
   ? reply(200, chatResult(call.model, '# incomplete', { finish: 'LENGTH' }))
   : healthy(call));
 check('truncated output is published as partial and the other two lanes carry the quorum', !r.error
-  && r.captured.some(({ model }) => model === 'qwen3.7-max')
+  && r.captured.some(({ model }) => model === 'muse-spark-1.2-contributor')
   && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial') && body.includes('max_tokens'))
   && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
 
@@ -875,12 +884,12 @@ check('a partial review does not count toward the quorum', /1 of 3 lanes/.test(r
   && r.posted.some((body) => body.includes('lane-A') && body.includes('status=partial')));
 
 const sameModelConfig = structuredClone(centralConfig);
-sameModelConfig.lanes[1].primary = { ...sameModelConfig.lanes[1].primary, id: 'qwen3.8-max', label: 'Qwen via Lane B' };
+sameModelConfig.lanes[1].primary = { ...sameModelConfig.lanes[1].primary, id: 'muse-spark-1.3-contributor', label: 'Qwen via Lane B' };
 sameModelConfig.lanes[1].fallbacks = [];
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(sameModelConfig) });
-check('identical model ids on different providers remain lane-scoped', r.captured.filter(({ model }) => model === 'qwen3.8-max').length === 2
-  && r.captured.some(({ lane, model, headers }) => lane === 'A' && model === 'qwen3.8-max' && headers.authorization === 'Bearer lane-a-key')
-  && r.captured.some(({ lane, model, headers }) => lane === 'B' && model === 'qwen3.8-max' && headers.authorization === 'Bearer lane-b-key'));
+check('identical model ids on different providers remain lane-scoped', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 2
+  && r.captured.some(({ lane, model, headers }) => lane === 'A' && model === 'muse-spark-1.3-contributor' && headers.authorization === 'Bearer lane-a-key')
+  && r.captured.some(({ lane, model, headers }) => lane === 'B' && model === 'muse-spark-1.3-contributor' && headers.authorization === 'Bearer lane-b-key'));
 
 const protocolConfig = structuredClone(centralConfig);
 protocolConfig.lanes[1].primary = { ...protocolConfig.lanes[1].primary, id: 'gemini-3.7-flash', label: 'Gemini via OpenAI protocol' };
@@ -1066,20 +1075,20 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
 
 
 r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call));
-check('B primary gets six minutes and fallback gets five, without changing A/C deadlines',
-  !r.error && r.timeouts.join(',') === '300000,360000,180000,300000');
+check('B primary and fallback each get thirty minutes without changing A/C deadlines',
+  !r.error && r.timeouts.join(',') === '300000,1800000,180000,1800000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
 r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
-  r.timeouts.join(',') === '300000,360000,180000,360000');
+  r.timeouts.join(',') === '300000,1800000,180000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
-cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 900000;
+cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
 r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
-  r.timeouts.join(',') === '300000,360000,180000,360000');
+  r.timeouts.join(',') === '300000,1800000,180000,1800000');
 for (const invalid of [0, -1, 1.5, '300000', null]) {
   const config = structuredClone(centralConfig);
   config.lanes[1].fallbacks[0].request_timeout_ms = invalid;

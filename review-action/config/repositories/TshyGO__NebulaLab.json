@@ -12,22 +12,20 @@
   "lanes": [
     {
       "id": "A",
-      "provider": "alibaba",
-      "protocol": "openai-chat-completions",
+      "provider": "opencode-go",
+      "protocol": "openai-responses",
       "primary": {
-        "id": "qwen3.8-max",
-        "label": "Qwen3.8-Max",
+        "id": "muse-spark-1.3-contributor",
+        "label": "Muse Spark 1.3 Contributor",
         "context_profile": "full",
-        "max_output_tokens": 16384,
-        "temperature": 0.2
+        "max_output_tokens": 16384
       },
       "fallbacks": [
         {
-          "id": "qwen3.7-max",
-          "label": "Qwen3.7-Max",
+          "id": "muse-spark-1.2-contributor",
+          "label": "Muse Spark 1.2 Contributor",
           "context_profile": "full",
-          "max_output_tokens": 16384,
-          "temperature": 0.2
+          "max_output_tokens": 16384
         }
       ]
     },
@@ -35,8 +33,8 @@
       "id": "B",
       "provider": "volcengine-ark-coding",
       "protocol": "openai-chat-completions",
-      "request_timeout_ms": 360000,
-      "model_budget_ms": 360000,
+      "request_timeout_ms": 1800000,
+      "model_budget_ms": 1800000,
       "primary": {
         "id": "ark-code-latest",
         "label": "Ark Code Auto",
@@ -47,7 +45,7 @@
       "fallbacks": [
         {
           "id": "deepseek-v4-pro-ga-260813",
-          "request_timeout_ms": 300000,
+          "request_timeout_ms": 1800000,
           "label": "DeepSeek-V4-Pro",
           "context_profile": "full",
           "max_output_tokens": 393216,

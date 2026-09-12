@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const ALLOWED_PROTOCOLS = new Set(['openai-chat-completions', 'google-generate-content']);
+const ALLOWED_PROTOCOLS = new Set(['openai-chat-completions', 'openai-responses', 'google-generate-content']);
 const ALLOWED_LANES = new Set(['A', 'B', 'C']);
 
 function configFileName(repository) {

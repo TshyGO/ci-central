@@ -58,6 +58,16 @@ try {
             Write-Host "Lane $Lane model $model probe succeeded."
         }
     }
+    elseif ($laneConfig.protocol -eq 'openai-responses') {
+        $headers = @{ Authorization = "Bearer $key"; 'User-Agent' = 'NebulaLab-CI-Review/1.0'; 'x-opencode-session' = 'central-provider-probe' }
+        foreach ($modelConfig in $models) {
+            $request = @{ model = $modelConfig.id; max_output_tokens = 2048; store = $false; input = 'Reply with OK.' }
+            $result = Invoke-RestMethod -Method Post -Uri "$base/responses" -Headers $headers -ContentType 'application/json' -Body ($request | ConvertTo-Json -Depth 6) -TimeoutSec 120
+            $final = @($result.output | Where-Object type -EQ 'message' | ForEach-Object content | Where-Object type -EQ 'output_text' | ForEach-Object text) -join "`n"
+            if ([string]::IsNullOrWhiteSpace($final) -or $result.status -ne 'completed') { throw "Probe returned no complete final content for $($modelConfig.id)." }
+            Write-Host "Lane $Lane model $($modelConfig.id) probe succeeded."
+        }
+    }
     elseif ($laneConfig.protocol -eq 'google-generate-content') {
         $headers = @{ 'x-goog-api-key' = $key }
         foreach ($modelConfig in $models) {

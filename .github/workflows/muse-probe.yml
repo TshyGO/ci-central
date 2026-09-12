@@ -18,15 +18,27 @@ jobs:
         with:
           script: |
             const input = 'Review this synthetic code in Chinese. State the security bug and a concrete fix. GET /invoices/:id: const row=await db.invoice.findUnique({where:{id:req.params.id}}); return res.json(row); Authentication sets req.user.tenantId but no other authorization is performed. Do not call tools.';
-            for (const model of ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor']) {
+            const { spawnSync } = require('node:child_process');
+            const proxy = process.env.https_proxy || process.env.HTTPS_PROXY;
+            const target = new URL(proxy || 'http://invalid');
+            if (target.hostname !== '177.201.224.95' || target.port !== '13128') throw new Error('Expected existing VPS proxy not configured');
+            const transfer = (url, body) => {
+              let config = `url = ${JSON.stringify(url)}\nproxy = ${JSON.stringify(proxy)}\nsilent\nshow-error\nmax-time = 150\nwrite-out = "\\n%{http_code}"\n`;
+              if (body) config += `header = ${JSON.stringify('Authorization: Bearer '+process.env.GO_KEY)}\nheader = "Content-Type: application/json"\nheader = "User-Agent: NebulaLab-CI-Review/1.0"\nheader = "x-opencode-session: nebula-muse-proxy-synthetic-20260912"\ndata = ${JSON.stringify(JSON.stringify(body))}\n`;
+              const r = spawnSync('curl',['--config','-'],{input:config,encoding:'utf8',timeout:160000,maxBuffer:1048576});
+              const split=(r.stdout||'').lastIndexOf('\n');
+              return {status:Number((r.stdout||'').slice(split+1)),raw:(r.stdout||'').slice(0,split),exit:r.status};
+            };
+            const githubCheck=transfer('https://api.github.com/rate_limit');
+            console.log(JSON.stringify({test:'github-original-proxy',http:githubCheck.status}));
+            const trace=transfer('https://opencode.ai/cdn-cgi/trace');
+            console.log(JSON.stringify({test:'opencode-proxy-trace',http:trace.status,region:/^loc=(.+)$/m.exec(trace.raw)?.[1]}));
+            for (const model of ['muse-spark-1.3-contributor']) {
               const start = Date.now();
               try {
-                const response = await fetch('https://opencode.ai/zen/go/v1/responses', {
-                  method: 'POST', redirect: 'error', signal: AbortSignal.timeout(150000),
-                  headers: { authorization: `Bearer ${process.env.GO_KEY}`, 'content-type': 'application/json', 'user-agent': 'NebulaLab-CI-Review/1.0', 'x-opencode-session': 'nebula-muse-synthetic-20260912' },
-                  body: JSON.stringify({ model, input, max_output_tokens: 4096, store: false })
-                });
-                const raw = await response.text();
+                const response = transfer('https://opencode.ai/zen/go/v1/responses',{model,input,max_output_tokens:4096,store:false});
+                response.ok=response.status>=200&&response.status<300;
+                const raw = response.raw;
                 let data; try { data = JSON.parse(raw); } catch {}
                 const text = data?.output?.filter(x=>x.type==='message').flatMap(x=>x.content||[]).filter(x=>x.type==='output_text').map(x=>x.text).join('\n') || data?.output_text || '';
                 const errorCode = data?.error?.code || data?.error?.type || data?.name;

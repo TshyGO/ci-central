@@ -12,7 +12,9 @@ param(
         'TshyGO/ci-central',
         'TshyGO/NebulaLab',
         'TshyGO/NebulaLab-Docs',
-        'TshyGO/NebulaLab-Plugins'
+        'TshyGO/NebulaLab-Plugins',
+        'TshyGO/resume-form-assistant-plugin',
+        'TshyGO/AI-Thesis-Polisher'
     )
 )
 

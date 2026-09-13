@@ -14,7 +14,14 @@ const probeScript = fs.readFileSync(path.join(here, '..', 'scripts', 'probe-prov
 const source = require(path.join(actionPath, 'src', 'index.js'));
 const bundled = require(path.join(actionPath, 'dist', 'index.js'));
 
-const repositories = ['TshyGO/ci-central', 'TshyGO/NebulaLab', 'TshyGO/NebulaLab-Docs', 'TshyGO/NebulaLab-Plugins'];
+const repositories = [
+  'TshyGO/ci-central',
+  'TshyGO/NebulaLab',
+  'TshyGO/NebulaLab-Docs',
+  'TshyGO/NebulaLab-Plugins',
+  'TshyGO/resume-form-assistant-plugin',
+  'TshyGO/AI-Thesis-Polisher',
+];
 assert.match(probeScript, /provider -ne 'volcengine-ark-coding'/, 'only Ark Coding may tolerate a missing or incomplete /models response');
 assert.match(probeScript, /foreach \(\$modelConfig in \$models\)/, 'provider probe must validate the primary and every configured fallback');
 assert.match(probeScript, /request\.max_tokens = 512\b/, 'provider probe must leave enough output room for reasoning models to return final text');

@@ -53,10 +53,12 @@ review-action/config/repositories/
 ├─ TshyGO__ci-central.json
 ├─ TshyGO__NebulaLab.json
 ├─ TshyGO__NebulaLab-Docs.json
-└─ TshyGO__NebulaLab-Plugins.json
+├─ TshyGO__NebulaLab-Plugins.json
+├─ TshyGO__resume-form-assistant-plugin.json
+└─ TshyGO__AI-Thesis-Polisher.json
 ```
 
-四个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
+六个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置同时关闭自动审核、跳过提示评论和状态检查；Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 
@@ -94,7 +96,7 @@ PR_AGENT_LANE_C_API_BASE
 
 ### Caller 迁移状态
 
-四个仓库 caller 已全部切换到固定 Lane A/B/C 槽位。reusable workflow 不再声明或读取任何旧供应商命名 Secret；缺少固定槽位凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。
+六个仓库 caller 已全部切换到固定 Lane A/B/C 槽位。reusable workflow 不再声明或读取任何旧供应商命名 Secret；缺少固定槽位凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。
 
 ## Runner 选择
 
@@ -120,7 +122,7 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 - `lanes[].id`：固定 `A`、`B` 或 `C`，也是 Secret 槽位。
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
 - `lanes[].protocol`：`openai-chat-completions`、`openai-responses` 或保留的 `google-generate-content`。
-- `lanes[].advisory`：可选布尔值，默认 `false`。未配置 quorum 时，该 Lane 失败不单独阻塞；配置 `min_valid_lanes` 时所有有效 Lane 都计入数量，当前四个仓库均要求任意两路有效。至少保留一条非 advisory 的 Lane。
+- `lanes[].advisory`：可选布尔值，默认 `false`。未配置 quorum 时，该 Lane 失败不单独阻塞；配置 `min_valid_lanes` 时所有有效 Lane 都计入数量，当前六个仓库均要求任意两路有效。至少保留一条非 advisory 的 Lane。
 - `lanes[].request_timeout_ms` 与 `lanes[].model_budget_ms`：可选的 Lane 级预算覆盖；未配置时继承 `review_policy`，因此放大慢模型预算不会改变其他 Lane。
 - 模型的 `request_timeout_ms`：可选单模型请求上限，优先于 Lane/仓库默认值，但仍受 Lane 的 `model_budget_ms` 限制。B 主模型继承 1800000 ms，备用显式设为 1800000 ms。
 - `primary` 与 `fallbacks`：主模型加最多一个同 Lane 备用模型。主模型一次、失败切备用一次，备用失败即结束；配置第三个模型会被拒绝。

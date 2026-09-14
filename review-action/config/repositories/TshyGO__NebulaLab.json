@@ -78,6 +78,26 @@
           "temperature": 0.2
         }
       ]
+    },
+    {
+      "id": "D",
+      "provider": "opencode-go",
+      "protocol": "openai-responses",
+      "advisory": true,
+      "primary": {
+        "id": "deepseek-v4.1-flash",
+        "label": "DeepSeek V4.1 Flash",
+        "context_profile": "full",
+        "max_output_tokens": 16384
+      },
+      "fallbacks": [
+        {
+          "id": "muse-spark-1.2-contributor",
+          "label": "Muse Spark 1.2 Contributor",
+          "context_profile": "full",
+          "max_output_tokens": 16384
+        }
+      ]
     }
   ]
 }

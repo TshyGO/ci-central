@@ -32,10 +32,6 @@ on:
       PR_AGENT_LANE_C_KEY:
         required: false
       PR_AGENT_LANE_C_API_BASE:
-      PR_AGENT_LANE_D_KEY:
-        required: false
-      PR_AGENT_LANE_D_API_BASE:
-        required: false
         required: false
 
 jobs:
@@ -154,8 +150,6 @@ jobs:
           LANE_B_API_BASE: ${{ secrets.PR_AGENT_LANE_B_API_BASE }}
           LANE_C_KEY: ${{ secrets.PR_AGENT_LANE_C_KEY }}
           LANE_C_API_BASE: ${{ secrets.PR_AGENT_LANE_C_API_BASE }}
-          LANE_D_KEY: ${{ secrets.PR_AGENT_LANE_D_KEY }}
-          LANE_D_API_BASE: ${{ secrets.PR_AGENT_LANE_D_API_BASE }}
           PR_REVIEW_CONFIG: ${{ steps.review-config.outputs.config }}
           PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}
         with:

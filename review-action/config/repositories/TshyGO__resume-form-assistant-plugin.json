@@ -55,32 +55,6 @@
     },
     {
       "id": "C",
-      "provider": "sensenova",
-      "protocol": "openai-chat-completions",
-      "advisory": true,
-      "request_timeout_ms": 600000,
-      "model_budget_ms": 600000,
-      "primary": {
-        "id": "deepseek-v4-flash",
-        "label": "DeepSeek-V4-Flash",
-        "context_profile": "full",
-        "max_output_tokens": 16384,
-        "omit_max_tokens": true,
-        "temperature": 0.2
-      },
-      "fallbacks": [
-        {
-          "id": "sensenova-6.8-flash-lite",
-          "label": "SenseNova-6.8-Flash-Lite",
-          "context_profile": "full",
-          "max_output_tokens": 16384,
-          "omit_max_tokens": true,
-          "temperature": 0.2
-        }
-      ]
-    },
-    {
-      "id": "D",
       "provider": "opencode-go",
       "protocol": "openai-responses",
       "advisory": true,

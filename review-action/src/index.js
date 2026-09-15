@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ALLOWED_PROTOCOLS = new Set(['openai-chat-completions', 'openai-responses', 'google-generate-content']);
-const ALLOWED_LANES = new Set(['A', 'B', 'C', 'D']);
+const ALLOWED_LANES = new Set(['A', 'B', 'C']);
 
 function configFileName(repository) {
   const parts = (repository || '').split('/');
@@ -64,7 +64,7 @@ function validateConfig(config, repository) {
   for (const [index, lane] of config.lanes.entries()) {
     const location = `lanes[${index}]`;
     if (!lane || typeof lane !== 'object' || Array.isArray(lane)) throw new Error(`${location} must be an object.`);
-    if (!ALLOWED_LANES.has(lane.id)) throw new Error(`${location}.id must be A, B, C, or D.`);
+    if (!ALLOWED_LANES.has(lane.id)) throw new Error(`${location}.id must be A, B, or C.`);
     if (laneIds.has(lane.id)) throw new Error(`Lane ${lane.id} is configured more than once.`);
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);

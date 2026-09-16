@@ -62,7 +62,7 @@
         "id": "deepseek-v4.1-flash",
         "label": "DeepSeek V4.1 Flash",
         "context_profile": "full",
-        "max_output_tokens": 16384
+        "max_output_tokens": 131072
       },
       "fallbacks": [
         {

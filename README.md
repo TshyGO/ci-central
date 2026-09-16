@@ -28,19 +28,19 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 |---|---|---|---|---|
 | A | OpenCode Go | OpenAI SDK / Responses SSE | Muse Spark 1.3 Contributor → 1.2 Contributor | 计入两路 quorum |
 | B | 火山方舟 Coding | OpenAI SDK / Chat Completions SSE | ark-code-latest (Auto) → DeepSeek-V4-Pro-GA-260813 | 计入两路 quorum |
-| C | SenseNova | OpenAI SDK / Chat Completions SSE | DeepSeek-V4-Flash → SenseNova-6.8-Flash-Lite | advisory；有效时计入 quorum |
+| C | OpenCode Go | OpenAI SDK / Responses SSE | DeepSeek V4.1 Flash → Muse Spark 1.2 Contributor | advisory；有效时计入 quorum |
 
-Lane C 走的是免费额度，额度耗尽时返回 429 属于预期行为。它仍然发布评论和诊断；当前四份配置使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
+Lane C 与 Lane A 共用 OpenCode Go 的配额，额度耗尽时返回 429 属于预期行为。它仍然发布评论和诊断；六份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
 
 ### 统一 SDK 接入
 
-A 使用官方 `openai` JavaScript SDK 的 Responses SSE；B/C 使用同一 SDK 的 Chat Completions SSE。每次请求创建独立 client 和 Undici dispatcher，明确 `maxRetries: 0`、禁止重定向、按当前模型预算配置响应头/正文超时；外层 AbortSignal 覆盖连接、接收和完整流迭代。没有全局 dispatcher、跨 Lane 连接/密钥共享或参数修复重发。
+A 和 C 使用官方 `openai` JavaScript SDK 的 Responses SSE；B 使用同一 SDK 的 Chat Completions SSE。每次请求创建独立 client 和 Undici dispatcher，明确 `maxRetries: 0`、禁止重定向、按当前模型预算配置响应头/正文超时；外层 AbortSignal 覆盖连接、接收和完整流迭代。没有全局 dispatcher、跨 Lane 连接/密钥共享或参数修复重发。
 
 连接阶段最多 30 秒且不超过模型总预算；IPv4/IPv6 地址探测间隔为 1 秒，避免跨区域连接被 Node 默认 250ms 探测窗口过早放弃。地址探测不重复发送审核请求，也不会增加模型的总时间预算。
 
-SDK 负责 SSE 分帧、UTF-8 和 JSON 解码。适配层逐事件累计最终正文，只计数而不保存 `reasoning_content` 或 SenseNova 的 `reasoning`；收到 choice 0 的 `finish_reason` 即结束，无需等待 `[DONE]`、usage 尾帧或 TCP EOF。只有正文非空且 `finish_reason=stop` 才计入有效审核；断流、缺少结束原因、截断、错误事件均不能变成有效证据。Responses 仅将 `response.completed` 且状态 `completed` 的最终 `output_text` 归一为成功；incomplete、工具调用、refusal-only、错误和断流不算有效审核。usage 只报告完成前已收到的值，不为等待统计延长审核。
+SDK 负责 SSE 分帧、UTF-8 和 JSON 解码。适配层逐事件累计最终正文，只计数而不保存 `reasoning_content`、Responses reasoning item 等供应商私有思考；收到 choice 0 的 `finish_reason` 即结束，无需等待 `[DONE]`、usage 尾帧或 TCP EOF。只有正文非空且 `finish_reason=stop` 才计入有效审核；断流、缺少结束原因、截断、错误事件均不能变成有效证据。Responses 仅将 `response.completed` 且状态 `completed` 的最终 `output_text` 归一为成功；incomplete、工具调用、refusal-only、错误和断流不算有效审核。usage 只报告完成前已收到的值，不为等待统计延长审核。
 
-安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 保留 Auto 和 DeepSeek 主备、65536/393216 输出上限，不添加 low/关闭思考参数；每个模型的总时限改为 30 分钟。C 保留原模型、免费额度、各仓库时间预算及省略 `max_tokens`。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
+安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 保留 Auto 和 DeepSeek 主备、65536/393216 输出上限，不添加 low/关闭思考参数；每个模型的总时限为 30 分钟。C 使用与 A 相同的 Go 端点，主模型 DeepSeek V4.1 Flash 输出上限 131072、每模型同样 30 分钟。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
 
 依赖版本和 lockfile 在中央仓库管理；`npm run build` 打包 SDK 到 `review-action/dist/sdk-client.js`，真实审核只执行固定中央 SHA 的产物，不运行 npm、不下载依赖。CI 重建并比较产物，同时测试源码和产物的真实 TLS/SSE 行为。`SDK_LONG_HEADER_TEST=1` 可额外运行 310 秒响应头回归，验证请求不会被旧的 300 秒底层限制截断。
 
@@ -68,7 +68,7 @@ CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央�
 
 Muse Contributor 会允许供应商将提示词及回答用于训练，非 ZDR；仅在用户明确选择并在 Go 后台 opt-in 后启用。发送 `store:false` 不会撤销 Contributor 的训练许可。地区与数据政策拒绝保持诊断，不降级为批准。
 
-Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A 的固定 base 为 `https://opencode.ai/zen/go/v1`。仅当 `RUNNER_ENVIRONMENT=github-hosted` 明确时使用直接连接（忽略 ambient proxy）并接受供应商准入检查；其他情况必须使用已批准的 VPS HTTP 代理 `177.201.224.95:13128`，缺失或地址不匹配时拒绝直连。SDK 使用独立 ProxyAgent，认证只发往代理。B/C 仍为原有直接 Agent，不继承 A 代理。
+Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A 和 C 的固定 base 为 `https://opencode.ai/zen/go/v1`。仅当 `RUNNER_ENVIRONMENT=github-hosted` 明确时使用直接连接（忽略 ambient proxy）并接受供应商准入检查；其他情况必须使用已批准的 VPS HTTP 代理 `177.201.224.95:13128`，缺失或地址不匹配时拒绝直连。SDK 使用独立 ProxyAgent，认证只发往代理。B 仍为原有直接 Agent，不继承 Go 代理。
 
 VPS 的已有 Squid 只为 `opencode.ai` 配置 Mihomo parent 且 `never_direct`；GitHub 维持原路由。Mihomo 订阅更新、健康切换、故障不直连的服务器部署独立于本仓库，不保存节点、订阅或代理密码。
 
@@ -124,10 +124,10 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 - `lanes[].protocol`：`openai-chat-completions`、`openai-responses` 或保留的 `google-generate-content`。
 - `lanes[].advisory`：可选布尔值，默认 `false`。未配置 quorum 时，该 Lane 失败不单独阻塞；配置 `min_valid_lanes` 时所有有效 Lane 都计入数量，当前六个仓库均要求任意两路有效。至少保留一条非 advisory 的 Lane。
 - `lanes[].request_timeout_ms` 与 `lanes[].model_budget_ms`：可选的 Lane 级预算覆盖；未配置时继承 `review_policy`，因此放大慢模型预算不会改变其他 Lane。
-- 模型的 `request_timeout_ms`：可选单模型请求上限，优先于 Lane/仓库默认值，但仍受 Lane 的 `model_budget_ms` 限制。B 主模型继承 1800000 ms，备用显式设为 1800000 ms。
+- 模型的 `request_timeout_ms`：可选单模型请求上限，优先于 Lane/仓库默认值，但仍受 Lane 的 `model_budget_ms` 限制。B 主模型继承 1800000 ms，备用显式设为 1800000 ms；C 的 Lane 级请求上限与总预算同为 1800000 ms。
 - `primary` 与 `fallbacks`：主模型加最多一个同 Lane 备用模型。主模型一次、失败切备用一次，备用失败即结束；配置第三个模型会被拒绝。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、DeepSeek、GLM 均使用完整上下文。
-- `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点；当前 SenseNova Lane C 主备模型按该端点的请求形状启用，其他 Lane 不启用。
+- `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点。2026-09-16 起没有任何活动 Lane 使用它，字段保留给将来需要该请求形状的兼容端点；`openai-responses` 或 `google-generate-content` 协议下配置该字段会失败关闭。
 - Google 协议仍保留通用兼容代码，但当前没有活动 Lane 使用它；`thinking_level` 只允许配置在 `google-generate-content` 协议，其他协议会失败关闭。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
@@ -147,10 +147,10 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 不做退避重试，不做可选参数修复后重发，不跟随 HTTP 重定向。A/B/C 并行，每路一旦完整成功或主备均结束就立即校验 PR head/state 并发布稳定评论；不等待其他 Lane。最终 job 仍等待各路结束后执行原有 quorum/required 门禁，不因提早发布而提早放行。
 - 当前保留主备各一次、逐路即时发布，B 主备各 30 分钟；三路统一 SDK 流式接入。SDK 及连接层超时与模型预算匹配，但 DNS/TLS、网络或供应商错误仍可能提前失败。
 - Qwen、DeepSeek、Auto 保留完整审核上下文。Lane B 通过固定 `PR_AGENT_LANE_B_API_BASE`/`PR_AGENT_LANE_B_KEY` 槽位使用火山方舟 Coding API 的兼容端点 `https://ark.cn-beijing.volces.com/api/coding/v3`，主模型为 `ark-code-latest`，同供应商 fallback 为 `deepseek-v4-pro-ga-260813`。SDK 迁移不代表供应商所有请求都能在预算内完成，必须以 exact-head Lane 评论及实际日志验收，不能用短探针或 wrapper 绿色检查代替。
-- Lane C 使用 `PR_AGENT_LANE_C_API_BASE` 指定的 SenseNova OpenAI Chat Completions 地址，主模型为 `deepseek-v4-flash`，不再使用 Google endpoint、协议或 thinking 配置。SenseNova 端点显式传入 `max_tokens` 曾被错误地按 workspace quota 拒绝，所以 Lane C 主备请求均省略该字段；NebulaLab 每模型 3 分钟，其他三个配置每模型 10 分钟，均保持不变。
-- Lane C 的同供应商 fallback 为 `sensenova-6.8-flash-lite`，同样执行主模型一次、备用一次的规则，不影响其他 Lane。
+- Lane C 使用 `PR_AGENT_LANE_C_API_BASE` 指定的 OpenCode Go Responses 地址（与 Lane A 同一端点），主模型为用户指定的 `deepseek-v4.1-flash`。它的输出上限是 131072：DeepSeek V4.1 Flash 是高推理模型，旧的 16384 上限会被私有思考全部吃光并以 `finish_reason=length` 返回空正文（2026-09-16 NebulaLab PR #914 run 35088795799：`reasoning_tokens=16384`、`reasoningLen=64668`、`contentLen=0`），使该 Lane 只能发布 fallback 评论。Lane 级请求上限与总预算均为 1800000 ms，与 Lane B 对齐。
+- Lane C 的同供应商 fallback 为 Muse Spark 1.2 Contributor，同样执行主模型一次、备用一次的规则，不影响其他 Lane。fallback 评论会显式写出 `deepseek-v4.1-flash unavailable -> served by muse-spark-1.2-contributor`，因此看到 Muse 标签就代表这次主模型没有成功，不能当成 DeepSeek 的审核结果。
 - Muse Spark 1.2 Contributor 仅作为 Lane A 的同供应商备用；主模型固定为用户指定的 Muse Spark 1.3 Contributor。完整上下文、16384 输出上限，Responses 不添加额外思考或采样参数。
-- reusable job 兜底 70 分钟，覆盖 B 主备最多 60 分钟及准备/发布。正常 `stop` 即结束，不强迫模型消耗全部预算；30 分钟是保护上限，不保证每次都能生成。
+- reusable job 兜底 70 分钟，覆盖 B、C 各自主备最多 60 分钟（三路并行）及准备/发布。正常 `stop` 即结束，不强迫模型消耗全部预算；30 分钟是保护上限，不保证每次都能生成。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；有效 Lane 数不足 quorum（或未配置 quorum 时缺少必需 Lane）才在发布其他健康 Lane 后明确失败。
 

@@ -662,22 +662,29 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:ark-code-latest,C:deepseek-v4-flash');
-check('healthy path never calls a fallback', !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'deepseek-v4-pro-ga-260813', 'sensenova-6.8-flash-lite'].includes(model)));
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:ark-code-latest,C:deepseek-v4.1-flash');
+check('healthy path never calls a fallback', r.captured.length === 3
+  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'deepseek-v4-pro-ga-260813'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
 check('all active protocols receive the repository review prompt',
   healthyLaneA?.input[0].content === centralConfig.review_policy.system_prompt
   && healthyLaneB?.messages[0].content === centralConfig.review_policy.system_prompt
-  && healthyLaneC?.messages[0].content === centralConfig.review_policy.system_prompt
+  && healthyLaneC?.input[0].content === centralConfig.review_policy.system_prompt
   && !healthyLaneA?.input[0].content.includes('two independent internal review passes')
   && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
-  && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
-check('Lane C uses OpenAI Chat Completions without Google thinking fields',
-  healthyLaneC?.model === 'deepseek-v4-flash'
+  && !healthyLaneC?.input[0].content.includes('two independent internal review passes'));
+// Lane C rides the same Responses protocol as Lane A, but keeps its own ceiling:
+// 131072 is the window DeepSeek V4.1 Flash needs to finish reasoning and still
+// return review text. A payload that drops back to the 16384 ceiling is the exact
+// regression this lane hit in production run 35088795799.
+check('Lane C uses the Responses protocol without Google thinking fields',
+  healthyLaneC?.model === 'deepseek-v4.1-flash'
+  && healthyLaneC?.max_output_tokens === 131072
+  && healthyLaneC?.store === false
   && healthyLaneC?.max_tokens === undefined
-  && healthyLaneC?.temperature === 0.2
+  && healthyLaneC?.temperature === undefined
   && healthyLaneC?.generationConfig === undefined);
 check('Lane B uses the configured Auto output budget without lowering model reasoning',
   healthyLaneB?.model === 'ark-code-latest'
@@ -790,33 +797,37 @@ check('finish reasons are normalized across provider casing', r.error === undefi
   && !r.posted.some((body) => body.includes('可能不完整')));
 
 r = await scenario(healthy);
-check('full-context primaries preserve input while SenseNova omits only max_tokens',
+check('full-context primaries preserve input while Lane C carries its own output ceiling',
   r.captured.every(({ body }) => (body.input || body.messages)[1].content.includes('Changed files and patches:'))
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 16384
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_output_tokens === 131072);
 
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.url === 'https://lane-b.example.test/v1/chat/completions'
   && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
-  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
+  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
-check('only Go Lane A uses the explicit runner proxy and stable coding session',
-  !r.error && r.captured.find(c => c.lane === 'A')?.proxy === 'http://177.201.224.95:13128'
-  && r.captured.filter(c => c.lane !== 'A').every(c => c.proxy === undefined)
-  && Boolean(r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session']));
+check('both Go lanes use the explicit runner proxy and stable coding session',
+  !r.error
+  && ['A', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
+  && r.captured.find(c => c.lane === 'B')?.proxy === undefined
+  && ['A', 'C'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
+  && r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session'] !== r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session']);
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: '', HTTPS_PROXY: '' });
 check('missing self-hosted Go proxy cannot silently become a direct request',
-  !r.captured.some(c => c.lane === 'A') && r.posted.some(b => b.includes('lane-A') && b.includes('status=diagnostic')));
+  !r.captured.some(c => c.lane === 'A') && !r.captured.some(c => c.lane === 'C')
+  && r.posted.some(b => b.includes('lane-A') && b.includes('status=diagnostic')));
 for (const runtime of ['', 'custom-runner']) {
   r = await scenario(healthy, { RUNNER_ENVIRONMENT: runtime, https_proxy: '', HTTPS_PROXY: '' });
-  check(`unknown runtime ${runtime || 'missing'} cannot bypass the Go proxy requirement`, !r.captured.some(c => c.lane === 'A'));
+  check(`unknown runtime ${runtime || 'missing'} cannot bypass the Go proxy requirement`,
+    !r.captured.some(c => c.lane === 'A') && !r.captured.some(c => c.lane === 'C'));
 }
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://unapproved.example:13128' });
-check('self-hosted Go rejects an unapproved proxy destination', !r.captured.some(c => c.lane === 'A'));
+check('self-hosted Go rejects an unapproved proxy destination', !r.captured.some(c => c.lane === 'A') && !r.captured.some(c => c.lane === 'C'));
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'github-hosted', https_proxy: 'http://unapproved.example:13128' });
 check('explicit GitHub-hosted runtime ignores ambient proxy for Go', !r.error && r.captured.every(c => c.proxy === undefined));
 
@@ -826,7 +837,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig)
 check('repository configuration supplied through the environment remains authoritative', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 8192
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === undefined);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_output_tokens === 131072);
 
 r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Muse 1.2 only after one failed Muse 1.3 request', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 1 && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1);
@@ -843,12 +854,12 @@ check('Lane B falls back only to its Ark-hosted DeepSeek model',
   && !r.captured.some(({ model }) => model === 'deepseek-v4-pro-202606')
   && r.posted.some((body) => body.includes('ark-code-latest unavailable -> served by deepseek-v4-pro-ga-260813')));
 
-r = await scenario((call) => call.lane === 'C' && call.model === 'deepseek-v4-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to SenseNova 6.8 Flash Lite after one failed DeepSeek V4 Flash request',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'deepseek-v4-flash').length === 1
-  && r.captured.filter(({ model }) => model === 'sensenova-6.8-flash-lite').length === 1
-  && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'sensenova-6.8-flash-lite')
-  && r.posted.some((body) => body.includes('deepseek-v4-flash unavailable -> served by sensenova-6.8-flash-lite')));
+r = await scenario((call) => call.lane === 'C' && call.model === 'deepseek-v4.1-flash' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+check('Lane C falls back only to its Muse fallback after one failed DeepSeek V4.1 Flash request',
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'deepseek-v4.1-flash').length === 1
+  && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1
+  && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'muse-spark-1.2-contributor')
+  && r.posted.some((body) => body.includes('deepseek-v4.1-flash unavailable -> served by muse-spark-1.2-contributor')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
@@ -1083,20 +1094,24 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
 
 
 r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call));
-check('B primary and fallback each get thirty minutes without changing A/C deadlines',
-  !r.error && r.timeouts.join(',') === '300000,1800000,180000,1800000');
+// A keeps the repository default, B and C each carry a lane-level thirty-minute
+// window, and B's fallback carries its own. C's window is no longer the short
+// 180000: that value was calibrated against the retired SenseNova slot, and the
+// 131072 output ceiling now needs the same room B has.
+check('B primary and fallback each get thirty minutes while A and C keep their configured deadlines',
+  !r.error && r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
 r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
-  r.timeouts.join(',') === '300000,1800000,180000,1800000');
+  r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
 r = await scenario((call) => call.model === 'ark-code-latest' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
-  r.timeouts.join(',') === '300000,1800000,180000,1800000');
+  r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 for (const invalid of [0, -1, 1.5, '300000', null]) {
   const config = structuredClone(centralConfig);
   config.lanes[1].fallbacks[0].request_timeout_ms = invalid;

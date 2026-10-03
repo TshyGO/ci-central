@@ -14,7 +14,8 @@ param(
         'TshyGO/NebulaLab-Docs',
         'TshyGO/NebulaLab-Plugins',
         'TshyGO/resume-form-assistant-plugin',
-        'TshyGO/AI-Thesis-Polisher'
+        'TshyGO/AI-Thesis-Polisher',
+        'TshyGO/NebulaGraph-License-Service'
     )
 )
 

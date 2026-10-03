@@ -21,6 +21,7 @@ const repositories = [
   'TshyGO/NebulaLab-Plugins',
   'TshyGO/resume-form-assistant-plugin',
   'TshyGO/AI-Thesis-Polisher',
+  'TshyGO/NebulaGraph-License-Service',
 ];
 assert.match(probeScript, /provider -ne 'volcengine-ark-coding'/, 'only Ark Coding may tolerate a missing or incomplete /models response');
 assert.match(probeScript, /foreach \(\$modelConfig in \$models\)/, 'provider probe must validate the primary and every configured fallback');

@@ -29,7 +29,7 @@ try {
     Write-Host "Probing Lane $Lane provider=$($laneConfig.provider) protocol=$($laneConfig.protocol) models=$($models.id -join ',')"
 
     if ($laneConfig.protocol -eq 'openai-chat-completions') {
-        $headers = @{ Authorization = "Bearer $key" }
+        $headers = @{ Authorization = "Bearer $key"; 'User-Agent' = 'NebulaLab-CI-Review/1.0'; 'x-opencode-session' = "central-provider-probe-lane-$Lane" }
         $available = @()
         try {
             $modelsResponse = Invoke-RestMethod -Method Get -Uri "$base/models" -Headers $headers -TimeoutSec 30

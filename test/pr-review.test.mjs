@@ -667,9 +667,9 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:glm-5.3-flash,C:mimo-v2.6-pro');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:glm-5.3,C:hy3');
 check('healthy path never calls a fallback', r.captured.length === 3
-  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'glm-5.2'].includes(model)));
+  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'glm-5.3-flash'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -680,16 +680,21 @@ check('all active protocols receive the repository review prompt',
   && !healthyLaneA?.input[0].content.includes('two independent internal review passes')
   && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
   && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
-// MiMo uses Go's Chat Completions endpoint, preserving the Lane C output ceiling.
+check('no leftover Markdown instruction contradicts the JSON contract, which is restated after the material',
+  !centralConfig.review_policy.system_prompt.includes('Markdown review')
+  && [healthyLaneA?.input, healthyLaneB?.messages, healthyLaneC?.messages].every((messages) =>
+    !messages[0].content.includes('Markdown review') && messages[0].content.includes('final JSON report')
+    && messages[1].content.trimEnd().endsWith('a Markdown review cannot be accepted.')));
+// Hy3 uses Go's Chat Completions endpoint, preserving the Lane C output ceiling.
 check('Lane C uses Chat Completions without Google thinking fields',
-  healthyLaneC?.model === 'mimo-v2.6-pro'
-  && healthyLaneC?.max_tokens === 131072
+  healthyLaneC?.model === 'hy3'
+  && healthyLaneC?.max_tokens === 65536
   && healthyLaneC?.store === undefined
   && healthyLaneC?.max_output_tokens === undefined
   && healthyLaneC?.temperature === undefined
   && healthyLaneC?.generationConfig === undefined);
 check('Lane B uses the configured GLM output budget without lowering model reasoning',
-  healthyLaneB?.model === 'glm-5.3-flash'
+  healthyLaneB?.model === 'glm-5.3'
   && healthyLaneB?.max_tokens === 65536
   && healthyLaneB?.reasoning_effort === undefined
   && healthyLaneB?.thinking === undefined);
@@ -709,11 +714,11 @@ check('current-head status starts pending and finishes with all actual service m
 r = await scenario(healthy, {}, { useBundle: true });
 check('production bundle preserves the same dispatch and validated publication', !r.error && r.captured.length === 3 && r.posted.length === 3
   && r.posted.every(body => body.includes('证据位置与代码引用已校验')));
-r = await scenario(call => call.lane === 'B' && call.model === 'glm-5.3-flash'
+r = await scenario(call => call.lane === 'B' && call.model === 'glm-5.3'
   ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Approved without evidence.' } }] })) : healthy(call));
 check('a completed non-contract response falls back once without publishing it as valid evidence', !r.error
   && r.captured.filter(call => call.lane === 'B').length === 2
-  && r.posted.some(body => body.includes('served by glm-5.2'))
+  && r.posted.some(body => body.includes('served by glm-5.3-flash'))
   && r.statusUpdates.some(body => body.includes('备用模型运行中'))
   && !r.posted.some(body => body.includes('Approved without evidence.')));
 r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 },
@@ -734,34 +739,34 @@ const firstCallFails = (lane, model, error) => {
   return (call) => call.lane === lane && call.model === model && calls++ === 0 ? Promise.reject(error) : healthy(call);
 };
 const sessions = (result, model) => result.captured.filter((call) => call.model === model).map((call) => call.headers['x-opencode-session']);
-r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', unserved(429)));
+r = await scenario(firstCallFails('C', 'hy3', unserved(429)));
 check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
-  && sessions(r, 'mimo-v2.6-pro').length === 2 && sessions(r, 'mimo-v2.6-pro')[1] === `${sessions(r, 'mimo-v2.6-pro')[0]}-resend`
-  && !r.captured.some(({ model }) => model === 'mimo-v2.5-pro') && r.timeouts.includes(30000)
+  && sessions(r, 'hy3').length === 2 && sessions(r, 'hy3')[1] === `${sessions(r, 'hy3')[0]}-resend`
+  && !r.captured.some(({ model }) => model === 'kimi-k2.7-code') && r.timeouts.includes(30000)
   && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by'))
   && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
-r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', unserved(429, { retryAfterMs: 5000 })));
+r = await scenario(firstCallFails('C', 'hy3', unserved(429, { retryAfterMs: 5000 })));
 check('a provider retry-after paces the single resend', !r.error && r.timeouts.includes(5000) && !r.timeouts.includes(30000));
-r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
+r = await scenario(firstCallFails('C', 'hy3', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
 check('a stream queued and closed before any output is resent immediately', !r.error
-  && sessions(r, 'mimo-v2.6-pro').length === 2 && r.timeouts.includes(0));
-r = await scenario((call) => call.model === 'mimo-v2.6-pro' ? Promise.reject(unserved(503)) : healthy(call));
+  && sessions(r, 'hy3').length === 2 && r.timeouts.includes(0));
+r = await scenario((call) => call.model === 'hy3' ? Promise.reject(unserved(503)) : healthy(call));
 check('a resend that is also unserved falls back once instead of retrying again', !r.error
-  && sessions(r, 'mimo-v2.6-pro').length === 2 && r.captured.filter(({ model }) => model === 'mimo-v2.5-pro').length === 1
-  && r.posted.some((body) => body.includes('served by mimo-v2.5-pro')));
+  && sessions(r, 'hy3').length === 2 && r.captured.filter(({ model }) => model === 'kimi-k2.7-code').length === 1
+  && r.posted.some((body) => body.includes('served by kimi-k2.7-code')));
 for (const [label, error] of [
   ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
   ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
   ['the local deadline', Object.assign(new Error('AI endpoint request aborted (model deadline reached).'), { name: 'AbortError', unserved: false })],
 ]) {
-  r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', error));
-  check(`${label} are never resent`, sessions(r, 'mimo-v2.6-pro').length === 1
-    && r.captured.filter(({ model }) => model === 'mimo-v2.5-pro').length === 1);
+  r = await scenario(firstCallFails('C', 'hy3', error));
+  check(`${label} are never resent`, sessions(r, 'hy3').length === 1
+    && r.captured.filter(({ model }) => model === 'kimi-k2.7-code').length === 1);
 }
-r = await scenario(firstCallFails('B', 'glm-5.3-flash', unserved(429)));
+r = await scenario(firstCallFails('B', 'glm-5.3', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model', !r.error
-  && r.captured.filter(({ model }) => model === 'glm-5.3-flash').length === 1
-  && r.captured.filter(({ model }) => model === 'glm-5.2').length === 1);
+  && r.captured.filter(({ model }) => model === 'glm-5.3').length === 1
+  && r.captured.filter(({ model }) => model === 'glm-5.3-flash').length === 1);
 const invalidResendConfig = structuredClone(centralConfig);
 invalidResendConfig.lanes[2].resend_unserved = 'yes';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidResendConfig) });
@@ -778,9 +783,9 @@ const emptyThrottledConfig = structuredClone(centralConfig);
 emptyThrottledConfig.lanes[1].primary.context_profile = 'kimi-k3-throttled';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(emptyThrottledConfig) }, { files: [patch('src/a.ts', 500), patch('tests/a.test.ts', 500)] });
 check('a model whose actual context pack is empty is skipped without consuming a request', !r.error
-  && !r.captured.some(call => call.model === 'glm-5.3-flash')
+  && !r.captured.some(call => call.model === 'glm-5.3')
   && r.captured.filter(call => call.lane === 'B').length === 1
-  && r.posted.some(body => body.includes('served by glm-5.2')));
+  && r.posted.some(body => body.includes('served by glm-5.3-flash')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
 const quotedMarkers = validEvidence.map(item => ({ ...item }));
 quotedMarkers[0].body += '\nQuoted source: <!-- ai-pr-review-bot:lane-C -->';
@@ -885,7 +890,7 @@ check('full-context primaries preserve input while Lane C carries its own output
   r.captured.every(({ body }) => (body.input || body.messages)[1].content.includes('Changed files and patches:'))
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 16384
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 131072);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
 
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
@@ -920,7 +925,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig)
 check('repository configuration supplied through the environment remains authoritative', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 8192
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 131072);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
 
 r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Muse 1.2 only after one failed Muse 1.3 request', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 1 && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1);
@@ -928,21 +933,21 @@ const qwenFallback = r.captured.find(({ model }) => model === 'muse-spark-1.2-co
 check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 16384 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
 check('Muse 1.2 still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor')));
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3-flash' ? reply(503, '{"error":"unavailable"}') : healthy(call));
-check('Lane B falls back once only to Go GLM 5.2',
-  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3-flash').length === 1
-  && r.captured.filter(({ model }) => model === 'glm-5.2').length === 1
-  && r.captured.find(({ model }) => model === 'glm-5.2')?.body.max_tokens === 65536
-  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'glm-5.2')
+r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('Lane B falls back once only to Go GLM 5.3 Flash',
+  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 1
+  && r.captured.filter(({ model }) => model === 'glm-5.3-flash').length === 1
+  && r.captured.find(({ model }) => model === 'glm-5.3-flash')?.body.max_tokens === 65536
+  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'glm-5.3-flash')
   && !r.captured.some(({ model }) => model === 'deepseek-v4-pro-202606')
-  && r.posted.some((body) => body.includes('glm-5.3-flash unavailable -> served by glm-5.2')));
+  && r.posted.some((body) => body.includes('glm-5.3 unavailable -> served by glm-5.3-flash')));
 
-r = await scenario((call) => call.lane === 'C' && call.model === 'mimo-v2.6-pro' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to Go MiMo V2.5 Pro after one failed MiMo V2.6 Pro request',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'mimo-v2.6-pro').length === 1
-  && r.captured.filter(({ model }) => model === 'mimo-v2.5-pro').length === 1
-  && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'mimo-v2.5-pro')
-  && r.posted.some((body) => body.includes('mimo-v2.6-pro unavailable -> served by mimo-v2.5-pro')));
+r = await scenario((call) => call.lane === 'C' && call.model === 'hy3' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+check('Lane C falls back only to Go Kimi K2.7 Code after one failed Hy3 request',
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1
+  && r.captured.filter(({ model }) => model === 'kimi-k2.7-code').length === 1
+  && !r.captured.some(({ lane, model }) => lane !== 'C' && model === 'kimi-k2.7-code')
+  && r.posted.some((body) => body.includes('hy3 unavailable -> served by kimi-k2.7-code')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
@@ -1176,25 +1181,24 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 
 
-r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call));
-// A keeps the repository default, B and C each carry a lane-level thirty-minute
-// window, and B's fallback carries its own. C's window is no longer the short
-// 180000: that value was calibrated against the retired SenseNova slot, and the
-// 131072 output ceiling now needs the same room B has.
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call));
+// A keeps the repository default, B carries a lane-level thirty-minute window and
+// B's fallback carries its own. C's fast reviewers get fifteen minutes: Hy3 and Kimi
+// K2.7 Code finished real business PRs in 3-6 minutes during model selection.
 check('B primary and fallback each get thirty minutes while A and C keep their configured deadlines',
-  !r.error && r.timeouts.join(',') === '300000,1800000,1800000,1800000');
+  !r.error && r.timeouts.join(',') === '300000,1800000,900000,1800000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
-r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
-  r.timeouts.join(',') === '300000,1800000,1800000,1800000');
+  r.timeouts.join(',') === '300000,1800000,900000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
-r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
-  r.timeouts.join(',') === '300000,1800000,1800000,1800000');
+  r.timeouts.join(',') === '300000,1800000,900000,1800000');
 for (const invalid of [0, -1, 1.5, '300000', null]) {
   const config = structuredClone(centralConfig);
   config.lanes[1].fallbacks[0].request_timeout_ms = invalid;

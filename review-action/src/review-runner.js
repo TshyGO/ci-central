@@ -362,7 +362,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
       }
       const complete = normalizedFinishReason === 'stop';
-      return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength, reasoningUnit, complete };
+      return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength, reasoningUnit, complete, finishReason: normalizedFinishReason || 'missing' };
     }
     const choice = payload?.choices?.[0];
     const message = choice?.message;
@@ -380,7 +380,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     }
     const complete = !normalizedFinishReason || normalizedFinishReason === 'stop';
     return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength,
-      reasoningUnit: reasoningLength ? 'chars' : null, complete };
+      reasoningUnit: reasoningLength ? 'chars' : null, complete, finishReason: normalizedFinishReason || 'missing' };
   }
 
   // Primary once, then the same-lane fallback once on failure; never retry either.
@@ -415,6 +415,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let lastResponseText = '';
     let lastRequestError = '';
     let lastFailureKind = '';
+    let lastReportError = '';
+    let lastOutcome = '';
     let bestPartial = null;
 
     for (const model of chain) {
@@ -424,9 +426,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       lastResponseText = responseText;
       lastRequestError = requestError;
       lastFailureKind = failureKind;
+      lastOutcome = '';
       if (response?.ok && !requestError && failureKind !== 'gateway-blocked') {
         try {
-          const { review, reasoningLength, reasoningUnit, complete } = extractReview(lane, model, responseText);
+          const { review, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
           if (review && complete) {
             return {
               lane,
@@ -439,6 +442,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               status: 'valid',
             };
           }
+          lastOutcome = !complete
+            ? (finishReason === 'length' ? 'output truncated (finish_reason=length)' : 'output did not complete')
+            : 'empty final response';
           if (review) {
             bestPartial ??= {
               lane,
@@ -456,10 +462,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
           }
         } catch (error) {
           lastFailureKind = 'report-invalid';
+          lastReportError = error?.message?.startsWith('Review contract:') ? error.message.slice(0, 240) : 'Invalid report envelope.';
           console.log(`[Lane ${lane.id}/${model.id}] report rejected: ${error?.message?.startsWith('Review contract:') ? error.message : 'invalid report envelope'}`);
         }
       }
-      tried.push(`${model.id} -> ${lastFailureKind === 'report-invalid' ? 'evidence contract rejected' : `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
+      tried.push(`${model.id} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
@@ -468,7 +475,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     if (bestPartial) return bestPartial;
 
     const failText = lastFailureKind === 'report-invalid'
-      ? 'The model returned a response, but its report did not satisfy the evidence contract.'
+      ? `The model returned a response, but its report did not satisfy the evidence contract. ${lastReportError}`
       : (lastResponseText || lastRequestError || '').trim();
     const gatewayBlocked = lastFailureKind === 'gateway-blocked';
     const upstreamExhausted = failText.includes('failover_exhausted');
@@ -498,7 +505,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.`
         : upstreamExhausted
           ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.`
-          : isServerSide
+          : lastFailureKind === 'report-invalid'
+          ? 'Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made.'
+        : isServerSide
             ? 'Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above — most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage.'
             : 'Action needed: inspect the upstream response above to identify the request or auth problem.',
     ].join('\n');

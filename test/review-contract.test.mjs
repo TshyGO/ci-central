@@ -108,12 +108,40 @@ test('no-findings output is valid when its actual supplied coverage is stated', 
 });
 test('wrong files, unseen lines, invented quotes and speculative findings are rejected', () => {
   for (const mutation of [{ file: 'src/not-supplied.js' }, { line: 30 }, { evidence: 'missingCode()' },
-    { evidence: 'persist(user);' }, { evidence: 'return true;' }, { confidence: 'medium' }]) {
+    { evidence: 'persist(user);' }, { evidence: 'return true;' }]) {
     const changed = structuredClone(report);
     Object.assign(changed.findings[0], mutation);
     assert.throws(() => parseReview(JSON.stringify(changed), context), /Review contract/);
   }
   assert.throws(() => parseReview('I approve this PR.', context), /JSON report/);
+});
+test('coverage claims are intersected with supplied material without inventing missing coverage', () => {
+  const changed = structuredClone(report);
+  changed.reviewed_files.push('not-supplied.js');
+  const parsed = parseReview(JSON.stringify(changed), context);
+  assert.deepEqual(parsed.reviewed_files, ['src/auth.js']);
+  assert.ok(parsed.limitations.some(item => item.includes('覆盖声明')));
+  changed.reviewed_files = [];
+  assert.deepEqual(parseReview(JSON.stringify(changed), context).reviewed_files, ['src/auth.js']);
+  changed.findings = [];
+  changed.reviewed_files = ['not-supplied.js'];
+  assert.throws(() => parseReview(JSON.stringify(changed), context), /no supplied file/);
+});
+test('honest lower confidence stays a labeled risk instead of triggering another model call', () => {
+  const changed = structuredClone(report);
+  Object.assign(changed.findings[0], { priority: 'p1', side: 'HEAD', confidence: 'Medium' });
+  const parsed = parseReview(JSON.stringify(changed), context);
+  assert.equal(parsed.findings[0].confidence, 'medium');
+  assert.ok(renderReview(parsed, context).includes('待核实'));
+  changed.findings[0].confidence = 'not-calibrated';
+  assert.equal(parseReview(JSON.stringify(changed), context).findings[0].confidence, 'unspecified');
+  changed.findings[0].confidence = 'constructor';
+  assert.equal(parseReview(JSON.stringify(changed), context).findings[0].confidence, 'unspecified');
+  changed.findings[0].confidence = '中';
+  changed.findings[0].side = '新增侧';
+  assert.equal(parseReview(JSON.stringify(changed), context).findings[0].confidence, 'medium');
+  changed.findings[0].evidence = 'notActualCode();';
+  assert.throws(() => parseReview(JSON.stringify(changed), context), /code quote/);
 });
 test('removed-file findings can cite base lines without inventing head locations', () => {
   const deleted = packDiff([{ ...file, status: 'removed', patch: '@@ -10,2 +0,0 @@\n-authorize(user);\n-persist();' }], 1000);

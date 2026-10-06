@@ -719,6 +719,11 @@ check('a completed non-contract response falls back once without publishing it a
 r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 }] });
 check('missing text material publishes explicit diagnostics without making any model request', r.captured.length === 0
   && r.posted.length === 3 && r.error && r.posted.every(body => body.includes('No complete inspectable text patch')));
+r = await scenario(call => call.lane === 'C' ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content:
+  JSON.stringify({ summary: 'PRIVATE_REPORT_CONTENT', reviewed_files: ['not-supplied.js'], findings: [], limitations: [] }) } }] })) : healthy(call));
+check('contract diagnostics expose the safe local reason without leaking rejected report content', !r.error
+  && r.posted.some(body => body.includes('no supplied file was reviewed') && body.includes('not an authentication or HTTP failure'))
+  && !r.posted.some(body => body.includes('PRIVATE_REPORT_CONTENT')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
 const quotedMarkers = validEvidence.map(item => ({ ...item }));
 quotedMarkers[0].body += '\nQuoted source: <!-- ai-pr-review-bot:lane-C -->';

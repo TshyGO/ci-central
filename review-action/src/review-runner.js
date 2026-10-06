@@ -135,6 +135,14 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const kimiK3Pack = packDiff(material, 1000);
   const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join('\n');
   console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted; complete omitted hunks=${diffPack.omittedHunks}.`);
+  // Binary, rename-only or patch-less changes give a reviewer nothing to inspect. Skip
+  // model requests without failing the gate; the status table records the skip. Text
+  // that exists but does not fit the budget still fails as missing review evidence.
+  if (!material.some((file) => (typeof file.patch === 'string' && file.patch.trim()) || typeof file.after_image === 'string')) {
+    console.log('::notice::No changed file has a text patch (binary, rename-only or unavailable); model review skipped. This is neither a failure nor an approval.');
+    await statusPublisher.skip();
+    return;
+  }
   const contextManifest = { prompt_version: PROMPT_VERSION, head: reviewHeadSha, files: diffPack.manifest,
     issues: issues.manifest, omitted_issue_references: issues.omitted_references };
   const system = reviewPolicy.system_prompt;
@@ -236,6 +244,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const text = rawText.toLowerCase();
     const quotaExhausted = status === 429 && (
       text.includes('insufficient_quota')
+      // OpenCode Go plan limits surface as GoUsageLimitError (or Free/Black variants).
+      || text.includes('usagelimiterror')
       || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /quota[^\n]*reset at/i.test(text)
@@ -257,18 +267,27 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return { kind: 'model-or-upstream-failure' };
   }
 
-  // Exactly one request per model. No retry, backoff, optional-field
-  // repair, or redirect can silently send the same review again.
-  async function callModel(lane, model) {
+  function modelWindowMs(lane, model) {
     const requestTimeoutMs = model.request_timeout_ms ?? lane.request_timeout_ms ?? defaultRequestTimeoutMs;
     const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
+    return Math.min(requestTimeoutMs, modelBudgetMs);
+  }
+
+  // One served request per model. No retry, backoff, optional-field repair, or
+  // redirect can silently send the same review again; the only resend is the opt-in
+  // unserved case in requestReview, where no model output was produced at all.
+  async function callModel(lane, model, { windowMs = modelWindowMs(lane, model), sessionSuffix = '', attempt = 1 } = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, modelBudgetMs));
+    const timeout = setTimeout(() => controller.abort(), windowMs);
     const startedAt = Date.now();
     let response;
     let responseText = '';
     let requestError = '';
     let errorCode = '';
+    let unserved = false;
+    let httpStatus;
+    let retryAfterMs;
+    let localDeadline = false;
     try {
       const credentials = laneCredentials[lane.id];
       let proxyUrl;
@@ -299,10 +318,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         protocol: lane.protocol,
         proxyUrl,
         sessionId: lane.provider === 'opencode-go'
-          ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}` : undefined,
+          ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : undefined,
         payload: lane.protocol === 'openai-responses' ? responsesPayload({ ...model, review_lane_id: lane.id }) : basePayload({ ...model, review_lane_id: lane.id }),
         signal: controller.signal,
-        timeoutMs: Math.min(requestTimeoutMs, modelBudgetMs),
+        timeoutMs: windowMs,
         onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
       });
       responseText = await response.text();
@@ -313,19 +332,42 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       }
       const code = error?.cause?.code || error?.code;
       errorCode = typeof code === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : '';
-      requestError = error?.name === 'AbortError'
+      localDeadline = error?.name === 'AbortError';
+      requestError = localDeadline
         ? 'Local review deadline reached before a complete final response; this is not proof of an upstream outage.'
         : (error?.message || String(error));
+      unserved = error?.unserved === true;
+      httpStatus = Number.isInteger(error?.status) ? error.status : error?.httpStatus;
+      retryAfterMs = Number.isSafeInteger(error?.retryAfterMs) ? error.retryAfterMs : undefined;
     } finally {
       clearTimeout(timeout);
     }
     const failure = classifyFailure(response, responseText, requestError);
     const usable = response?.ok && !requestError && failure.kind !== 'gateway-blocked';
-    console.log(`[Lane ${lane.id}/${model.id}] attempt 1/1 elapsed_ms=${Date.now() - startedAt} status=${response?.status ?? 'request failed'} error_code=${errorCode || 'none'}`);
+    const elapsedMs = Date.now() - startedAt;
+    console.log(`[Lane ${lane.id}/${model.id}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
     if (!usable) {
       console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${lane.protocol} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
     }
-    return { response, responseText, requestError, attempts: 1, failureKind: usable ? '' : failure.kind };
+    return { response, responseText, requestError, attempts: attempt, failureKind: usable ? '' : failure.kind,
+      unserved: !usable && unserved, httpStatus: response?.status ?? httpStatus, retryAfterMs, localDeadline, elapsedMs };
+  }
+
+  // A request that produced no model output at all (provider capacity 429/5xx, or a
+  // stream queued and closed before any token) is not a review attempt: resending it
+  // cannot duplicate a review or its reasoning cost. Opt-in per lane, at most once per
+  // model, inside that model's remaining window. Plan quota, credentials, endpoint
+  // reachability and the local deadline are never resent.
+  const UNSERVED_RESEND_DELAY_MS = 30000;
+  const UNSERVED_RESEND_MIN_WINDOW_MS = 60000;
+  function unservedResend(lane, model, outcome) {
+    if (lane.resend_unserved !== true || !outcome.unserved || outcome.localDeadline) return null;
+    if (['quota-exhausted', 'authentication-failed', 'gateway-blocked', 'endpoint-unavailable'].includes(outcome.failureKind)) return null;
+    const status = outcome.httpStatus;
+    if (!(status === 429 || status === 200 || (Number.isInteger(status) && status >= 500))) return null;
+    const delayMs = status === 200 ? 0 : Math.min(outcome.retryAfterMs ?? UNSERVED_RESEND_DELAY_MS, 120000);
+    const windowMs = modelWindowMs(lane, model) - outcome.elapsedMs - delayMs;
+    return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
   }
 
   function validateAndRender(text, model, complete, finishReason) {
@@ -421,7 +463,15 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);
         continue;
       }
-      const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
+      let outcome = await callModel(lane, model);
+      const resend = unservedResend(lane, model, outcome);
+      if (resend) {
+        console.log(`[Lane ${lane.id}/${model.id}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
+        await statusPublisher.update(lane.id, 'resending', model.id);
+        await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
+        outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: '-resend', attempt: 2 });
+      }
+      const { response, responseText, requestError, attempts, failureKind } = outcome;
       lastResponse = response;
       lastResponseText = responseText;
       lastRequestError = requestError;

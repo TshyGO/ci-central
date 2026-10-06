@@ -66,6 +66,8 @@ function usageCounts(usage) {
 }
 
 // The review is already final when this runs: wait briefly, ignore errors, never fail it.
+// The request deadline still applies: its abort ends the SDK iterator, and a next()
+// left pending by the grace timer is settled by the stream abort in the caller's cleanup.
 async function readUsageTrailer(events, graceMs) {
   const deadline = Date.now() + graceMs;
   let timer;
@@ -181,6 +183,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
             if (timing.bytes > MAX_RESPONSE_BYTES) {
               const error = new Error('SDK response exceeded byte limit.');
               error.code = 'REVIEW_RESPONSE_TOO_LARGE';
+              body.end ??= 'error'; body.error ??= describeError(error); body.ended_ms ??= now;
               source.cancel(error).catch(() => {});
               throw error;
             }

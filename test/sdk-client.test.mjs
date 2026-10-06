@@ -279,6 +279,19 @@ for (const [name, implementation] of [
     });
   }
 
+  test(`${name}: usage trailer wait never outlives the request deadline`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame(delta('final review', 'stop')));
+    }, { usageTrailerGraceMs: 5000 });
+    const started = Date.now();
+    const result = JSON.parse(await (await f.invoke({ timeoutMs: 300 })).text());
+    assert.ok(Date.now() - started < 1500, 'the deadline, not the grace window, bounds the trailer wait');
+    assert.equal(result.choices[0].finish_reason, 'stop');
+    assert.equal(result.choices[0].message.content, 'final review');
+    assert.equal(f.logs.at(-1).usage_trailer, 'end');
+  });
+
   for (const [mode, expected] of [
     ['clean close mid-reasoning', { end: 'clean_close', body_end: 'eof', done_marker: false, frame_boundary: true, last_event: 'reasoning' }],
     ['idle close', { end: 'idle_close', body_end: 'eof', done_marker: false, frame_boundary: true, last_event: 'reasoning' }],
@@ -384,6 +397,8 @@ for (const [name, implementation] of [
     });
     await assert.rejects(f.invoke({ timeoutMs: 5000 }), (error) => error.code === 'REVIEW_RESPONSE_TOO_LARGE');
     assert.equal(f.calls.length, 1);
+    assert.equal(f.logs.at(-1).body_end, 'error');
+    assert.equal(f.logs.at(-1).body_error, 'Error/REVIEW_RESPONSE_TOO_LARGE');
   });
 
   test(`${name}: unsafe endpoints are rejected before any request`, async () => {

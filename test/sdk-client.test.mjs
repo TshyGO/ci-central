@@ -22,7 +22,7 @@ const frame = (event) => `data: ${JSON.stringify(event)}\r\n\r\n`;
 const basePayload = { model: 'ark-code-latest', stream: true, max_tokens: 65536, temperature: 0.2,
   messages: [{ role: 'system', content: 'Review.' }, { role: 'user', content: 'synthetic code' }] };
 
-async function fixture(t, implementation, route) {
+async function fixture(t, implementation, route, requesterOptions = {}) {
   const calls = [], logs = [], dispatcherOptions = [];
   const server = createServer({ key: certificate.private, cert: certificate.cert }, async (req, res) => {
     let text = '';
@@ -36,7 +36,7 @@ async function fixture(t, implementation, route) {
   const request = implementation.createChatRequester({ createDispatcher: (options) => {
     dispatcherOptions.push(options);
     return new Agent({ ...options, connect: { ca: certificate.cert } });
-  } });
+  }, usageTrailerGraceMs: 200, ...requesterOptions });
   const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B', protocol, sessionId, onProgress = (entry) => logs.push(entry) } = {}) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -234,6 +234,122 @@ for (const [name, implementation] of [
     const result = JSON.parse(await (await f.invoke()).text());
     assert.equal(result.choices[0].finish_reason, 'length');
     assert.equal(result.choices[0].message.content, '');
+  });
+
+  test(`${name}: usage trailer after finish_reason is recorded as accounting only`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })));
+      res.write(frame(delta('final review', 'stop')));
+      res.write(frame({ model: 'glm-5.3', choices: [], usage: { prompt_tokens: 120, completion_tokens: 45,
+        total_tokens: 165, completion_tokens_details: { reasoning_tokens: 30 } } }));
+      res.write('data: [DONE]\n\n');
+      // Deliberately leave the connection open after the trailer.
+    });
+    const result = JSON.parse(await (await f.invoke()).text());
+    assert.equal(result.choices[0].message.content, 'final review');
+    assert.equal(result.usage.completion_tokens, 45);
+    const finished = f.logs.at(-1);
+    assert.equal(finished.usage_trailer, 'usage');
+    assert.deepEqual([finished.input_tokens, finished.output_tokens, finished.reasoning_tokens], [120, 45, 30]);
+    assert.equal(finished.last_event, 'finish');
+    assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE REASONING'));
+  });
+
+  for (const [mode, after, status] of [
+    ['silent connection', '', 'timeout'],
+    ['malformed trailer', 'data: {invalid}\n\n', 'error'],
+    ['in-band error trailer', frame({ error: { code: 'billing_error', message: 'PRIVATE ERROR' } }), 'error'],
+    ['EOF', null, 'end'],
+  ]) {
+    test(`${name}: ${mode} after finish_reason never invalidates the review`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (after === null) { res.end(frame(delta('final review', 'stop'))); return; }
+        res.write(frame(delta('final review', 'stop')) + after);
+      });
+      const started = Date.now();
+      const result = JSON.parse(await (await f.invoke()).text());
+      assert.ok(Date.now() - started < 1500, 'the trailer wait is bounded by its grace window');
+      assert.equal(result.choices[0].finish_reason, 'stop');
+      assert.equal(result.choices[0].message.content, 'final review');
+      assert.equal(f.logs.at(-1).usage_trailer, status);
+      assert.equal(f.logs.at(-1).output_tokens, null);
+      assert.ok(!JSON.stringify(f.logs).includes('PRIVATE ERROR'));
+    });
+  }
+
+  for (const [mode, expected] of [
+    ['clean close mid-reasoning', { end: 'clean_close', body_end: 'eof', done_marker: false, frame_boundary: true, last_event: 'reasoning' }],
+    ['idle close', { end: 'idle_close', body_end: 'eof', done_marker: false, frame_boundary: true, last_event: 'reasoning' }],
+    ['DONE without finish', { end: 'done_without_finish', done_marker: true, last_event: 'reasoning' }],
+    ['close mid-frame', { end: 'clean_close', body_end: 'eof', done_marker: false, frame_boundary: false, last_event: 'reasoning' }],
+    ['unrecognized in-band frame', { end: 'clean_close', body_end: 'eof', last_event: 'no_choice:code+message' }],
+  ]) {
+    test(`${name}: ${mode} reports how the incomplete stream ended`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })));
+        if (mode === 'idle close') await delay(150);
+        if (mode === 'DONE without finish') res.write('data: [DONE]\n\n');
+        if (mode === 'close mid-frame') res.write('data: {"model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"PRIVATE');
+        if (mode === 'unrecognized in-band frame') res.write(frame({ code: 'upstream_timeout', message: 'PRIVATE REASONING' }));
+        res.end();
+      }, { idleCloseMs: 100 });
+      await assert.rejects(f.invoke(), (error) => {
+        assert.equal(error.code, 'REVIEW_INCOMPLETE_STREAM');
+        assert.match(error.message, new RegExp(`http=200, end=${expected.end}, last_event=${expected.last_event.split(':')[0]}`));
+        assert.ok(!error.message.includes('PRIVATE'));
+        return true;
+      });
+      const finished = f.logs.at(-1);
+      assert.equal(finished.incomplete_end, expected.end);
+      for (const field of ['body_end', 'done_marker', 'frame_boundary', 'last_event']) {
+        if (field in expected) assert.equal(finished[field], expected[field], field);
+      }
+      if (mode === 'idle close') assert.ok(finished.idle_before_end_ms >= 100);
+      else if (finished.body_end === 'eof') assert.ok(finished.idle_before_end_ms < 100);
+      assert.ok(!JSON.stringify(f.logs).includes('PRIVATE'));
+    });
+  }
+
+  test(`${name}: transport AbortError swallowed by the SDK is still reported`, async (t) => {
+    // The SDK ends iteration silently when the body fails with an AbortError that
+    // the caller did not request; the raw body must keep that termination visible.
+    const f = await fixture(t, implementation, async () => {}, { fetch: async () => new Response(new ReadableStream({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' }))));
+        await delay(10);
+        controller.error(new DOMException('The operation was aborted.', 'AbortError'));
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } }) });
+    await assert.rejects(f.invoke(), (error) => {
+      assert.equal(error.code, 'REVIEW_INCOMPLETE_STREAM');
+      assert.equal(error.name, 'SDKRequestError');
+      assert.match(error.message, /end=transport_error, last_event=reasoning, idle_before_end_ms=\d+, body_error=AbortError/);
+      return true;
+    });
+    assert.equal(f.logs.at(-1).body_end, 'error');
+    assert.equal(f.logs.at(-1).body_error, 'AbortError');
+    assert.equal(f.logs.at(-1).incomplete_end, 'transport_error');
+  });
+
+  test(`${name}: abrupt socket close keeps the transport code and body state`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })));
+      await delay(20);
+      res.destroy();
+    });
+    await assert.rejects(f.invoke(), (error) => {
+      // Undici reports a peer FIN as UND_ERR_SOCKET and a reset as ECONNRESET.
+      assert.match(error.code, /^(?:UND_ERR_SOCKET|ECONNRESET)$/);
+      assert.ok(error.message.includes(`code=${error.code}, http=200`));
+      return true;
+    });
+    assert.equal(f.logs.at(-1).body_end, 'error');
+    assert.match(f.logs.at(-1).body_error, /UND_ERR_SOCKET|ECONNRESET/);
+    assert.equal(f.logs.at(-1).incomplete_end, undefined);
   });
 
   for (const mode of ['headers', 'reasoning', 'content', 'disconnect']) {

@@ -667,7 +667,7 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:glm-5.3,C:mimo-v2.6-pro');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:glm-5.3-flash,C:mimo-v2.6-pro');
 check('healthy path never calls a fallback', r.captured.length === 3
   && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'glm-5.2'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
@@ -689,7 +689,7 @@ check('Lane C uses Chat Completions without Google thinking fields',
   && healthyLaneC?.temperature === undefined
   && healthyLaneC?.generationConfig === undefined);
 check('Lane B uses the configured GLM output budget without lowering model reasoning',
-  healthyLaneB?.model === 'glm-5.3'
+  healthyLaneB?.model === 'glm-5.3-flash'
   && healthyLaneB?.max_tokens === 65536
   && healthyLaneB?.reasoning_effort === undefined
   && healthyLaneB?.thinking === undefined);
@@ -709,7 +709,7 @@ check('current-head status starts pending and finishes with all actual service m
 r = await scenario(healthy, {}, { useBundle: true });
 check('production bundle preserves the same dispatch and validated publication', !r.error && r.captured.length === 3 && r.posted.length === 3
   && r.posted.every(body => body.includes('证据位置与代码引用已校验')));
-r = await scenario(call => call.lane === 'B' && call.model === 'glm-5.3'
+r = await scenario(call => call.lane === 'B' && call.model === 'glm-5.3-flash'
   ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Approved without evidence.' } }] })) : healthy(call));
 check('a completed non-contract response falls back once without publishing it as valid evidence', !r.error
   && r.captured.filter(call => call.lane === 'B').length === 2
@@ -728,7 +728,7 @@ const emptyThrottledConfig = structuredClone(centralConfig);
 emptyThrottledConfig.lanes[1].primary.context_profile = 'kimi-k3-throttled';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(emptyThrottledConfig) }, { files: [patch('src/a.ts', 500), patch('tests/a.test.ts', 500)] });
 check('a model whose actual context pack is empty is skipped without consuming a request', !r.error
-  && !r.captured.some(call => call.model === 'glm-5.3')
+  && !r.captured.some(call => call.model === 'glm-5.3-flash')
   && r.captured.filter(call => call.lane === 'B').length === 1
   && r.posted.some(body => body.includes('served by glm-5.2')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
@@ -878,14 +878,14 @@ const qwenFallback = r.captured.find(({ model }) => model === 'muse-spark-1.2-co
 check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 16384 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
 check('Muse 1.2 still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor')));
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3-flash' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back once only to Go GLM 5.2',
-  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 1
+  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3-flash').length === 1
   && r.captured.filter(({ model }) => model === 'glm-5.2').length === 1
   && r.captured.find(({ model }) => model === 'glm-5.2')?.body.max_tokens === 65536
   && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'glm-5.2')
   && !r.captured.some(({ model }) => model === 'deepseek-v4-pro-202606')
-  && r.posted.some((body) => body.includes('glm-5.3 unavailable -> served by glm-5.2')));
+  && r.posted.some((body) => body.includes('glm-5.3-flash unavailable -> served by glm-5.2')));
 
 r = await scenario((call) => call.lane === 'C' && call.model === 'mimo-v2.6-pro' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
 check('Lane C falls back only to Go MiMo V2.5 Pro after one failed MiMo V2.6 Pro request',
@@ -1126,7 +1126,7 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 
 
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call));
+r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call));
 // A keeps the repository default, B and C each carry a lane-level thirty-minute
 // window, and B's fallback carries its own. C's window is no longer the short
 // 180000: that value was calibrated against the retired SenseNova slot, and the
@@ -1135,13 +1135,13 @@ check('B primary and fallback each get thirty minutes while A and C keep their c
   !r.error && r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
   r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
   r.timeouts.join(',') === '300000,1800000,1800000,1800000');

@@ -27,7 +27,7 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | Lane | 当前供应商 | 协议 | 模型链 | 是否阻塞 |
 |---|---|---|---|---|
 | A | OpenCode Go | OpenAI SDK / Responses SSE | Muse Spark 1.3 Contributor → 1.2 Contributor | 计入两路 quorum |
-| B | OpenCode Go | OpenAI SDK / Chat Completions SSE | GLM 5.3 → GLM 5.2 | 计入两路 quorum |
+| B | OpenCode Go | OpenAI SDK / Chat Completions SSE | GLM 5.3 Flash → GLM 5.2 | 计入两路 quorum |
 | C | OpenCode Go | OpenAI SDK / Chat Completions SSE | MiMo V2.6 Pro → MiMo V2.5 Pro | advisory；有效时计入 quorum |
 
 三条 Lane 均使用 OpenCode Go，各模型额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。它仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
@@ -40,7 +40,7 @@ A 使用官方 `openai` JavaScript SDK 的 Responses SSE；B 和 C 使用同一 
 
 SDK 负责 SSE 分帧、UTF-8 和 JSON 解码。适配层逐事件累计最终正文，只计数而不保存 `reasoning_content`、Responses reasoning item 等供应商私有思考；收到 choice 0 的 `finish_reason` 即确定审核结果，不等待 `[DONE]` 或 TCP EOF；Chat Completions 随后最多再读 1 秒 usage 尾帧，只用于 token 统计，尾帧缺失、超时、格式错误或错误事件都不改变已确定的结果。只有正文非空且 `finish_reason=stop` 才计入有效审核；断流、缺少结束原因、截断、错误事件均不能变成有效证据。Responses 仅将 `response.completed` 且状态 `completed` 的最终 `output_text` 归一为成功；incomplete、工具调用、refusal-only、错误和断流不算有效审核。
 
-安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 使用 GLM 5.3/5.2 主备，输出上限均为 65536；C 使用 MiMo V2.6 Pro/V2.5 Pro 主备，输出上限均为 131072。不添加 low/关闭思考参数，每个模型的总时限仍为 30 分钟。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
+安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 使用 GLM 5.3 Flash/5.2 主备，输出上限均为 65536；C 使用 MiMo V2.6 Pro/V2.5 Pro 主备，输出上限均为 131072。不添加 low/关闭思考参数，每个模型的总时限仍为 30 分钟。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
 
 SDK 对干净 EOF、`[DONE]` 和传输层 `AbortError` 都会静默结束迭代，因此适配层在原始正文层记录终止方式。流没有结束原因时仍报 `REVIEW_INCOMPLETE_STREAM`。失败评论只附 `code`、`http`、`end`、`last_event` 类型、`idle_before_end_ms` 和本地词汇内的 `body_error`；`finished` 日志记录全部脱敏证据：`incomplete_end`（`clean_close` 正常关流、`idle_close` 静默 60 秒以上后关流、`done_without_finish` 有 `[DONE]` 无结束原因、`transport_error` 被 SDK 吞掉的传输错误；未观察到正文结束时为 `unknown`）、`body_end`/`body_error`、`done_marker`、`frame_boundary`（是否停在完整 SSE 帧之后，零字节时为 null）、`max_gap_ms`、`idle_before_end_ms`、`last_event`（Chat Completions 为 `reasoning`、`content`、`no_choice:<键名>` 等，只含键名；Responses 为事件 type）以及 usage token 数。TCP 断开或重置不属于这一类，仍报 `UND_ERR_SOCKET`/`ECONNRESET`。
 
@@ -149,7 +149,7 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 所有模型请求失败（包括超时、限流、认证、HTML 验证页、DNS/TLS、解析失败、空正文和不完整输出）都只进入同 Lane 备用一次；备用失败后发布诊断或明确标记的不完整结果，不计为有效审核。未配置该 Lane 凭据时仍直接发布配置诊断，不发送请求。
 - 不做退避重试，不做可选参数修复后重发，不跟随 HTTP 重定向。A/B/C 并行，每路一旦完整成功或主备均结束就立即校验 PR head/state 并发布稳定评论；不等待其他 Lane。最终 job 仍等待各路结束后执行原有 quorum/required 门禁，不因提早发布而提早放行。
 - 当前保留主备各一次、逐路即时发布，B 主备各 30 分钟；三路统一 SDK 流式接入。SDK 及连接层超时与模型预算匹配，但 DNS/TLS、网络或供应商错误仍可能提前失败。
-- B/C 均使用 OpenCode Go `https://opencode.ai/zen/go/v1` 的 Chat Completions 接口。B 通过固定 Lane B 槽位调用 `glm-5.3`，失败一次立即切同 Lane 的 `glm-5.2`；C 通过固定 Lane C 槽位调用 `mimo-v2.6-pro`，失败一次立即切同 Lane 的 `mimo-v2.5-pro`。不再使用 Ark 供应商或模型别名。主备均保留完整上下文；B 输出上限 65536，C 输出上限 131072。
+- B/C 均使用 OpenCode Go `https://opencode.ai/zen/go/v1` 的 Chat Completions 接口。B 通过固定 Lane B 槽位调用 `glm-5.3-flash`，失败一次立即切同 Lane 的 `glm-5.2`；C 通过固定 Lane C 槽位调用 `mimo-v2.6-pro`，失败一次立即切同 Lane 的 `mimo-v2.5-pro`。不再使用 Ark 供应商或模型别名。主备均保留完整上下文；B 输出上限 65536，C 输出上限 131072。
 - 每个模型最多发送一次请求，30 分钟只是单次请求的截止上限，提前失败立即切备用，无重试、退避或参数修复重发。主模型成功绝不调用备用；实际使用备用时评论明确标记，不能当成主模型成功。模型是否可用以 exact-head Lane 评论和日志验收，不能用短探针或 wrapper 绿色检查代替。
 - Muse Spark 1.2 Contributor 仅作为 Lane A 的同供应商备用；主模型固定为用户指定的 Muse Spark 1.3 Contributor。完整上下文、16384 输出上限，Responses 不添加额外思考或采样参数。
 - reusable job 兜底 70 分钟，覆盖 B、C 各自主备最多 60 分钟（三路并行）及准备/发布。正常 `stop` 即结束，不强迫模型消耗全部预算；30 分钟是保护上限，不保证每次都能生成。

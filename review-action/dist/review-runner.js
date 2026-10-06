@@ -176,14 +176,16 @@ var require_review_context = __commonJS({
           complete: true,
           ranges: [[1, code.length]],
           old_ranges: [],
-          code
+          code,
+          new_code: code,
+          old_code: []
         }];
       }
       const patch = file.patch;
-      if (!patch) return [{ text: "[binary or patch unavailable]", ranges: [], old_ranges: [], code: [] }];
+      if (!patch) return [{ text: "[binary or patch unavailable]", ranges: [], old_ranges: [], code: [], new_code: [], old_code: [] }];
       const lines = patch.split("\n");
       const headers = lines.flatMap((line, index) => /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line) ? [index] : []);
-      if (!headers.length) return [{ text: patch, ranges: [], old_ranges: [], code: lines.map((line) => line.slice(1)) }];
+      if (!headers.length) return [{ text: patch, ranges: [], old_ranges: [], code: lines.map((line) => line.slice(1)), new_code: [], old_code: [] }];
       return headers.map((start, index) => {
         const chunk = lines.slice(start, headers[index + 1] ?? lines.length);
         const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(chunk[0]);
@@ -198,6 +200,8 @@ var require_review_context = __commonJS({
           complete: observedNew === count && observedOld === oldCount,
           ranges: observedNew ? [[first, first + observedNew - 1]] : [],
           old_ranges: observedOld ? [[oldFirst, oldFirst + observedOld - 1]] : [],
+          new_code: chunk.slice(1).filter((line) => /^[ +]/.test(line)).map((line) => line.slice(1)),
+          old_code: chunk.slice(1).filter((line) => /^[ \-]/.test(line)).map((line) => line.slice(1)),
           code: chunk.slice(1).filter((line) => /^[ +\-]/.test(line)).map((line) => line.slice(1))
         };
       });
@@ -254,8 +258,9 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
           try {
             const { data } = await github.rest.repos.getContent({ owner, repo, path: file.filename, ref: head });
             if (data.type === "file" && data.encoding === "base64" && data.size <= 3e4) {
-              const source = Buffer.from(data.content, "base64").toString("utf8");
-              if (!source.includes("\0") && source.length <= 2e4) {
+              const source = Buffer.from(data.content, "base64").toString("utf8").replace(/\r\n/g, "\n");
+              const formattedSize = source.split("\n").reduce((sum, line, index) => sum + line.length + String(index + 1).length + 4, 90);
+              if (source.trim() && !source.includes("\0") && source.length <= 2e4 && formattedSize < file.patch.length) {
                 enriched.push({ ...file, after_image: source });
                 continue;
               }
@@ -387,7 +392,7 @@ var require_review_report = __commonJS({
         const side = finding.side ?? "new";
         if (!["new", "old"].includes(side) || !Number.isSafeInteger(finding.line) || finding.line < 1 || !(side === "old" ? file.old_ranges : file.ranges).some(([start, end]) => finding.line >= start && finding.line <= end)) throw new Error("Review contract: line is outside supplied hunks.");
         const evidence = plain(finding.evidence, "evidence");
-        if (!file.hunks.some((hunk) => (side === "old" ? hunk.old_ranges : hunk.ranges).some(([start, end]) => finding.line >= start && finding.line <= end) && normalize(hunk.code.join("\n")).includes(normalize(evidence)))) throw new Error("Review contract: code quote was not supplied at that hunk.");
+        if (!file.hunks.some((hunk) => (side === "old" ? hunk.old_ranges : hunk.ranges).some(([start, end]) => finding.line >= start && finding.line <= end) && normalize((side === "old" ? hunk.old_code : hunk.new_code).join("\n")).includes(normalize(evidence)))) throw new Error("Review contract: code quote was not supplied on that side of the hunk.");
         return {
           priority: finding.priority,
           file: finding.file,
@@ -492,7 +497,8 @@ var require_review_status = __commonJS({
         state: reusableLaneIds.has(lane.id) ? "reused" : "running",
         served: null
       }]));
-      let comment = comments.filter((item) => item.user?.login === "github-actions[bot]" && item.body?.startsWith(MARKER)).at(-1);
+      const summaries = comments.filter((item) => item.user?.login === "github-actions[bot]" && item.body?.split(/\r?\n/, 1)[0] === MARKER);
+      let comment = summaries.at(-1);
       let queue = Promise.resolve();
       function body() {
         const valid = [...rows.values()].filter((row) => ["complete", "reused"].includes(row.state)).length;
@@ -526,6 +532,15 @@ var require_review_status = __commonJS({
             ({ data: comment } = await github.rest.issues.updateComment({ owner, repo, comment_id: comment.id, body: text }));
           } else {
             ({ data: comment } = await github.rest.issues.createComment({ owner, repo, issue_number: pullNumber, body: text }));
+          }
+          for (const old of summaries) {
+            if (old.id === comment.id || old.removed) continue;
+            try {
+              await github.rest.issues.deleteComment({ owner, repo, comment_id: old.id });
+              old.removed = true;
+            } catch {
+              logger.log("Duplicate bot status summary could not be removed.");
+            }
           }
         }).catch(() => logger.log("Current-head status summary could not be published; lane evidence remains independent."));
         return queue;

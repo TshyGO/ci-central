@@ -7,10 +7,27 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export function inspectCaller(text, expectedSha) {
-  const pins = [...text.matchAll(/^\s*uses:\s*TshyGO\/ci-central\/\.github\/workflows\/pr-review\.yml@([a-f0-9]{40})\s*(?:#.*)?$/gm)].map((m) => m[1]);
-  const inputs = [...text.matchAll(/^\s*central_workflow_sha:\s*([a-f0-9]{40})\s*(?:#.*)?$/gm)].map((m) => m[1]);
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const uses = lines.flatMap((line, index) => {
+    const match = /^ {4}uses:\s*TshyGO\/ci-central\/\.github\/workflows\/pr-review\.yml@([a-f0-9]{40})\s*(?:#.*)?$/.exec(line);
+    return match ? [{ index, sha: match[1] }] : [];
+  });
+  let block = '';
+  if (uses.length === 1) {
+    let start = uses[0].index;
+    while (start >= 0 && !/^ {2}[\w-]+:\s*(?:#.*)?$/.test(lines[start])) start--;
+    let end = uses[0].index + 1;
+    while (end < lines.length && !/^ {2}[\w-]+:\s*(?:#.*)?$/.test(lines[end])) end++;
+    if (start >= 0) block = lines.slice(start, end).join('\n');
+  }
+  const pins = uses.map(item => item.sha);
+  const inputs = [...block.matchAll(/^ {6}central_workflow_sha:\s*([a-f0-9]{40})\s*(?:#.*)?$/gm)].map((m) => m[1]);
   const slots = ['A', 'B', 'C'].flatMap((lane) => ['KEY', 'API_BASE'].map((suffix) => `PR_AGENT_LANE_${lane}_${suffix}`));
-  const mappingsValid = slots.every((slot) => text.includes(`${slot}: \${{ secrets.${slot} }}`));
+  const mappingsValid = /^ {4}secrets:\s*(?:#.*)?$/m.test(block) && slots.every((slot) => {
+    const escaped = slot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const expression = new RegExp(`^ {6}${escaped}:\\s*\\$\\{\\{\\s*secrets\\.${escaped}\\s*\\}\\}\\s*(?:#.*)?$`, 'gm');
+    return [...block.matchAll(expression)].length === 1;
+  });
   const matched = pins.length === 1 && inputs.length === 1 && pins[0] === inputs[0];
   return { pin: pins.length === 1 ? pins[0] : null, matched, mappingsValid,
     current: matched && pins[0] === expectedSha,

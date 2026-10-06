@@ -58,6 +58,13 @@ test('a partly supplied file retains exact visible hunk ranges', () => {
   assert.equal(packed.coverage[0].supplied_hunks, 1);
   assert.ok(!packed.text.includes('[... patch truncated'));
 });
+test('no-final-newline markers do not count as old or new code lines', () => {
+  const packed = packDiff([{ ...file, patch: '@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file' }], 1000);
+  assert.equal(packed.kept, 1);
+  assert.equal(packed.omittedHunks, 0);
+  assert.deepEqual(packed.coverage[0].ranges, [[1, 1]]);
+  assert.deepEqual(packed.coverage[0].old_ranges, [[1, 1]]);
+});
 test('an already truncated upstream hunk cannot substantiate invented unseen lines', () => {
   const packed = packDiff([{ ...file, patch: '@@ -10,20 +10,20 @@\n only-one-line' }], 1000);
   assert.equal(packed.kept, 0);
@@ -101,7 +108,7 @@ test('no-findings output is valid when its actual supplied coverage is stated', 
 });
 test('wrong files, unseen lines, invented quotes and speculative findings are rejected', () => {
   for (const mutation of [{ file: 'src/not-supplied.js' }, { line: 30 }, { evidence: 'missingCode()' },
-    { evidence: 'persist(user);' }, { confidence: 'medium' }]) {
+    { evidence: 'persist(user);' }, { evidence: 'return true;' }, { confidence: 'medium' }]) {
     const changed = structuredClone(report);
     Object.assign(changed.findings[0], mutation);
     assert.throws(() => parseReview(JSON.stringify(changed), context), /Review contract/);

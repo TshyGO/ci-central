@@ -4,21 +4,22 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createStatusPublisher, MARKER } = require('../review-action/src/review-status.js');
 const head = 'a'.repeat(40);
-function fixture({ stale = false, fail = false } = {}) {
-  const writes = [], logs = [];
+function fixture({ stale = false, fail = false, comments = [] } = {}) {
+  const writes = [], logs = [], deleted = [];
   let comment;
   const github = { rest: {
     pulls: { get: async () => ({ data: { state: 'open', head: { sha: stale ? 'b'.repeat(40) : head } } }) },
     issues: { createComment: async ({ body }) => {
       if (fail) throw new Error('PRIVATE');
       comment = { id: 1, body }; writes.push(body); return { data: comment };
-    }, updateComment: async ({ body }) => { writes.push(body); return { data: { id: 1, body } }; } },
+    }, updateComment: async ({ body, comment_id }) => { writes.push(body); return { data: { id: comment_id, body } }; },
+      deleteComment: async ({ comment_id }) => { deleted.push(comment_id); } },
   } };
   const publisher = createStatusPublisher({ github, owner: 'TshyGO', repo: 'sample', pullNumber: 1,
     head, workflow: 'c'.repeat(40), runUrl: 'https://github.com/TshyGO/sample/actions/runs/1', runId: 1,
     lanes: ['A', 'B', 'C'].map((id) => ({ id, primary: { id: 'primary-' + id } })),
-    reusableLaneIds: new Set(), comments: [], quorum: 2, logger: { log: (text) => logs.push(text) } });
-  return { publisher, writes, logs };
+    reusableLaneIds: new Set(), comments, quorum: 2, logger: { log: (text) => logs.push(text) } });
+  return { publisher, writes, logs, deleted };
 }
 test('one current-head summary distinguishes running, fallback and completed lanes', async () => {
   const { publisher, writes } = fixture();
@@ -40,6 +41,18 @@ test('status updates never write against an obsolete head', async () => {
   await publisher.publish();
   await publisher.update('A', 'complete', 'primary-A');
   assert.equal(writes.length, 0);
+});
+test('duplicate summaries are reconciled without deleting human comments or quoted markers', async () => {
+  const comments = [
+    { id: 1, user: { login: 'github-actions[bot]' }, body: MARKER + '\nold' },
+    { id: 2, user: { login: 'github-actions[bot]' }, body: MARKER + '\nnewer' },
+    { id: 3, user: { login: 'human' }, body: MARKER + '\nhuman' },
+    { id: 4, user: { login: 'github-actions[bot]' }, body: 'Quoted: ' + MARKER },
+  ];
+  const { publisher, deleted } = fixture({ comments });
+  await publisher.publish();
+  await publisher.update('A', 'complete', 'primary-A');
+  assert.deepEqual(deleted, [1]);
 });
 test('a summary publication failure does not become a lane/model retry', async () => {
   const { publisher, writes, logs } = fixture({ fail: true });

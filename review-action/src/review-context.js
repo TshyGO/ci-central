@@ -20,14 +20,14 @@ function hunks(file) {
     const code = file.after_image.split('\n');
     return [{ text: '[Complete head-side workflow source; removed/base diff is not supplied.]\n'
       + code.map((line, index) => `${index + 1} | ${line}`).join('\n'),
-    complete: true, ranges: [[1, code.length]], old_ranges: [], code }];
+    complete: true, ranges: [[1, code.length]], old_ranges: [], code, new_code: code, old_code: [] }];
   }
   const patch = file.patch;
-  if (!patch) return [{ text: '[binary or patch unavailable]', ranges: [], old_ranges: [], code: [] }];
+  if (!patch) return [{ text: '[binary or patch unavailable]', ranges: [], old_ranges: [], code: [], new_code: [], old_code: [] }];
   const lines = patch.split('\n');
   const headers = lines.flatMap((line, index) => /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line) ? [index] : []);
   // An unlocated patch can still be shown, but cannot substantiate line-number findings.
-  if (!headers.length) return [{ text: patch, ranges: [], old_ranges: [], code: lines.map((line) => line.slice(1)) }];
+  if (!headers.length) return [{ text: patch, ranges: [], old_ranges: [], code: lines.map((line) => line.slice(1)), new_code: [], old_code: [] }];
   return headers.map((start, index) => {
     const chunk = lines.slice(start, headers[index + 1] ?? lines.length);
     const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(chunk[0]);
@@ -40,6 +40,8 @@ function hunks(file) {
     return { text: chunk.join('\n'), complete: observedNew === count && observedOld === oldCount,
       ranges: observedNew ? [[first, first + observedNew - 1]] : [],
       old_ranges: observedOld ? [[oldFirst, oldFirst + observedOld - 1]] : [],
+      new_code: chunk.slice(1).filter(line => /^[ +]/.test(line)).map(line => line.slice(1)),
+      old_code: chunk.slice(1).filter(line => /^[ \-]/.test(line)).map(line => line.slice(1)),
       code: chunk.slice(1).filter((line) => /^[ +\-]/.test(line)).map((line) => line.slice(1)) };
   });
 }
@@ -85,8 +87,11 @@ async function enrichWorkflows({ github, owner, repo, head, files, logger }) {
       try {
         const { data } = await github.rest.repos.getContent({ owner, repo, path: file.filename, ref: head });
         if (data.type === 'file' && data.encoding === 'base64' && data.size <= 30000) {
-          const source = Buffer.from(data.content, 'base64').toString('utf8');
-          if (!source.includes('\0') && source.length <= 20000) { enriched.push({ ...file, after_image: source }); continue; }
+          const source = Buffer.from(data.content, 'base64').toString('utf8').replace(/\r\n/g, '\n');
+          const formattedSize = source.split('\n').reduce((sum, line, index) => sum + line.length + String(index + 1).length + 4, 90);
+          if (source.trim() && !source.includes('\0') && source.length <= 20000 && formattedSize < file.patch.length) {
+            enriched.push({ ...file, after_image: source }); continue;
+          }
         }
       } catch {
         logger.log('Workflow head-source enrichment unavailable; retaining the bounded original patch.');

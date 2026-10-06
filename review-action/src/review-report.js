@@ -61,7 +61,7 @@ function parseReview(text, context) {
     const evidence = plain(finding.evidence, 'evidence');
     if (!file.hunks.some((hunk) => (side === 'old' ? hunk.old_ranges : hunk.ranges)
       .some(([start, end]) => finding.line >= start && finding.line <= end)
-      && normalize(hunk.code.join('\n')).includes(normalize(evidence)))) throw new Error('Review contract: code quote was not supplied at that hunk.');
+      && normalize((side === 'old' ? hunk.old_code : hunk.new_code).join('\n')).includes(normalize(evidence)))) throw new Error('Review contract: code quote was not supplied on that side of the hunk.');
     return { priority: finding.priority, file: finding.file, line: finding.line, confidence: finding.confidence, side, evidence, title: plain(finding.title, 'title', 180),
       trigger: plain(finding.trigger, 'trigger'), impact: plain(finding.impact, 'impact'),
       suggestion: plain(finding.suggestion, 'suggestion') };

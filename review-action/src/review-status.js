@@ -10,7 +10,8 @@ function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow
   lanes, reusableLaneIds, comments, quorum, logger }) {
   const rows = new Map(lanes.map((lane) => [lane.id, { primary: lane.primary.id,
     state: reusableLaneIds.has(lane.id) ? 'reused' : 'running', served: null }]));
-  let comment = comments.filter((item) => item.user?.login === 'github-actions[bot]' && item.body?.startsWith(MARKER)).at(-1);
+  const summaries = comments.filter((item) => item.user?.login === 'github-actions[bot]' && item.body?.split(/\r?\n/, 1)[0] === MARKER);
+  let comment = summaries.at(-1);
   let queue = Promise.resolve();
   function body() {
     const valid = [...rows.values()].filter((row) => ['complete', 'reused'].includes(row.state)).length;
@@ -35,6 +36,13 @@ function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow
         ({ data: comment } = await github.rest.issues.updateComment({ owner, repo, comment_id: comment.id, body: text }));
       } else {
         ({ data: comment } = await github.rest.issues.createComment({ owner, repo, issue_number: pullNumber, body: text }));
+      }
+      for (const old of summaries) {
+        if (old.id === comment.id || old.removed) continue;
+        try {
+          await github.rest.issues.deleteComment({ owner, repo, comment_id: old.id });
+          old.removed = true;
+        } catch { logger.log('Duplicate bot status summary could not be removed.'); }
       }
     }).catch(() => logger.log('Current-head status summary could not be published; lane evidence remains independent.'));
     return queue;

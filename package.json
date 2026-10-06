@@ -7,7 +7,7 @@
   },
   "scripts": {
     "build": "node scripts/build-sdk.mjs",
-    "test": "node test/review-config.test.mjs && node test/pr-review.test.mjs && node --test test/sdk-client.test.mjs"
+    "test": "node test/review-config.test.mjs && node test/pr-review.test.mjs && node --test test/review-contract.test.mjs test/review-status.test.mjs test/caller-audit.test.mjs test/review-evaluation.test.mjs test/sdk-client.test.mjs"
   },
   "dependencies": {
     "openai": "7.13.0",

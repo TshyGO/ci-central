@@ -25,3 +25,5 @@ const notices = await Promise.all(['openai', 'undici'].map(async (name) => {
   return `${name} ${version}\n\n${await readFile(new URL('LICENSE', base), 'utf8')}`;
 }));
 await writeFile(new URL('../review-action/dist/THIRD_PARTY_LICENSES.txt', import.meta.url), notices.join('\n\n---\n\n'));
+
+await writeFile(new URL('../review-action/dist/index.js', import.meta.url), (await readFile(new URL('../review-action/src/index.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n'));

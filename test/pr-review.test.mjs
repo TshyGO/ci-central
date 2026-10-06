@@ -349,15 +349,16 @@ const evidenceComment = (lane, { head = headSha, workflow = workflowSha, status 
   ].join('\n'),
 });
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
+const reportText = (content) => content ? JSON.stringify({ summary: content, reviewed_files: ['src/a.ts', 'tests/a.test.ts'], findings: [], limitations: [] }) : '';
 const chatResult = (model, content, { reasoning = 'private thinking', finish = 'stop' } = {}) => JSON.stringify({
   model: `provider/${model}`,
-  choices: [{ finish_reason: finish, message: { content, reasoning_content: reasoning } }],
+  choices: [{ finish_reason: finish, message: { content: reportText(content), reasoning_content: reasoning } }],
   usage: { prompt_tokens: 1 },
 });
 const geminiResult = (content, { finish = 'STOP', thought = '', usageMetadata } = {}) => JSON.stringify({
   candidates: [{ finishReason: finish, content: { parts: [
     ...(thought ? [{ thought: true, text: thought }] : []),
-    { text: content },
+    { text: reportText(content) },
   ] } }],
   usageMetadata: usageMetadata || {
     promptTokenCount: 100,
@@ -376,7 +377,7 @@ function laneForUrl(url) {
 }
 
 async function scenario(route, overrides = {}, options = {}) {
-  const posted = [], captured = [], logs = [], timeouts = [];
+  const posted = [], statusUpdates = [], captured = [], logs = [], timeouts = [];
   const comments = (options.comments || []).map((comment, index) => ({
     id: index + 1,
     user: { login: 'github-actions[bot]' },
@@ -392,7 +393,7 @@ async function scenario(route, overrides = {}, options = {}) {
         listComments: 'comments',
         createComment: async ({ body }) => {
           if (options.rejectComment?.(body)) throw new Error('comment rejected');
-          posted.push(body);
+          (body.startsWith('<!-- ai-pr-review-status:v1 -->') ? statusUpdates : posted).push(body);
           const comment = { id: comments.length + 1, user: { login: 'github-actions[bot]' }, body };
           comments.push(comment);
           return { data: comment };
@@ -402,7 +403,7 @@ async function scenario(route, overrides = {}, options = {}) {
           const comment = comments.find(({ id }) => id === comment_id);
           if (!comment) throw new Error('comment not found');
           comment.body = body;
-          posted.push(body);
+          (body.startsWith('<!-- ai-pr-review-status:v1 -->') ? statusUpdates : posted).push(body);
           return { data: comment };
         },
         deleteComment: async ({ comment_id }) => {
@@ -436,7 +437,7 @@ async function scenario(route, overrides = {}, options = {}) {
   } catch (caught) {
     error = caught;
   }
-  return { posted, captured, comments, logs, error, pullGets, timeouts };
+  return { posted, statusUpdates, captured, comments, logs, error, pullGets, timeouts };
 }
 
 const checks = [];
@@ -673,9 +674,9 @@ const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
 check('all active protocols receive the repository review prompt',
-  healthyLaneA?.input[0].content === centralConfig.review_policy.system_prompt
-  && healthyLaneB?.messages[0].content === centralConfig.review_policy.system_prompt
-  && healthyLaneC?.messages[0].content === centralConfig.review_policy.system_prompt
+  healthyLaneA?.input[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
+  && healthyLaneB?.messages[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
+  && healthyLaneC?.messages[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
   && !healthyLaneA?.input[0].content.includes('two independent internal review passes')
   && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
   && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
@@ -702,10 +703,23 @@ check('healthy comments visibly identify the reviewed head and stable-update beh
   && body.includes('此评论会随 PR 新提交原地更新')
   && body.includes(`[Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`)));
 
+check('structured reports are rendered as evidence-checked Chinese Markdown', r.posted.every(body => body.includes('证据位置与代码引用已校验') && !body.includes('"reviewed_files"')));
+check('current-head status starts pending and finishes with all actual service models', r.statusUpdates[0].includes('主模型运行中')
+  && r.statusUpdates.at(-1).includes('有效发布：3/3') && r.statusUpdates.every(body => body.includes(headSha)));
+r = await scenario(healthy, {}, { useBundle: true });
+check('production bundle preserves the same dispatch and validated publication', !r.error && r.captured.length === 3 && r.posted.length === 3
+  && r.posted.every(body => body.includes('证据位置与代码引用已校验')));
+r = await scenario(call => call.lane === 'B' && call.model === 'glm-5.3'
+  ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Approved without evidence.' } }] })) : healthy(call));
+check('a completed non-contract response falls back once without publishing it as valid evidence', !r.error
+  && r.captured.filter(call => call.lane === 'B').length === 2
+  && r.posted.some(body => body.includes('served by glm-5.2'))
+  && r.statusUpdates.some(body => body.includes('备用模型运行中'))
+  && !r.posted.some(body => body.includes('Approved without evidence.')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: validEvidence });
 check('automatic rerun reuses all valid same-head evidence without model calls', r.error === undefined
-  && r.captured.length === 0 && r.posted.length === 0 && r.pullGets === 2
+  && r.captured.length === 0 && r.posted.length === 0 && r.pullGets === 3
   && r.logs.some((line) => line.includes('skipping model requests')));
 
 r = await scenario(healthy, {}, { comments: [
@@ -738,8 +752,8 @@ const otherHeadContext = { ...context, payload: { pull_request: { number: 42, he
 r = await scenario(healthy, {}, { comments: validEvidence, pulls: [otherHeadPull], context: otherHeadContext });
 check('valid evidence from an older PR head is not reused', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
 check('new-head reviews overwrite stable comments in place with visible freshness evidence',
-  r.comments.map(({ id }) => id).join(',') === '1,2,3'
-  && r.comments.every(({ body }) => body.includes(`> 审核提交：\`${otherHeadSha.slice(0, 7)}\``)
+  r.comments.filter(({ body }) => body.includes('ai-pr-review-bot:lane-')).map(({ id }) => id).join(',') === '1,2,3'
+  && r.comments.filter(({ body }) => body.includes('ai-pr-review-bot:lane-')).every(({ body }) => body.includes(`> 审核提交：\`${otherHeadSha.slice(0, 7)}\``)
     && body.includes(`head=${otherHeadSha}`)
     && !body.includes(`head=${headSha}`)));
 
@@ -1010,7 +1024,7 @@ r = await scenario(() => { throw new Error('model should not run'); }, {}, { pul
 check('superseded event makes zero model calls before context collection', r.captured.length === 0 && r.logs.some((line) => line.includes('before context collection')));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [pull, newerPull] });
 check('head change during collection makes zero model calls', r.captured.length === 0 && r.logs.some((line) => line.includes('before model dispatch')));
-r = await scenario(healthy, {}, { pulls: [pull, pull, newerPull] });
+r = await scenario(healthy, {}, { pulls: [pull, pull, pull, newerPull] });
 check('head change during model execution publishes no stale comments', r.captured.length === 3 && r.posted.length === 0 && r.logs.some((line) => line.includes('before comment publishing')));
 
 r = await scenario(healthy, {}, { rejectComment: (body) => body.includes('lane-A') });
@@ -1088,7 +1102,7 @@ check('lanes publish in completion order without waiting for the slowest',
   !r.error && cPublishedWhileBRunning
   && r.posted.map((body) => /ai-pr-review-bot:lane-([ABC])/.exec(body)?.[1]).join(',') === 'C,A,B');
 
-r = await scenario(healthy, {}, { pulls: [pull, pull, pull, newerPull] });
+r = await scenario(healthy, {}, { pulls: [pull, pull, pull, pull, newerPull] });
 check('each publication rechecks freshness; later lanes cannot publish after head changes',
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 

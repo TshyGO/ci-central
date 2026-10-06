@@ -1,5 +1,10 @@
 'use strict';
 
+const { validateConfig } = require('./index.js');
+const { packDiff, collectIssues } = require('./review-context.js');
+const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview } = require('./review-report.js');
+const { createStatusPublisher } = require('./review-status.js');
+
 // Runs only from the trusted central checkout. Runtime injection is used by contract tests.
 async function runReview({ github, context, env = globalThis.process.env, fetch = globalThis.fetch,
   timers = globalThis, logger = globalThis.console, sdk }) {
@@ -14,35 +19,13 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   } catch (error) {
     throw new Error(`Central PR review config is invalid JSON: ${error.message}`);
   }
-  if (reviewConfig.repository !== `${owner}/${repo}` || !Array.isArray(reviewConfig.lanes) || reviewConfig.lanes.length === 0) {
-    throw new Error(`Central PR review config does not match ${owner}/${repo}.`);
-  }
+  validateConfig(reviewConfig, `${owner}/${repo}`);
   const workflowSha = (process.env.PR_REVIEW_WORKFLOW_SHA || '').trim().toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(workflowSha)) {
     throw new Error('The resolved reusable workflow ref must provide the full 40-character ci-central commit SHA.');
   }
   const lanes = reviewConfig.lanes;
-  // Advisory lanes never gate the job, so a config where every lane is advisory
-  // would publish reviews that can never fail anything. Refuse it rather than
-  // silently degrade into an unenforced check.
-  if (lanes.every((lane) => lane.advisory === true)) {
-    throw new Error('At least one lane must be required; every configured lane is advisory.');
-  }
-  const reviewPolicy = reviewConfig.review_policy || {};
-  // A quorum gate, when configured, replaces the per-lane advisory/required
-  // split below. It has to be a whole number of actual lanes: 0 would gate
-  // nothing, and a number larger than the lane count could never be met, so
-  // both are configuration errors rather than a review that silently always
-  // passes or always fails.
-  if (reviewPolicy.min_valid_lanes !== undefined) {
-    const minimum = reviewPolicy.min_valid_lanes;
-    if (!Number.isInteger(minimum) || minimum < 1 || minimum > lanes.length) {
-      throw new Error(`review_policy.min_valid_lanes must be an integer between 1 and the ${lanes.length} configured lane(s).`);
-    }
-  }
-  if (typeof reviewPolicy.system_prompt !== 'string' || !reviewPolicy.system_prompt.trim()) {
-    throw new Error('Central PR review config is missing review_policy.system_prompt.');
-  }
+  const reviewPolicy = reviewConfig.review_policy;
   const laneCredentials = {
     A: {
       apiKey: process.env.LANE_A_KEY,
@@ -57,53 +40,6 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       baseUrl: (process.env.LANE_C_API_BASE || '').replace(/\/$/, ''),
     },
   };
-  for (const lane of lanes) {
-    if (!['openai-chat-completions', 'openai-responses', 'google-generate-content'].includes(lane.protocol)) {
-      throw new Error(`Lane ${lane.id} protocol is not supported.`);
-    }
-    if (!Array.isArray(lane.fallbacks)) {
-      throw new Error(`Lane ${lane.id} fallbacks must be an array.`);
-    }
-    if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') {
-      throw new Error(`Lane ${lane.id} advisory must be a boolean.`);
-    }
-    if (lane.fallbacks.length > 1) throw new Error(`Lane ${lane.id} supports at most one fallback.`);
-    const chain = [lane.primary, ...lane.fallbacks];
-    if (!lane.primary || chain.some((model) => !model?.id || !model?.label)) {
-      throw new Error(`Lane ${lane.id} has an invalid primary or fallback model.`);
-    }
-    if (new Set(chain.map((model) => model.id)).size !== chain.length) {
-      throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
-    }
-    for (const field of ['request_timeout_ms', 'model_budget_ms']) {
-      if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) {
-        throw new Error(`Lane ${lane.id} ${field} must be a positive integer when configured.`);
-      }
-    }
-    if (lane.request_timeout_ms !== undefined && lane.model_budget_ms !== undefined
-      && lane.model_budget_ms < lane.request_timeout_ms) {
-      throw new Error(`Lane ${lane.id} model_budget_ms must be greater than or equal to request_timeout_ms.`);
-    }
-    for (const model of chain) {
-      if (model.request_timeout_ms !== undefined && (!Number.isInteger(model.request_timeout_ms) || model.request_timeout_ms < 1)) {
-        throw new Error(`Lane ${lane.id}/${model.id} request_timeout_ms must be a positive integer when configured.`);
-      }
-      if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
-        throw new Error(`Lane ${lane.id}/${model.id} omit_max_tokens must be a boolean.`);
-      }
-      if (model.omit_max_tokens && lane.protocol !== 'openai-chat-completions') {
-        throw new Error(`Lane ${lane.id}/${model.id} omit_max_tokens is only supported by openai-chat-completions.`);
-      }
-      if (model.thinking_level === undefined) continue;
-      if (lane.protocol !== 'google-generate-content') {
-        throw new Error(`Lane ${lane.id}/${model.id} thinking_level is only supported by google-generate-content.`);
-      }
-      if (!['minimal', 'low', 'medium', 'high'].includes(model.thinking_level)) {
-        throw new Error(`Lane ${lane.id}/${model.id} thinking_level is not supported.`);
-      }
-    }
-  }
-  
   const { data: pull } = await github.rest.pulls.get({
     owner,
     repo,
@@ -134,7 +70,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   for (const lane of lanes) {
     const stableMarker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
     const laneComments = existingComments.filter((comment) =>
-      comment.user?.login === 'github-actions[bot]' && comment.body?.includes(stableMarker));
+      comment.user?.login === 'github-actions[bot]' && comment.body?.startsWith(stableMarker + '\n'));
     // Duplicate stable comments are not a trustworthy freeze artifact. Force this
     // Lane to run so the normal publish path keeps the newest comment and removes
     // every older duplicate before evidence can be reused.
@@ -158,6 +94,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const lanesToReview = isManualReview
     ? lanes
     : lanes.filter((lane) => !reusableLaneIds.has(lane.id));
+  const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+  const statusPublisher = createStatusPublisher({ github, owner, repo, pullNumber, head: reviewHeadSha,
+    workflow: workflowSha, runUrl, runId: context.runId, lanes, comments: existingComments,
+    reusableLaneIds: isManualReview ? new Set() : reusableLaneIds, quorum: reviewPolicy.min_valid_lanes, logger: console });
   if (reusableLaneIds.size) {
     console.log(`Reusable valid review evidence for ${reviewHeadSha.slice(0, 7)}: ${[...reusableLaneIds].sort().map((lane) => `Lane ${lane}`).join(', ')}.`);
   }
@@ -171,6 +111,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       console.log(`Skip stale evidence reuse: reviewed=${reviewHeadSha.slice(0, 7)} current=${dedupePull.head.sha.slice(0, 7)} state=${dedupePull.state || 'unknown'}.`);
       return;
     }
+    await statusPublisher.publish();
     console.log(`All configured Lanes already have valid review evidence for head ${reviewHeadSha} at workflow ${workflowSha}; skipping model requests.`);
     return;
   }
@@ -185,88 +126,16 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     per_page: 100,
   });
   
-  // Collect every issue referenced (#N) in the PR title, body and commit messages
-  const issueRefPattern = /#(\d+)/g;
-  const issueSources = [pull.title || '', pull.body || ''];
-  const prCommits = await github.paginate(github.rest.pulls.listCommits, {
-    owner,
-    repo,
-    pull_number: pullNumber,
-    per_page: 100,
-  });
-  for (const c of prCommits) issueSources.push(c.commit?.message || '');
-  const issueNumbers = [...new Set(
-    issueSources.flatMap((t) => [...t.matchAll(issueRefPattern)].map((m) => Number(m[1])))
-  )].slice(0, 10);
-  let issueContext = '';
-  for (const num of issueNumbers) {
-    try {
-      const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: num });
-      if (issue.pull_request) continue;
-      issueContext += `\n### Issue #${num}: ${issue.title}\n${(issue.body || '').slice(0, 2000)}\n`;
-    } catch (error) {
-      console.log(`Skip referenced issue #${num}: ${error.message}`);
-    }
-  }
-  
-  // Pack whole file patches until the budget is spent, so a review never sees a
-  // patch cut off mid-hunk. Tests go last: when something has to be dropped it
-  // should be the tests, not the source they cover.
+  const prCommits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pullNumber, per_page: 100 });
+  const issues = await collectIssues({ github, owner, repo, pull, commits: prCommits, logger: console });
+  const issueContext = issues.text;
   const DIFF_BUDGET = Math.max(4000, Number(reviewPolicy.diff_char_budget) || 100000);
-  const SEPARATOR = '\n\n---\n\n';
-  const TRUNCATION_NOTE = '\n[... patch truncated to fit the diff budget ...]';
-  const isTestFile = (name) => /(^|\/)(tests?|__tests__|__mocks__)\//.test(name)
-    || /\.(test|spec)\.[cm]?[jt]sx?$/.test(name)
-    || /(^|\/)test_[^/]+\.py$/.test(name)
-    || /_test\.(go|py|rs)$/.test(name);
-  const orderedFiles = [...files].sort(
-    (a, b) => Number(isTestFile(a.filename)) - Number(isTestFile(b.filename))
-  );
-  
-  function packDiff(budget) {
-    const keptBlocks = [];
-    const omittedFiles = [];
-    let usedChars = 0;
-    for (const file of orderedFiles) {
-      const patch = file.patch || '[binary or patch unavailable]';
-      const block = [
-        `File: ${file.filename}`,
-        `Status: ${file.status}; +${file.additions} -${file.deletions}`,
-        patch,
-      ].join('\n');
-      const separatorCost = keptBlocks.length ? SEPARATOR.length : 0;
-      const remaining = budget - usedChars - separatorCost;
-      if (block.length <= remaining) {
-        keptBlocks.push(block);
-        usedChars += block.length + separatorCost;
-      } else if (remaining > TRUNCATION_NOTE.length + 400) {
-        keptBlocks.push(block.slice(0, remaining - TRUNCATION_NOTE.length) + TRUNCATION_NOTE);
-        usedChars = budget;
-      } else {
-        omittedFiles.push(file.filename);
-      }
-    }
-    let text = keptBlocks.join(SEPARATOR);
-    const packedChars = text.length;
-    if (omittedFiles.length) {
-      // The budget governs patch text; this note is bounded metadata on top of it.
-      const shown = omittedFiles.slice(0, 20).join(', ');
-      const names = shown.length > 400 ? `${shown.slice(0, 400)}…` : shown;
-      const more = omittedFiles.length > 20 ? ` (+${omittedFiles.length - 20} more)` : '';
-      text += `\n\n[${omittedFiles.length} file(s) omitted to fit the ${budget}-character patch budget: ${names}${more}]`;
-    }
-    return { text, kept: keptBlocks.length, packedChars, omitted: omittedFiles.length };
-  }
-  
-  const diffPack = packDiff(DIFF_BUDGET);
-  console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted.`);
-  
-  // Kimi K3 is useful as a last-resort reviewer but can spend a large context and
-  // completion budget entirely on reasoning. Preserve the proven bounded prompt:
-  // complete file inventory plus a small representative patch sample.
-  const kimiK3Pack = packDiff(1000);
+  const diffPack = packDiff(files, DIFF_BUDGET);
+  const kimiK3Pack = packDiff(files, 1000);
   const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join('\n');
-  
+  console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted; complete omitted hunks=${diffPack.omittedHunks}.`);
+  const contextManifest = { prompt_version: PROMPT_VERSION, head: reviewHeadSha, files: diffPack.manifest,
+    issues: issues.manifest, omitted_issue_references: issues.omitted_references };
   const system = reviewPolicy.system_prompt;
   const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
   const googleDeepReviewContract = 'Perform two independent internal review passes before writing the final answer: first trace correctness, edge cases, error paths, and contract preservation; then challenge security, architecture boundaries, CI or configuration, and test adequacy. Treat the PR description and passing tests as claims to verify, not proof. Write findings first. Each actionable finding must include severity, exact file or diff-hunk evidence, impact, and a concrete fix. If no actionable finding remains, state the failure paths and invariants you checked plus residual risks. Concise means omit filler and praise, never analysis. Do not invent findings or expose hidden reasoning.';
@@ -286,11 +155,15 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       : 'Referenced issues: none.',
     '',
     ...(options.fileList ? ['All changed file names:', options.fileList, ''] : []),
+    'Coverage manifest (untrusted metadata; omitted material was not inspected):',
+    JSON.stringify({ ...contextManifest, files: (options.pack || diffPack).manifest }),
+    '',
     'Changed files and patches:',
     diffText || '[No diff available]',
   ].join('\n');
   const user = buildUser(diffPack.text);
   const kimiK3User = buildUser(kimiK3Pack.text, {
+    pack: kimiK3Pack,
     descriptionLimit: 2000,
     issueText: issueContext.slice(0, 2000),
     fileList,
@@ -322,7 +195,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   function basePayload(model) {
     const throttled = model.context_profile === 'kimi-k3-throttled';
     const messages = [
-      { role: 'system', content: throttled ? kimiK3System : system },
+      { role: 'system', content: buildSystemPrompt(throttled ? kimiK3System : system, model.review_lane_id) },
       { role: 'user', content: throttled ? kimiK3User : user },
     ];
     const payload = {
@@ -343,7 +216,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         thinkingLevel: model.thinking_level.toUpperCase(),
       };
     }
-    const googleSystem = `${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`;
+    const googleSystem = buildSystemPrompt(`${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`, model.review_lane_id);
     return {
       systemInstruction: { parts: [{ text: googleSystem }] },
       contents: [{ role: 'user', parts: [{ text: throttled ? kimiK3User : user }] }],
@@ -418,7 +291,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
           accept: 'application/json',
           'user-agent': 'GitHubActions-AI-PR-Review',
         },
-        body: JSON.stringify(googlePayload(model)),
+        body: JSON.stringify(googlePayload({ ...model, review_lane_id: lane.id })),
       }) : await requestChatCompletion({
         apiKey: credentials.apiKey,
         baseURL: credentials.baseUrl,
@@ -426,7 +299,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         proxyUrl,
         sessionId: lane.provider === 'opencode-go'
           ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}` : undefined,
-        payload: lane.protocol === 'openai-responses' ? responsesPayload(model) : basePayload(model),
+        payload: lane.protocol === 'openai-responses' ? responsesPayload({ ...model, review_lane_id: lane.id }) : basePayload({ ...model, review_lane_id: lane.id }),
         signal: controller.signal,
         timeoutMs: Math.min(requestTimeoutMs, modelBudgetMs),
         onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
@@ -454,6 +327,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return { response, responseText, requestError, attempts: 1, failureKind: usable ? '' : failure.kind };
   }
   
+  function validateAndRender(text, model, complete) {
+    const supplied = model.context_profile === 'kimi-k3-throttled' ? kimiK3Pack : diffPack;
+    if (!complete) return text;
+    const report = parseReview(text, supplied);
+    return renderReview(report, { ...supplied, issues: issues.manifest });
+  }
   function extractReview(lane, model, responseText) {
     const payload = JSON.parse(responseText);
     if (lane.protocol === 'google-generate-content') {
@@ -481,7 +360,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       if (review && normalizedFinishReason && normalizedFinishReason !== 'stop') {
         review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
       }
-      return { review, reasoningLength, reasoningUnit, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+      const complete = normalizedFinishReason === 'stop';
+      return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength, reasoningUnit, complete };
     }
     const choice = payload?.choices?.[0];
     const message = choice?.message;
@@ -497,7 +377,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     if (review && normalizedFinishReason === 'length') {
       review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
     }
-    return { review, reasoningLength, reasoningUnit: reasoningLength ? 'chars' : null, complete: !normalizedFinishReason || normalizedFinishReason === 'stop' };
+    const complete = !normalizedFinishReason || normalizedFinishReason === 'stop';
+    return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength,
+      reasoningUnit: reasoningLength ? 'chars' : null, complete };
   }
   
   // Primary once, then the same-lane fallback once on failure; never retry either.
@@ -505,6 +387,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const primary = lane.primary;
     const chain = [primary, ...lane.fallbacks];
     const credentials = laneCredentials[lane.id];
+    if (!diffPack.coverage.some(file => file.patch_available && file.supplied_hunks)) {
+      return { lane, primary, servedBy: null, reasoningLength: 0, degraded: false, status: 'diagnostic',
+        review: '> AI review was not generated.\n\nNo complete inspectable text patch was supplied. No model request was sent; binary, unavailable or omitted patches cannot establish review evidence.' };
+    }
     if (!credentials?.apiKey || !credentials?.baseUrl) {
       console.log(`[Lane ${lane.id}] fixed credential slots are not available; skipping model requests for this lane.`);
       return {
@@ -531,6 +417,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let bestPartial = null;
   
     for (const model of chain) {
+      if (model !== primary) await statusPublisher.update(lane.id, 'fallback', model.id);
       const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
       lastResponse = response;
       lastResponseText = responseText;
@@ -567,10 +454,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
             console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
           }
         } catch (error) {
-          console.log(`[Lane ${lane.id}/${model.id}] parse error: ${error?.message || error}`);
+          lastFailureKind = 'report-invalid';
+          console.log(`[Lane ${lane.id}/${model.id}] report rejected: ${error?.message?.startsWith('Review contract:') ? error.message : 'invalid report envelope'}`);
         }
       }
-      tried.push(`${model.id} -> HTTP ${response?.status ?? 'request failed'} (${attempts ?? 0} attempt(s))`);
+      tried.push(`${model.id} -> ${lastFailureKind === 'report-invalid' ? 'evidence contract rejected' : `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
@@ -578,7 +466,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   
     if (bestPartial) return bestPartial;
   
-    const failText = (lastResponseText || lastRequestError || '').trim();
+    const failText = lastFailureKind === 'report-invalid'
+      ? 'The model returned a response, but its report did not satisfy the evidence contract.'
+      : (lastResponseText || lastRequestError || '').trim();
     const gatewayBlocked = lastFailureKind === 'gateway-blocked';
     const upstreamExhausted = failText.includes('failover_exhausted');
     const status = lastResponse?.status ?? 'request failed';
@@ -618,6 +508,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   // Context collection can take long enough for another push to land. Re-read the
   // head immediately before dispatch so neither full-context reviewer spends tokens
   // on a commit that is no longer current.
+  await statusPublisher.publish();
   const { data: latestPull } = await github.rest.pulls.get({
     owner,
     repo,
@@ -629,7 +520,6 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   }
   
   const reviewedHeadShortSha = reviewHeadSha.slice(0, 7);
-  const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   let posted = 0;
   let staleReview = false;
   const validLaneIds = new Set(isManualReview ? [] : reusableLaneIds);
@@ -650,12 +540,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
       : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
     const banner = degraded
-      ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 当前不可用，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`, '']
+      ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 未产生可用审核，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`, '']
       : [];
     const body = [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
-      `## AI PR Review · Lane ${lane.id} · ${primary.label}`,
+      `## AI PR Review · Lane ${lane.id} · ${servedBy?.label ?? primary.label}`,
       '',
       `> 审核提交：\`${reviewedHeadShortSha}\` · 更新时间：\`${reviewedAt}\` · 此评论会随 PR 新提交原地更新 · [Run](${runUrl})`,
       '',
@@ -667,7 +557,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     try {
       const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
       const priorLaneComments = existingComments.filter((comment) =>
-        comment.user?.login === 'github-actions[bot]' && comment.body?.includes(marker));
+        comment.user?.login === 'github-actions[bot]' && comment.body?.startsWith(marker + '\n'));
       const currentComment = priorLaneComments.at(-1);
       let publishedComment;
       if (currentComment) {
@@ -694,16 +584,19 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       }
       posted++;
       if (status === 'valid') validLaneIds.add(lane.id);
+      await statusPublisher.update(lane.id, status === 'valid' ? 'complete' : status === 'partial' ? 'partial' : 'failed', servedBy?.id);
       console.log(`${currentComment ? 'Updated' : 'Created'} AI PR Review comment ${publishedComment.id} for Lane ${lane.id} with status=${status}.`);
     } catch (error) {
       // One failed comment must not swallow the others.
-      console.log(`Failed to post comment for Lane ${lane.id}: ${error?.message || error}`);
+      console.log(`Failed to post comment for Lane ${lane.id}.`);
+      await statusPublisher.update(lane.id, 'publication_failed', servedBy?.id);
     }
   }
   const settled = await Promise.allSettled(lanesToReview.map(reviewAndPublish));
   for (let i = 0; i < settled.length; i++) {
     if (settled[i].status === 'rejected') {
-      console.log(`[Lane ${lanesToReview[i].id}] review pipeline threw: ${settled[i].reason?.message || settled[i].reason}`);
+      console.log(`[Lane ${lanesToReview[i].id}] review pipeline threw.`);
+      await statusPublisher.update(lanesToReview[i].id, 'failed');
     }
   }
   if (staleReview) return;

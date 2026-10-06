@@ -50,16 +50,20 @@ function validateConfig(config, repository) {
   if (!config.review_policy || typeof config.review_policy.system_prompt !== 'string' || !config.review_policy.system_prompt.trim()) {
     throw new Error('review_policy.system_prompt must be a non-empty string.');
   }
+  if (config.review_policy.max_attempts !== 1) throw new Error('review_policy.max_attempts must be 1; model retries are disabled.');
   for (const field of ['diff_char_budget', 'request_timeout_ms', 'model_budget_ms', 'max_attempts']) {
     if (!Number.isInteger(config.review_policy[field]) || config.review_policy[field] < 1) {
       throw new Error(`review_policy.${field} must be a positive integer.`);
     }
   }
-  if (config.review_policy.max_attempts !== 1) throw new Error('review_policy.max_attempts must be 1; model retries are disabled.');
   if (!Array.isArray(config.lanes) || config.lanes.length === 0) {
     throw new Error('Config must contain at least one lane.');
   }
 
+  const minimum = config.review_policy.min_valid_lanes;
+  if (minimum !== undefined && (!Number.isInteger(minimum) || minimum < 1 || minimum > config.lanes.length)) {
+    throw new Error(`review_policy.min_valid_lanes must be an integer between 1 and the ${config.lanes.length} configured lane(s).`);
+  }
   const laneIds = new Set();
   for (const [index, lane] of config.lanes.entries()) {
     const location = `lanes[${index}]`;

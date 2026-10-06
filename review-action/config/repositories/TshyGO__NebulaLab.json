@@ -59,20 +59,20 @@
       "protocol": "openai-chat-completions",
       "advisory": true,
       "resend_unserved": true,
-      "request_timeout_ms": 1800000,
-      "model_budget_ms": 1800000,
+      "request_timeout_ms": 900000,
+      "model_budget_ms": 900000,
       "primary": {
-        "id": "mimo-v2.6-pro",
-        "label": "MiMo V2.6 Pro",
+        "id": "hy3",
+        "label": "Hy3",
         "context_profile": "full",
-        "max_output_tokens": 131072
+        "max_output_tokens": 65536
       },
       "fallbacks": [
         {
-          "id": "mimo-v2.5-pro",
-          "label": "MiMo V2.5 Pro",
+          "id": "kimi-k2.7-code",
+          "label": "Kimi K2.7 Code",
           "context_profile": "full",
-          "max_output_tokens": 131072
+          "max_output_tokens": 65536
         }
       ]
     }

@@ -36,17 +36,17 @@
       "request_timeout_ms": 1800000,
       "model_budget_ms": 1800000,
       "primary": {
-        "id": "glm-5.3",
-        "label": "GLM 5.3",
+        "id": "kimi-k2.7-code",
+        "label": "Kimi K2.7 Code",
+        "request_timeout_ms": 900000,
         "context_profile": "full",
-        "max_output_tokens": 65536,
-        "temperature": 0.2
+        "max_output_tokens": 65536
       },
       "fallbacks": [
         {
-          "id": "glm-5.3-flash",
+          "id": "glm-5.3",
           "request_timeout_ms": 1800000,
-          "label": "GLM 5.3 Flash",
+          "label": "GLM 5.3",
           "context_profile": "full",
           "max_output_tokens": 65536,
           "temperature": 0.2

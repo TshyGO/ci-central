@@ -169,6 +169,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     '',
     'Changed files and patches:',
     diffText || '[No diff available]',
+    '',
+    // Long reasoning runs drift from a format stated only at the top of the system message.
+    `End of supplied material. Reply with only the single JSON object defined by ${PROMPT_VERSION} in the system message; a Markdown review cannot be accepted.`,
   ].join('\n');
   const user = buildUser(diffPack.text);
   const kimiK3User = buildUser(kimiK3Pack.text, {

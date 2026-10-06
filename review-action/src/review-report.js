@@ -37,6 +37,24 @@ const plain = (value, field, limit = 2000) => {
   return value.trim();
 };
 const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+function quoteLocations(lines, firstLine, quote) {
+  const normalized = lines.map(normalize);
+  const offsets = [];
+  let offset = 0;
+  for (const line of normalized) { offsets.push(offset); offset += line.length + 1; }
+  const text = normalized.join(' ');
+  const wanted = normalize(quote);
+  const matches = [];
+  for (let at = text.indexOf(wanted); at >= 0; at = text.indexOf(wanted, at + Math.max(1, wanted.length))) {
+    let start = 0, end = 0;
+    for (let index = 0; index < offsets.length; index++) {
+      if (offsets[index] <= at) start = index;
+      if (offsets[index] <= at + wanted.length - 1) end = index;
+    }
+    matches.push([firstLine + start, firstLine + end]);
+  }
+  return matches;
+}
 
 function parseReview(text, context) {
   let report;
@@ -66,13 +84,20 @@ function parseReview(text, context) {
     if (!['new', 'old'].includes(side) || !Number.isSafeInteger(finding.line) || finding.line < 1
         || !(side === 'old' ? file.old_ranges : file.ranges).some(([start, end]) => finding.line >= start && finding.line <= end)) throw new Error('Review contract: line is outside supplied hunks.');
     const evidence = plain(finding.evidence, 'evidence');
-    if (!file.hunks.some((hunk) => (side === 'old' ? hunk.old_ranges : hunk.ranges)
-      .some(([start, end]) => finding.line >= start && finding.line <= end)
-      && normalize((side === 'old' ? hunk.old_code : hunk.new_code).join('\n')).includes(normalize(evidence)))) throw new Error('Review contract: code quote was not supplied on that side of the hunk.');
+    const locations = file.hunks.flatMap(hunk => {
+      const ranges = side === 'old' ? hunk.old_ranges : hunk.ranges;
+      if (!ranges.some(([start, end]) => finding.line >= start && finding.line <= end)) return [];
+      return quoteLocations(side === 'old' ? hunk.old_code : hunk.new_code, ranges[0][0], evidence);
+    });
+    if (!locations.length) throw new Error('Review contract: code quote was not supplied on that side of the hunk.');
+    const aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
+    if (!aligned && locations.length !== 1) throw new Error('Review contract: code quote location is ambiguous.');
+    const line = aligned ? finding.line : locations[0][0];
     // Validated code evidence can establish supplied-file coverage even when the
     // model accidentally leaves that path out of its self-reported file list.
     if (!reviewed.includes(finding.file)) reviewed.push(finding.file);
-    return { priority, file: finding.file, line: finding.line, confidence, side, evidence, title: plain(finding.title, 'title', 180),
+    return { priority, file: finding.file, line, reported_line: line !== finding.line ? finding.line : undefined,
+      confidence, side, evidence, title: plain(finding.title, 'title', 180),
       trigger: plain(finding.trigger, 'trigger'), impact: plain(finding.impact, 'impact'),
       suggestion: plain(finding.suggestion, 'suggestion') };
   });
@@ -82,8 +107,9 @@ function parseReview(text, context) {
   return { summary, reviewed_files: reviewed, findings, limitations };
 }
 
-const safeText = (text) => text.replace(/[<>]/g, (char) => char === '<' ? '&lt;' : '&gt;')
-  .replace(/<!--/g, '&lt;!--');
+const safeText = (text) => text.replace(/\s+/g, ' ').trim().replace(/&/g, '&amp;')
+  .replace(/[<>]/g, (char) => char === '<' ? '&lt;' : '&gt;')
+  .replace(/[\\`*_{}\[\]()#!|]/g, '\\$&').replace(/@/g, '@\u200b');
 const code = (text) => {
   const content = text.replace(/[\r\n]/g, ' ');
   const longest = Math.max(0, ...[...content.matchAll(/`+/g)].map(match => match[0].length));
@@ -97,12 +123,14 @@ const fenced = (text) => {
 };
 function renderReview(report, context, { complete = true } = {}) {
   const hasRisks = report.findings.some(finding => finding.confidence !== 'high');
-  const lines = [hasRisks ? '本报告包含待核实风险；置信度是模型自报信息，不代表结论成立。' : safeText(report.summary), '',
+  const lines = [...(hasRisks ? ['本报告包含待核实风险；置信度是模型自报信息，不代表结论成立。',
+    `模型原结论（待确认）：${safeText(report.summary)}`] : [safeText(report.summary)]), '',
     complete ? '> 模型输出完整，证据位置与代码引用已校验；这不代表结论已被人工确认，也不代表 PR 已获批准。'
       : '> 输出未完整结束，仅对可解析片段作引用定位校验；不计入 quorum，可能仍有遗漏。', '',
     report.findings.length ? '### 有证据支持的发现' : '### 未发现有证据支持的实质缺陷'];
   for (const finding of report.findings) lines.push('', `#### ${finding.priority} · ${finding.confidence === 'high' ? '' : '待核实 · '}${safeText(finding.title)}`,
     `文件：${code(`${finding.file}:${finding.line}`)}（${finding.side === 'old' ? 'base/删除侧' : 'head/新增侧'}）`, '',
+    ...(finding.reported_line ? [`模型原行号为 ${finding.reported_line}；已按唯一代码引用定位到上述行号。`] : []),
     `模型自报置信度：${finding.confidence}。`, `触发条件：${safeText(finding.trigger)}`, `影响：${safeText(finding.impact)}`,
     '代码证据：', fenced(finding.evidence), `修复方向：${safeText(finding.suggestion)}`);
   lines.push('', '### 审查范围与限制',

@@ -103,6 +103,24 @@ test('supported findings render evidence without turning model completion into a
   assert.ok(rendered.includes('这不代表结论已被人工确认'));
   assert.ok(rendered.includes('跨租户访问'));
 });
+test('a unique quote repairs a misplaced model line without changing the code evidence', () => {
+  const changed = structuredClone(report);
+  changed.findings[0].line = 12;
+  const parsed = parseReview(JSON.stringify(changed), context);
+  assert.equal(parsed.findings[0].line, 11);
+  assert.equal(parsed.findings[0].reported_line, 12);
+  assert.ok(renderReview(parsed, context).includes('按唯一代码引用定位'));
+});
+test('narrative fields are plain prose while code quotes retain their original shape', () => {
+  const changed = structuredClone(report);
+  changed.summary = 'Summary\n![tracking](https://example.invalid/image) @someone';
+  changed.findings[0].confidence = 'medium';
+  const rendered = renderReview(parseReview(JSON.stringify(changed), context), context);
+  assert.ok(rendered.includes('模型原结论（待确认）'));
+  assert.ok(!rendered.includes('![tracking]'));
+  assert.ok(!rendered.includes('@someone'));
+  assert.ok(rendered.includes('return user.tenant === tenant;'));
+});
 test('no-findings output is valid when its actual supplied coverage is stated', () => {
   assert.doesNotThrow(() => parseReview(JSON.stringify({ ...report, findings: [] }), context));
 });

@@ -415,6 +415,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
 
     for (const model of chain) {
       if (model !== primary) await statusPublisher.update(lane.id, 'fallback', model.id);
+      const supplied = model.context_profile === 'kimi-k3-throttled' ? kimiK3Pack : diffPack;
+      if (!supplied.coverage.some(file => file.patch_available && file.supplied_hunks)) {
+        lastOutcome = 'no inspectable material for the configured context profile';
+        tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);
+        continue;
+      }
       const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
       lastResponse = response;
       lastResponseText = responseText;

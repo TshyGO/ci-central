@@ -724,6 +724,13 @@ r = await scenario(call => call.lane === 'C' ? reply(200, JSON.stringify({ choic
 check('contract diagnostics expose the safe local reason without leaking rejected report content', !r.error
   && r.posted.some(body => body.includes('no supplied file was reviewed') && body.includes('not an authentication or HTTP failure'))
   && !r.posted.some(body => body.includes('PRIVATE_REPORT_CONTENT')));
+const emptyThrottledConfig = structuredClone(centralConfig);
+emptyThrottledConfig.lanes[1].primary.context_profile = 'kimi-k3-throttled';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(emptyThrottledConfig) }, { files: [patch('src/a.ts', 500), patch('tests/a.test.ts', 500)] });
+check('a model whose actual context pack is empty is skipped without consuming a request', !r.error
+  && !r.captured.some(call => call.model === 'glm-5.3')
+  && r.captured.filter(call => call.lane === 'B').length === 1
+  && r.posted.some(body => body.includes('served by glm-5.2')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
 const quotedMarkers = validEvidence.map(item => ({ ...item }));
 quotedMarkers[0].body += '\nQuoted source: <!-- ai-pr-review-bot:lane-C -->';

@@ -371,6 +371,27 @@ var require_review_report = __commonJS({
       return value.trim();
     };
     var normalize = (text) => text.replace(/\s+/g, " ").trim();
+    function quoteLocations(lines, firstLine, quote) {
+      const normalized = lines.map(normalize);
+      const offsets = [];
+      let offset = 0;
+      for (const line of normalized) {
+        offsets.push(offset);
+        offset += line.length + 1;
+      }
+      const text = normalized.join(" ");
+      const wanted = normalize(quote);
+      const matches = [];
+      for (let at = text.indexOf(wanted); at >= 0; at = text.indexOf(wanted, at + Math.max(1, wanted.length))) {
+        let start = 0, end = 0;
+        for (let index = 0; index < offsets.length; index++) {
+          if (offsets[index] <= at) start = index;
+          if (offsets[index] <= at + wanted.length - 1) end = index;
+        }
+        matches.push([firstLine + start, firstLine + end]);
+      }
+      return matches;
+    }
     function parseReview2(text, context) {
       let report;
       try {
@@ -400,12 +421,21 @@ var require_review_report = __commonJS({
         const side = Object.hasOwn(sideNames, rawSide) ? sideNames[rawSide] : rawSide;
         if (!["new", "old"].includes(side) || !Number.isSafeInteger(finding.line) || finding.line < 1 || !(side === "old" ? file.old_ranges : file.ranges).some(([start, end]) => finding.line >= start && finding.line <= end)) throw new Error("Review contract: line is outside supplied hunks.");
         const evidence = plain(finding.evidence, "evidence");
-        if (!file.hunks.some((hunk) => (side === "old" ? hunk.old_ranges : hunk.ranges).some(([start, end]) => finding.line >= start && finding.line <= end) && normalize((side === "old" ? hunk.old_code : hunk.new_code).join("\n")).includes(normalize(evidence)))) throw new Error("Review contract: code quote was not supplied on that side of the hunk.");
+        const locations = file.hunks.flatMap((hunk) => {
+          const ranges = side === "old" ? hunk.old_ranges : hunk.ranges;
+          if (!ranges.some(([start, end]) => finding.line >= start && finding.line <= end)) return [];
+          return quoteLocations(side === "old" ? hunk.old_code : hunk.new_code, ranges[0][0], evidence);
+        });
+        if (!locations.length) throw new Error("Review contract: code quote was not supplied on that side of the hunk.");
+        const aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
+        if (!aligned && locations.length !== 1) throw new Error("Review contract: code quote location is ambiguous.");
+        const line = aligned ? finding.line : locations[0][0];
         if (!reviewed.includes(finding.file)) reviewed.push(finding.file);
         return {
           priority,
           file: finding.file,
-          line: finding.line,
+          line,
+          reported_line: line !== finding.line ? finding.line : void 0,
           confidence,
           side,
           evidence,
@@ -420,7 +450,7 @@ var require_review_report = __commonJS({
       if (excludedClaims) limitations.push(`\u6A21\u578B\u7684 ${excludedClaims} \u9879\u8986\u76D6\u58F0\u660E\u4E0D\u5BF9\u5E94\u5B9E\u9645\u63D0\u4F9B\u7684\u6587\u672C\u6750\u6599\uFF0C\u5DF2\u4ECE\u8986\u76D6\u7EDF\u8BA1\u6392\u9664\uFF1B\u672A\u636E\u6B64\u5047\u8BBE\u5BA1\u67E5\u5B8C\u6210\u3002`);
       return { summary, reviewed_files: reviewed, findings, limitations };
     }
-    var safeText = (text) => text.replace(/[<>]/g, (char) => char === "<" ? "&lt;" : "&gt;").replace(/<!--/g, "&lt;!--");
+    var safeText = (text) => text.replace(/\s+/g, " ").trim().replace(/&/g, "&amp;").replace(/[<>]/g, (char) => char === "<" ? "&lt;" : "&gt;").replace(/[\\`*_{}\[\]()#!|]/g, "\\$&").replace(/@/g, "@\u200B");
     var code = (text) => {
       const content = text.replace(/[\r\n]/g, " ");
       const longest = Math.max(0, ...[...content.matchAll(/`+/g)].map((match) => match[0].length));
@@ -437,7 +467,10 @@ ${delimiter}`;
     function renderReview2(report, context, { complete = true } = {}) {
       const hasRisks = report.findings.some((finding) => finding.confidence !== "high");
       const lines = [
-        hasRisks ? "\u672C\u62A5\u544A\u5305\u542B\u5F85\u6838\u5B9E\u98CE\u9669\uFF1B\u7F6E\u4FE1\u5EA6\u662F\u6A21\u578B\u81EA\u62A5\u4FE1\u606F\uFF0C\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u6210\u7ACB\u3002" : safeText(report.summary),
+        ...hasRisks ? [
+          "\u672C\u62A5\u544A\u5305\u542B\u5F85\u6838\u5B9E\u98CE\u9669\uFF1B\u7F6E\u4FE1\u5EA6\u662F\u6A21\u578B\u81EA\u62A5\u4FE1\u606F\uFF0C\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u6210\u7ACB\u3002",
+          `\u6A21\u578B\u539F\u7ED3\u8BBA\uFF08\u5F85\u786E\u8BA4\uFF09\uFF1A${safeText(report.summary)}`
+        ] : [safeText(report.summary)],
         "",
         complete ? "> \u6A21\u578B\u8F93\u51FA\u5B8C\u6574\uFF0C\u8BC1\u636E\u4F4D\u7F6E\u4E0E\u4EE3\u7801\u5F15\u7528\u5DF2\u6821\u9A8C\uFF1B\u8FD9\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u5DF2\u88AB\u4EBA\u5DE5\u786E\u8BA4\uFF0C\u4E5F\u4E0D\u4EE3\u8868 PR \u5DF2\u83B7\u6279\u51C6\u3002" : "> \u8F93\u51FA\u672A\u5B8C\u6574\u7ED3\u675F\uFF0C\u4EC5\u5BF9\u53EF\u89E3\u6790\u7247\u6BB5\u4F5C\u5F15\u7528\u5B9A\u4F4D\u6821\u9A8C\uFF1B\u4E0D\u8BA1\u5165 quorum\uFF0C\u53EF\u80FD\u4ECD\u6709\u9057\u6F0F\u3002",
         "",
@@ -448,6 +481,7 @@ ${delimiter}`;
         `#### ${finding.priority} \xB7 ${finding.confidence === "high" ? "" : "\u5F85\u6838\u5B9E \xB7 "}${safeText(finding.title)}`,
         `\u6587\u4EF6\uFF1A${code(`${finding.file}:${finding.line}`)}\uFF08${finding.side === "old" ? "base/\u5220\u9664\u4FA7" : "head/\u65B0\u589E\u4FA7"}\uFF09`,
         "",
+        ...finding.reported_line ? [`\u6A21\u578B\u539F\u884C\u53F7\u4E3A ${finding.reported_line}\uFF1B\u5DF2\u6309\u552F\u4E00\u4EE3\u7801\u5F15\u7528\u5B9A\u4F4D\u5230\u4E0A\u8FF0\u884C\u53F7\u3002`] : [],
         `\u6A21\u578B\u81EA\u62A5\u7F6E\u4FE1\u5EA6\uFF1A${finding.confidence}\u3002`,
         `\u89E6\u53D1\u6761\u4EF6\uFF1A${safeText(finding.trigger)}`,
         `\u5F71\u54CD\uFF1A${safeText(finding.impact)}`,
@@ -962,6 +996,12 @@ ${requestError || ""}`;
     let bestPartial = null;
     for (const model of chain) {
       if (model !== primary) await statusPublisher.update(lane.id, "fallback", model.id);
+      const supplied = model.context_profile === "kimi-k3-throttled" ? kimiK3Pack : diffPack;
+      if (!supplied.coverage.some((file) => file.patch_available && file.supplied_hunks)) {
+        lastOutcome = "no inspectable material for the configured context profile";
+        tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);
+        continue;
+      }
       const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
       lastResponse = response;
       lastResponseText = responseText;

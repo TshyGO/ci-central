@@ -95,10 +95,11 @@ const fenced = (text) => {
   const delimiter = '`'.repeat(Math.max(3, longest + 1));
   return `${delimiter}\n${text}\n${delimiter}`;
 };
-function renderReview(report, context) {
+function renderReview(report, context, { complete = true } = {}) {
   const hasRisks = report.findings.some(finding => finding.confidence !== 'high');
   const lines = [hasRisks ? '本报告包含待核实风险；置信度是模型自报信息，不代表结论成立。' : safeText(report.summary), '',
-    '> 模型输出完整，证据位置与代码引用已校验；这不代表结论已被人工确认，也不代表 PR 已获批准。', '',
+    complete ? '> 模型输出完整，证据位置与代码引用已校验；这不代表结论已被人工确认，也不代表 PR 已获批准。'
+      : '> 输出未完整结束，仅对可解析片段作引用定位校验；不计入 quorum，可能仍有遗漏。', '',
     report.findings.length ? '### 有证据支持的发现' : '### 未发现有证据支持的实质缺陷'];
   for (const finding of report.findings) lines.push('', `#### ${finding.priority} · ${finding.confidence === 'high' ? '' : '待核实 · '}${safeText(finding.title)}`,
     `文件：${code(`${finding.file}:${finding.line}`)}（${finding.side === 'old' ? 'base/删除侧' : 'head/新增侧'}）`, '',
@@ -118,4 +119,13 @@ function renderReview(report, context) {
   return lines.join('\n');
 }
 
-module.exports = { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview };
+function renderPartialReview(text, context) {
+  const reason = ['length', 'max_tokens'].includes(context.finishReason)
+    ? '> 输出因 token 上限（max_tokens/max_output_tokens）截断。\n\n' : '';
+  try { return reason + renderReview(parseReview(text, context), context, { complete: false }); }
+  catch {
+    return reason + '> 输出未完整结束，剩余片段无法满足报告契约；不展示原始 JSON，不计入 quorum。\n\n请查看本次运行的结束原因与 token 统计。';
+  }
+}
+
+module.exports = { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview };

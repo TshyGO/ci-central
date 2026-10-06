@@ -21,12 +21,22 @@ export function inspectCaller(text, expectedSha) {
     if (start >= 0) block = lines.slice(start, end).join('\n');
   }
   const pins = uses.map(item => item.sha);
-  const inputs = [...block.matchAll(/^ {6}central_workflow_sha:\s*([a-f0-9]{40})\s*(?:#.*)?$/gm)].map((m) => m[1]);
+  const section = (name) => {
+    const rows = block.split('\n');
+    const start = rows.findIndex(line => new RegExp(`^ {4}${name}:\\s*(?:#.*)?$`).test(line));
+    if (start < 0) return '';
+    let end = start + 1;
+    while (end < rows.length && (!rows[end].trim() || /^\s*#/.test(rows[end]) || /^ {6}\S/.test(rows[end]))) end++;
+    return rows.slice(start + 1, end).join('\n');
+  };
+  const inputs = [...section('with').matchAll(/^ {6}central_workflow_sha:\s*([a-f0-9]{40})\s*(?:#.*)?$/gm)].map((m) => m[1]);
   const slots = ['A', 'B', 'C'].flatMap((lane) => ['KEY', 'API_BASE'].map((suffix) => `PR_AGENT_LANE_${lane}_${suffix}`));
-  const mappingsValid = /^ {4}secrets:\s*(?:#.*)?$/m.test(block) && slots.every((slot) => {
+  const secretBlock = section('secrets');
+  const secretKeys = [...secretBlock.matchAll(/^ {6}([\w-]+):/gm)].map(match => match[1]);
+  const mappingsValid = secretKeys.length === slots.length && slots.every((slot) => {
     const escaped = slot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const expression = new RegExp(`^ {6}${escaped}:\\s*\\$\\{\\{\\s*secrets\\.${escaped}\\s*\\}\\}\\s*(?:#.*)?$`, 'gm');
-    return [...block.matchAll(expression)].length === 1;
+    return [...secretBlock.matchAll(expression)].length === 1;
   });
   const matched = pins.length === 1 && inputs.length === 1 && pins[0] === inputs[0];
   return { pin: pins.length === 1 ? pins[0] : null, matched, mappingsValid,

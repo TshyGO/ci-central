@@ -2,7 +2,7 @@
 
 const { validateConfig } = require('./index.js');
 const { packDiff, collectIssues, enrichWorkflows } = require('./review-context.js');
-const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview } = require('./review-report.js');
+const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
 
 // Runs only from the trusted central checkout. Runtime injection is used by contract tests.
@@ -328,9 +328,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return { response, responseText, requestError, attempts: 1, failureKind: usable ? '' : failure.kind };
   }
 
-  function validateAndRender(text, model, complete) {
+  function validateAndRender(text, model, complete, finishReason) {
     const supplied = model.context_profile === 'kimi-k3-throttled' ? kimiK3Pack : diffPack;
-    if (!complete) return text;
+    if (!complete) return renderPartialReview(text, { ...supplied, issues: issues.manifest, finishReason });
     const report = parseReview(text, supplied);
     return renderReview(report, { ...supplied, issues: issues.manifest });
   }
@@ -358,11 +358,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const reasoningUnit = hasExplicitThoughtTokens || hasDerivedThoughtTokens ? 'tokens' : null;
       console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason} contentLen=${content.length} thoughtTokens=${reasoningUnit ? reasoningLength : 'not-reported'} usage=${JSON.stringify(usage)}`);
       let review = content;
-      if (review && normalizedFinishReason && normalizedFinishReason !== 'stop') {
-        review += '\n\n> ⚠️ 模型输出未完整结束，这条 review 可能不完整。';
-      }
       const complete = normalizedFinishReason === 'stop';
-      return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength, reasoningUnit, complete, finishReason: normalizedFinishReason || 'missing' };
+      return { review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : '', reasoningLength, reasoningUnit, complete, finishReason: normalizedFinishReason || 'missing' };
     }
     const choice = payload?.choices?.[0];
     const message = choice?.message;
@@ -375,11 +372,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     // the caller continue to its configured fallback instead.
     let review = content;
     console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
-    if (review && normalizedFinishReason === 'length') {
-      review += '\n\n> ⚠️ 模型输出达到 max_tokens 上限，这条 review 可能不完整。';
-    }
     const complete = !normalizedFinishReason || normalizedFinishReason === 'stop';
-    return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength,
+    return { review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : '', reasoningLength,
       reasoningUnit: reasoningLength ? 'chars' : null, complete, finishReason: normalizedFinishReason || 'missing' };
   }
 
@@ -505,7 +499,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.`
         : upstreamExhausted
           ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.`
-          : lastFailureKind === 'report-invalid'
+          : lastOutcome
+          ? 'Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit.'
+        : lastFailureKind === 'report-invalid'
           ? 'Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made.'
         : isServerSide
             ? 'Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above — most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage.'

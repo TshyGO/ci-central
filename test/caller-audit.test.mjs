@@ -14,4 +14,8 @@ test('rollout audit distinguishes old branch pins from inconsistent callers and 
   assert.equal(inspectCaller(text.replace(`      ${slots[0]}:`, `      # ${slots[0]}:`), sha).diagnosis, 'secret_mapping_mismatch');
   const otherJob = '\n  unrelated:\n    secrets:\n' + slots.map(slot => `      ${slot}: \${{ secrets.${slot} }}`).join('\n');
   assert.equal(inspectCaller(text.replace(`      ${slots[0]}:`, `      # ${slots[0]}:`) + otherJob, sha).diagnosis, 'secret_mapping_mismatch');
+  const wrongSection = text.replace(`      ${slots[0]}:`, `      # ${slots[0]}:`)
+    .replace('    with:\n', `    with:\n      ${slots[0]}: \${{ secrets.${slots[0]} }}\n`);
+  assert.equal(inspectCaller(wrongSection, sha).diagnosis, 'secret_mapping_mismatch');
+  assert.equal(inspectCaller(text + '\n      EXTRA_KEY: ${{ secrets.EXTRA_KEY }}', sha).diagnosis, 'secret_mapping_mismatch');
 });

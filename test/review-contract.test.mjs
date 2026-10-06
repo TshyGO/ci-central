@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { packDiff, excerpt, collectIssues, enrichWorkflows } = require('../review-action/src/review-context.js');
-const { buildSystemPrompt, parseReview, renderReview } = require('../review-action/src/review-report.js');
+const { buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('../review-action/src/review-report.js');
 
 const file = { filename: 'src/auth.js', status: 'modified', additions: 2, deletions: 1,
   patch: '@@ -10,2 +10,3 @@\n- return true;\n+ if (!user) throw new Error();\n+ return user.tenant === tenant;\n }\n@@ -40 +41 @@\n- persist();\n+ persist(user);' };
@@ -150,4 +150,13 @@ test('removed-file findings can cite base lines without inventing head locations
   assert.doesNotThrow(() => parseReview(JSON.stringify(removedReport), deleted));
   removedReport.findings[0].side = 'new';
   assert.throws(() => parseReview(JSON.stringify(removedReport), deleted), /outside supplied hunks/);
+});
+test('partial reports never publish raw JSON or imply complete output', () => {
+  const rendered = renderPartialReview(JSON.stringify(report), context);
+  assert.ok(rendered.includes('输出未完整结束'));
+  assert.ok(!rendered.includes('模型输出完整'));
+  assert.ok(!rendered.includes('"reviewed_files"'));
+  const malformed = renderPartialReview('{"summary":"<img src=PRIVATE>"', context);
+  assert.ok(malformed.includes('不展示原始 JSON'));
+  assert.ok(!malformed.includes('PRIVATE'));
 });

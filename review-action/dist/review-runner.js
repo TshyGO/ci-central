@@ -434,12 +434,12 @@ var require_review_report = __commonJS({
 ${text}
 ${delimiter}`;
     };
-    function renderReview2(report, context) {
+    function renderReview2(report, context, { complete = true } = {}) {
       const hasRisks = report.findings.some((finding) => finding.confidence !== "high");
       const lines = [
         hasRisks ? "\u672C\u62A5\u544A\u5305\u542B\u5F85\u6838\u5B9E\u98CE\u9669\uFF1B\u7F6E\u4FE1\u5EA6\u662F\u6A21\u578B\u81EA\u62A5\u4FE1\u606F\uFF0C\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u6210\u7ACB\u3002" : safeText(report.summary),
         "",
-        "> \u6A21\u578B\u8F93\u51FA\u5B8C\u6574\uFF0C\u8BC1\u636E\u4F4D\u7F6E\u4E0E\u4EE3\u7801\u5F15\u7528\u5DF2\u6821\u9A8C\uFF1B\u8FD9\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u5DF2\u88AB\u4EBA\u5DE5\u786E\u8BA4\uFF0C\u4E5F\u4E0D\u4EE3\u8868 PR \u5DF2\u83B7\u6279\u51C6\u3002",
+        complete ? "> \u6A21\u578B\u8F93\u51FA\u5B8C\u6574\uFF0C\u8BC1\u636E\u4F4D\u7F6E\u4E0E\u4EE3\u7801\u5F15\u7528\u5DF2\u6821\u9A8C\uFF1B\u8FD9\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u5DF2\u88AB\u4EBA\u5DE5\u786E\u8BA4\uFF0C\u4E5F\u4E0D\u4EE3\u8868 PR \u5DF2\u83B7\u6279\u51C6\u3002" : "> \u8F93\u51FA\u672A\u5B8C\u6574\u7ED3\u675F\uFF0C\u4EC5\u5BF9\u53EF\u89E3\u6790\u7247\u6BB5\u4F5C\u5F15\u7528\u5B9A\u4F4D\u6821\u9A8C\uFF1B\u4E0D\u8BA1\u5165 quorum\uFF0C\u53EF\u80FD\u4ECD\u6709\u9057\u6F0F\u3002",
         "",
         report.findings.length ? "### \u6709\u8BC1\u636E\u652F\u6301\u7684\u53D1\u73B0" : "### \u672A\u53D1\u73B0\u6709\u8BC1\u636E\u652F\u6301\u7684\u5B9E\u8D28\u7F3A\u9677"
       ];
@@ -471,7 +471,15 @@ ${delimiter}`;
       for (const item of report.limitations) lines.push(`- ${safeText(item)}`);
       return lines.join("\n");
     }
-    module2.exports = { PROMPT_VERSION: PROMPT_VERSION2, buildSystemPrompt: buildSystemPrompt2, parseReview: parseReview2, renderReview: renderReview2 };
+    function renderPartialReview2(text, context) {
+      const reason = ["length", "max_tokens"].includes(context.finishReason) ? "> \u8F93\u51FA\u56E0 token \u4E0A\u9650\uFF08max_tokens/max_output_tokens\uFF09\u622A\u65AD\u3002\n\n" : "";
+      try {
+        return reason + renderReview2(parseReview2(text, context), context, { complete: false });
+      } catch {
+        return reason + "> \u8F93\u51FA\u672A\u5B8C\u6574\u7ED3\u675F\uFF0C\u5269\u4F59\u7247\u6BB5\u65E0\u6CD5\u6EE1\u8DB3\u62A5\u544A\u5951\u7EA6\uFF1B\u4E0D\u5C55\u793A\u539F\u59CB JSON\uFF0C\u4E0D\u8BA1\u5165 quorum\u3002\n\n\u8BF7\u67E5\u770B\u672C\u6B21\u8FD0\u884C\u7684\u7ED3\u675F\u539F\u56E0\u4E0E token \u7EDF\u8BA1\u3002";
+      }
+    }
+    module2.exports = { PROMPT_VERSION: PROMPT_VERSION2, buildSystemPrompt: buildSystemPrompt2, parseReview: parseReview2, renderReview: renderReview2, renderPartialReview: renderPartialReview2 };
   }
 });
 
@@ -571,7 +579,7 @@ var require_review_status = __commonJS({
 // review-action/src/review-runner.js
 var { validateConfig } = require_index();
 var { packDiff, collectIssues, enrichWorkflows } = require_review_context();
-var { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview } = require_review_report();
+var { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require_review_report();
 var { createStatusPublisher } = require_review_status();
 async function runReview({
   github,
@@ -867,9 +875,9 @@ ${requestError || ""}`;
     }
     return { response, responseText, requestError, attempts: 1, failureKind: usable ? "" : failure.kind };
   }
-  function validateAndRender(text, model, complete) {
+  function validateAndRender(text, model, complete, finishReason) {
     const supplied = model.context_profile === "kimi-k3-throttled" ? kimiK3Pack : diffPack;
-    if (!complete) return text;
+    if (!complete) return renderPartialReview(text, { ...supplied, issues: issues.manifest, finishReason });
     const report = parseReview(text, supplied);
     return renderReview(report, { ...supplied, issues: issues.manifest });
   }
@@ -890,11 +898,8 @@ ${requestError || ""}`;
       const reasoningUnit = hasExplicitThoughtTokens || hasDerivedThoughtTokens ? "tokens" : null;
       console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason2} contentLen=${content2.length} thoughtTokens=${reasoningUnit ? reasoningLength2 : "not-reported"} usage=${JSON.stringify(usage)}`);
       let review2 = content2;
-      if (review2 && normalizedFinishReason2 && normalizedFinishReason2 !== "stop") {
-        review2 += "\n\n> \u26A0\uFE0F \u6A21\u578B\u8F93\u51FA\u672A\u5B8C\u6574\u7ED3\u675F\uFF0C\u8FD9\u6761 review \u53EF\u80FD\u4E0D\u5B8C\u6574\u3002";
-      }
       const complete2 = normalizedFinishReason2 === "stop";
-      return { review: review2 ? validateAndRender(review2, model, complete2) : "", reasoningLength: reasoningLength2, reasoningUnit, complete: complete2, finishReason: normalizedFinishReason2 || "missing" };
+      return { review: review2 ? validateAndRender(review2, model, complete2, normalizedFinishReason2) : "", reasoningLength: reasoningLength2, reasoningUnit, complete: complete2, finishReason: normalizedFinishReason2 || "missing" };
     }
     const choice = payload?.choices?.[0];
     const message = choice?.message;
@@ -905,12 +910,9 @@ ${requestError || ""}`;
     const content = stripThinking(message?.content);
     let review = content;
     console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
-    if (review && normalizedFinishReason === "length") {
-      review += "\n\n> \u26A0\uFE0F \u6A21\u578B\u8F93\u51FA\u8FBE\u5230 max_tokens \u4E0A\u9650\uFF0C\u8FD9\u6761 review \u53EF\u80FD\u4E0D\u5B8C\u6574\u3002";
-    }
     const complete = !normalizedFinishReason || normalizedFinishReason === "stop";
     return {
-      review: review ? validateAndRender(review, model, complete) : "",
+      review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : "",
       reasoningLength,
       reasoningUnit: reasoningLength ? "chars" : null,
       complete,
@@ -1029,7 +1031,7 @@ ${snippet}
 ${fence}
 </details>` : "",
       "",
-      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? "Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review." : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.` : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
+      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? "Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review." : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
     ].join("\n");
     return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false, status: "diagnostic" };
   }

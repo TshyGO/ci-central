@@ -34,7 +34,7 @@ for (const repository of repositories) {
   assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 1));
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'glm-5.3', 'mimo-v2.6-pro']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'glm-5.3-flash', 'mimo-v2.6-pro']);
   assert.ok(fromSource.lanes.every(lane => lane.provider === 'opencode-go'), `${repository} every lane must use Go`);
   assert.equal(fromSource.lanes[2].fallbacks[0].id, 'mimo-v2.5-pro');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 131072);
@@ -107,7 +107,7 @@ assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'opencode-go');
 assert.equal(nebula.lanes[2].provider, 'opencode-go');
 assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'openai-chat-completions', 'openai-chat-completions']);
-assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'glm-5.3', 'mimo-v2.6-pro']);
+assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'glm-5.3-flash', 'mimo-v2.6-pro']);
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
 for (const loader of [source, bundled]) {

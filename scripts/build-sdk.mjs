@@ -12,9 +12,18 @@ await build({
   minify: true,
   legalComments: 'linked',
 });
+await build({
+  absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
+  entryPoints: ['review-action/src/review-runner.js'],
+  outfile: 'review-action/dist/review-runner.js',
+  bundle: true, platform: 'node', target: 'node24', format: 'cjs',
+  external: ['./sdk-client.js'], legalComments: 'none',
+});
 const notices = await Promise.all(['openai', 'undici'].map(async (name) => {
   const base = new URL(`../node_modules/${name}/`, import.meta.url);
   const { version } = JSON.parse(await readFile(new URL('package.json', base), 'utf8'));
   return `${name} ${version}\n\n${await readFile(new URL('LICENSE', base), 'utf8')}`;
 }));
 await writeFile(new URL('../review-action/dist/THIRD_PARTY_LICENSES.txt', import.meta.url), notices.join('\n\n---\n\n'));
+
+await writeFile(new URL('../review-action/dist/index.js', import.meta.url), (await readFile(new URL('../review-action/src/index.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n'));

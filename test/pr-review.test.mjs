@@ -3,6 +3,10 @@
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+const localRequire = createRequire(import.meta.url);
+const runner = localRequire('../review-action/src/review-runner.js');
+const bundledRunner = localRequire('../review-action/dist/review-runner.js');
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -314,7 +318,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === 'c19e0369c2d16ff63d0a4ba3105ab87c142daee041b69205f924e3e1467169db';
+    && sha256(review) === '256124d4dc1e61272ae36bb895f8c34d62c1664bdd6242d85c2661096423fa5a';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -345,15 +349,16 @@ const evidenceComment = (lane, { head = headSha, workflow = workflowSha, status 
   ].join('\n'),
 });
 const reply = (status, text) => ({ ok: status < 400, status, text: async () => text });
+const reportText = (content) => content ? JSON.stringify({ summary: content, reviewed_files: ['src/a.ts', 'tests/a.test.ts'], findings: [], limitations: [] }) : '';
 const chatResult = (model, content, { reasoning = 'private thinking', finish = 'stop' } = {}) => JSON.stringify({
   model: `provider/${model}`,
-  choices: [{ finish_reason: finish, message: { content, reasoning_content: reasoning } }],
+  choices: [{ finish_reason: finish, message: { content: reportText(content), reasoning_content: reasoning } }],
   usage: { prompt_tokens: 1 },
 });
 const geminiResult = (content, { finish = 'STOP', thought = '', usageMetadata } = {}) => JSON.stringify({
   candidates: [{ finishReason: finish, content: { parts: [
     ...(thought ? [{ thought: true, text: thought }] : []),
-    { text: content },
+    { text: reportText(content) },
   ] } }],
   usageMetadata: usageMetadata || {
     promptTokenCount: 100,
@@ -372,7 +377,7 @@ function laneForUrl(url) {
 }
 
 async function scenario(route, overrides = {}, options = {}) {
-  const posted = [], captured = [], logs = [], timeouts = [];
+  const posted = [], statusUpdates = [], captured = [], logs = [], timeouts = [];
   const comments = (options.comments || []).map((comment, index) => ({
     id: index + 1,
     user: { login: 'github-actions[bot]' },
@@ -388,7 +393,7 @@ async function scenario(route, overrides = {}, options = {}) {
         listComments: 'comments',
         createComment: async ({ body }) => {
           if (options.rejectComment?.(body)) throw new Error('comment rejected');
-          posted.push(body);
+          (body.startsWith('<!-- ai-pr-review-status:v1 -->') ? statusUpdates : posted).push(body);
           const comment = { id: comments.length + 1, user: { login: 'github-actions[bot]' }, body };
           comments.push(comment);
           return { data: comment };
@@ -398,7 +403,7 @@ async function scenario(route, overrides = {}, options = {}) {
           const comment = comments.find(({ id }) => id === comment_id);
           if (!comment) throw new Error('comment not found');
           comment.body = body;
-          posted.push(body);
+          (body.startsWith('<!-- ai-pr-review-status:v1 -->') ? statusUpdates : posted).push(body);
           return { data: comment };
         },
         deleteComment: async ({ comment_id }) => {
@@ -407,7 +412,7 @@ async function scenario(route, overrides = {}, options = {}) {
         },
       },
     },
-    paginate: async (which) => which === 'files' ? files : which === 'comments' ? comments : [{ commit: { message: 'test' } }],
+    paginate: async (which) => which === 'files' ? (options.files || files) : which === 'comments' ? comments : [{ commit: { message: 'test' } }],
   };
   const fetch = async (url, request) => {
     const body = JSON.parse(request.body);
@@ -423,16 +428,16 @@ async function scenario(route, overrides = {}, options = {}) {
     // Policy tests stub the SDK boundary; sdk-client.test.mjs exercises the
     // actual bundled SDK against real socket/SSE responses separately.
     const requireSdk = (name) => {
-      if (name !== './.ci-central/review-action/dist/sdk-client.js') throw new Error('Unexpected workflow require');
-      return { requestChatCompletion: ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => fetch(`${baseURL}/${protocol === 'openai-responses' ? 'responses' : 'chat/completions'}`, {
+      if (name !== './.ci-central/review-action/dist/review-runner.js') throw new Error('Unexpected workflow require');
+      return { runReview: (args) => (options.useBundle ? bundledRunner : runner).runReview({ ...args, fetch, logger: { log: (...xs) => logs.push(xs.join(' ')) }, timers: { setTimeout: (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout }, sdk: { requestChatCompletion: ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => fetch(`${baseURL}/${protocol === 'openai-responses' ? 'responses' : 'chat/completions'}`, {
         body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl, headers: { authorization: `Bearer ${apiKey}`, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) },
-      }) };
+      }) } }) };
     };
     await runScript(github, options.context || context, { env: { RUNNER_ENVIRONMENT: 'github-hosted', ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
   } catch (caught) {
     error = caught;
   }
-  return { posted, captured, comments, logs, error, pullGets, timeouts };
+  return { posted, statusUpdates, captured, comments, logs, error, pullGets, timeouts };
 }
 
 const checks = [];
@@ -662,16 +667,16 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:glm-5.3,C:mimo-v2.6-pro');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:glm-5.3-flash,C:mimo-v2.6-pro');
 check('healthy path never calls a fallback', r.captured.length === 3
   && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'glm-5.2'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
 check('all active protocols receive the repository review prompt',
-  healthyLaneA?.input[0].content === centralConfig.review_policy.system_prompt
-  && healthyLaneB?.messages[0].content === centralConfig.review_policy.system_prompt
-  && healthyLaneC?.messages[0].content === centralConfig.review_policy.system_prompt
+  healthyLaneA?.input[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
+  && healthyLaneB?.messages[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
+  && healthyLaneC?.messages[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
   && !healthyLaneA?.input[0].content.includes('two independent internal review passes')
   && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
   && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
@@ -684,7 +689,7 @@ check('Lane C uses Chat Completions without Google thinking fields',
   && healthyLaneC?.temperature === undefined
   && healthyLaneC?.generationConfig === undefined);
 check('Lane B uses the configured GLM output budget without lowering model reasoning',
-  healthyLaneB?.model === 'glm-5.3'
+  healthyLaneB?.model === 'glm-5.3-flash'
   && healthyLaneB?.max_tokens === 65536
   && healthyLaneB?.reasoning_effort === undefined
   && healthyLaneB?.thinking === undefined);
@@ -698,10 +703,42 @@ check('healthy comments visibly identify the reviewed head and stable-update beh
   && body.includes('此评论会随 PR 新提交原地更新')
   && body.includes(`[Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`)));
 
+check('structured reports are rendered as evidence-checked Chinese Markdown', r.posted.every(body => body.includes('证据位置与代码引用已校验') && !body.includes('"reviewed_files"')));
+check('current-head status starts pending and finishes with all actual service models', r.statusUpdates[0].includes('主模型运行中')
+  && r.statusUpdates.at(-1).includes('有效发布：3/3') && r.statusUpdates.every(body => body.includes(headSha)));
+r = await scenario(healthy, {}, { useBundle: true });
+check('production bundle preserves the same dispatch and validated publication', !r.error && r.captured.length === 3 && r.posted.length === 3
+  && r.posted.every(body => body.includes('证据位置与代码引用已校验')));
+r = await scenario(call => call.lane === 'B' && call.model === 'glm-5.3-flash'
+  ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Approved without evidence.' } }] })) : healthy(call));
+check('a completed non-contract response falls back once without publishing it as valid evidence', !r.error
+  && r.captured.filter(call => call.lane === 'B').length === 2
+  && r.posted.some(body => body.includes('served by glm-5.2'))
+  && r.statusUpdates.some(body => body.includes('备用模型运行中'))
+  && !r.posted.some(body => body.includes('Approved without evidence.')));
+r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 }] });
+check('missing text material publishes explicit diagnostics without making any model request', r.captured.length === 0
+  && r.posted.length === 3 && r.error && r.posted.every(body => body.includes('No complete inspectable text patch')));
+r = await scenario(call => call.lane === 'C' ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content:
+  JSON.stringify({ summary: 'PRIVATE_REPORT_CONTENT', reviewed_files: ['not-supplied.js'], findings: [], limitations: [] }) } }] })) : healthy(call));
+check('contract diagnostics expose the safe local reason without leaking rejected report content', !r.error
+  && r.posted.some(body => body.includes('no supplied file was reviewed') && body.includes('not an authentication or HTTP failure'))
+  && !r.posted.some(body => body.includes('PRIVATE_REPORT_CONTENT')));
+const emptyThrottledConfig = structuredClone(centralConfig);
+emptyThrottledConfig.lanes[1].primary.context_profile = 'kimi-k3-throttled';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(emptyThrottledConfig) }, { files: [patch('src/a.ts', 500), patch('tests/a.test.ts', 500)] });
+check('a model whose actual context pack is empty is skipped without consuming a request', !r.error
+  && !r.captured.some(call => call.model === 'glm-5.3-flash')
+  && r.captured.filter(call => call.lane === 'B').length === 1
+  && r.posted.some(body => body.includes('served by glm-5.2')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
+const quotedMarkers = validEvidence.map(item => ({ ...item }));
+quotedMarkers[0].body += '\nQuoted source: <!-- ai-pr-review-bot:lane-C -->';
+r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: quotedMarkers });
+check('a marker quoted inside another lane cannot spoof identity or force a model rerun', !r.error && r.captured.length === 0);
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { comments: validEvidence });
 check('automatic rerun reuses all valid same-head evidence without model calls', r.error === undefined
-  && r.captured.length === 0 && r.posted.length === 0 && r.pullGets === 2
+  && r.captured.length === 0 && r.posted.length === 0 && r.pullGets === 3
   && r.logs.some((line) => line.includes('skipping model requests')));
 
 r = await scenario(healthy, {}, { comments: [
@@ -734,8 +771,8 @@ const otherHeadContext = { ...context, payload: { pull_request: { number: 42, he
 r = await scenario(healthy, {}, { comments: validEvidence, pulls: [otherHeadPull], context: otherHeadContext });
 check('valid evidence from an older PR head is not reused', r.error === undefined && r.captured.length === 3 && r.posted.length === 3);
 check('new-head reviews overwrite stable comments in place with visible freshness evidence',
-  r.comments.map(({ id }) => id).join(',') === '1,2,3'
-  && r.comments.every(({ body }) => body.includes(`> 审核提交：\`${otherHeadSha.slice(0, 7)}\``)
+  r.comments.filter(({ body }) => body.includes('ai-pr-review-bot:lane-')).map(({ id }) => id).join(',') === '1,2,3'
+  && r.comments.filter(({ body }) => body.includes('ai-pr-review-bot:lane-')).every(({ body }) => body.includes(`> 审核提交：\`${otherHeadSha.slice(0, 7)}\``)
     && body.includes(`head=${otherHeadSha}`)
     && !body.includes(`head=${headSha}`)));
 
@@ -841,14 +878,14 @@ const qwenFallback = r.captured.find(({ model }) => model === 'muse-spark-1.2-co
 check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 16384 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
 check('Muse 1.2 still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor')));
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+r = await scenario((call) => call.lane === 'B' && call.model === 'glm-5.3-flash' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane B falls back once only to Go GLM 5.2',
-  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3').length === 1
+  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'glm-5.3-flash').length === 1
   && r.captured.filter(({ model }) => model === 'glm-5.2').length === 1
   && r.captured.find(({ model }) => model === 'glm-5.2')?.body.max_tokens === 65536
   && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'glm-5.2')
   && !r.captured.some(({ model }) => model === 'deepseek-v4-pro-202606')
-  && r.posted.some((body) => body.includes('glm-5.3 unavailable -> served by glm-5.2')));
+  && r.posted.some((body) => body.includes('glm-5.3-flash unavailable -> served by glm-5.2')));
 
 r = await scenario((call) => call.lane === 'C' && call.model === 'mimo-v2.6-pro' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
 check('Lane C falls back only to Go MiMo V2.5 Pro after one failed MiMo V2.6 Pro request',
@@ -1006,7 +1043,7 @@ r = await scenario(() => { throw new Error('model should not run'); }, {}, { pul
 check('superseded event makes zero model calls before context collection', r.captured.length === 0 && r.logs.some((line) => line.includes('before context collection')));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, { pulls: [pull, newerPull] });
 check('head change during collection makes zero model calls', r.captured.length === 0 && r.logs.some((line) => line.includes('before model dispatch')));
-r = await scenario(healthy, {}, { pulls: [pull, pull, newerPull] });
+r = await scenario(healthy, {}, { pulls: [pull, pull, pull, newerPull] });
 check('head change during model execution publishes no stale comments', r.captured.length === 3 && r.posted.length === 0 && r.logs.some((line) => line.includes('before comment publishing')));
 
 r = await scenario(healthy, {}, { rejectComment: (body) => body.includes('lane-A') });
@@ -1084,12 +1121,12 @@ check('lanes publish in completion order without waiting for the slowest',
   !r.error && cPublishedWhileBRunning
   && r.posted.map((body) => /ai-pr-review-bot:lane-([ABC])/.exec(body)?.[1]).join(',') === 'C,A,B');
 
-r = await scenario(healthy, {}, { pulls: [pull, pull, pull, newerPull] });
+r = await scenario(healthy, {}, { pulls: [pull, pull, pull, pull, newerPull] });
 check('each publication rechecks freshness; later lanes cannot publish after head changes',
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 
 
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call));
+r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call));
 // A keeps the repository default, B and C each carry a lane-level thirty-minute
 // window, and B's fallback carries its own. C's window is no longer the short
 // 180000: that value was calibrated against the retired SenseNova slot, and the
@@ -1098,13 +1135,13 @@ check('B primary and fallback each get thirty minutes while A and C keep their c
   !r.error && r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
   r.timeouts.join(',') === '300000,1800000,1800000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
-r = await scenario((call) => call.model === 'glm-5.3' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.model === 'glm-5.3-flash' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
   r.timeouts.join(',') === '300000,1800000,1800000,1800000');

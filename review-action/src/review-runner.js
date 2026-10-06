@@ -45,7 +45,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     repo,
     pull_number: pullNumber,
   });
-  
+
   // A newer push may already have superseded this pull_request event before the
   // reusable job starts. Never spend model tokens reviewing a stale commit.
   const eventHeadSha = context.payload.pull_request?.head?.sha;
@@ -54,7 +54,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     console.log(`Skip stale review before context collection: event=${eventHeadSha.slice(0, 7)} current=${reviewHeadSha.slice(0, 7)}.`);
     return;
   }
-  
+
   // A bot comment is reusable only when its machine-readable evidence proves that
   // this exact Lane completed a valid review for both the current PR head and the
   // current reusable-workflow revision. Legacy, diagnostic, partial, edited, or
@@ -118,14 +118,14 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   if (isManualReview) {
     console.log('Manual /review bypasses same-HEAD evidence reuse and forces every configured Lane to run.');
   }
-  
+
   const files = await github.paginate(github.rest.pulls.listFiles, {
     owner,
     repo,
     pull_number: pullNumber,
     per_page: 100,
   });
-  
+
   const prCommits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pullNumber, per_page: 100 });
   const issues = await collectIssues({ github, owner, repo, pull, commits: prCommits, logger: console });
   const issueContext = issues.text;
@@ -139,7 +139,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const system = reviewPolicy.system_prompt;
   const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
   const googleDeepReviewContract = 'Perform two independent internal review passes before writing the final answer: first trace correctness, edge cases, error paths, and contract preservation; then challenge security, architecture boundaries, CI or configuration, and test adequacy. Treat the PR description and passing tests as claims to verify, not proof. Write findings first. Each actionable finding must include severity, exact file or diff-hunk evidence, impact, and a concrete fix. If no actionable finding remains, state the failure paths and invariants you checked plus residual risks. Concise means omit filler and praise, never analysis. Do not invent findings or expose hidden reasoning.';
-  
+
   const buildUser = (diffText, options = {}) => [
     `Repository: ${owner}/${repo}`,
     `Pull Request: #${pull.number} ${pull.title}`,
@@ -168,7 +168,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     issueText: issueContext.slice(0, 2000),
     fileList,
   });
-  
+
   // Model ids are scoped to a lane, never globally. The same model id may be routed
   // through two providers without changing credentials or fallback ownership.
   if (reviewPolicy.max_attempts !== 1) {
@@ -181,7 +181,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const defaultRequestTimeoutMs = Number(reviewPolicy.request_timeout_ms) || 300000;
   const defaultModelBudgetMs = Number(reviewPolicy.model_budget_ms) || 360000;
   const { requestChatCompletion } = sdk || require('./sdk-client.js');
-  
+
   // Some upstreams (e.g. MiniMax) inline their chain-of-thought into `content`
   // instead of `reasoning_content`. Never let that reach the PR comment.
   function stripThinking(text) {
@@ -191,7 +191,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       .replace(/<\/?think>/gi, '')
       .trim();
   }
-  
+
   function basePayload(model) {
     const throttled = model.context_profile === 'kimi-k3-throttled';
     const messages = [
@@ -207,7 +207,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     if (Number.isFinite(model.temperature)) payload.temperature = model.temperature;
     return payload;
   }
-  
+
   function googlePayload(model) {
     const throttled = model.context_profile === 'kimi-k3-throttled';
     const generationConfig = { maxOutputTokens: model.max_output_tokens };
@@ -223,12 +223,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       generationConfig,
     };
   }
-  
+
   function responsesPayload(model) {
     const chat = basePayload(model);
     return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false };
   }
-  
+
   function classifyFailure(response, responseText, requestError) {
     const status = response?.status;
     const rawText = `${responseText || ''}\n${requestError || ''}`;
@@ -248,14 +248,14 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const endpointUnavailable = !response && (
       /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text)
     );
-  
+
     if (quotaExhausted) return { kind: 'quota-exhausted' };
     if (authenticationFailed) return { kind: 'authentication-failed' };
     if (gatewayBlocked) return { kind: 'gateway-blocked' };
     if (endpointUnavailable) return { kind: 'endpoint-unavailable' };
     return { kind: 'model-or-upstream-failure' };
   }
-  
+
   // Exactly one request per model. No retry, backoff, optional-field
   // repair, or redirect can silently send the same review again.
   async function callModel(lane, model) {
@@ -326,7 +326,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     }
     return { response, responseText, requestError, attempts: 1, failureKind: usable ? '' : failure.kind };
   }
-  
+
   function validateAndRender(text, model, complete) {
     const supplied = model.context_profile === 'kimi-k3-throttled' ? kimiK3Pack : diffPack;
     if (!complete) return text;
@@ -381,7 +381,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return { review: review ? validateAndRender(review, model, complete) : '', reasoningLength,
       reasoningUnit: reasoningLength ? 'chars' : null, complete };
   }
-  
+
   // Primary once, then the same-lane fallback once on failure; never retry either.
   async function requestReview(lane) {
     const primary = lane.primary;
@@ -415,7 +415,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let lastRequestError = '';
     let lastFailureKind = '';
     let bestPartial = null;
-  
+
     for (const model of chain) {
       if (model !== primary) await statusPublisher.update(lane.id, 'fallback', model.id);
       const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
@@ -463,9 +463,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
     }
-  
+
     if (bestPartial) return bestPartial;
-  
+
     const failText = lastFailureKind === 'report-invalid'
       ? 'The model returned a response, but its report did not satisfy the evidence contract.'
       : (lastResponseText || lastRequestError || '').trim();
@@ -501,10 +501,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
             ? 'Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above — most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage.'
             : 'Action needed: inspect the upstream response above to identify the request or auth problem.',
     ].join('\n');
-  
+
     return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false, status: 'diagnostic' };
   }
-  
+
   // Context collection can take long enough for another push to land. Re-read the
   // head immediately before dispatch so neither full-context reviewer spends tokens
   // on a commit that is no longer current.
@@ -518,7 +518,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     console.log(`Skip stale review before model dispatch: prepared=${reviewHeadSha.slice(0, 7)} current=${latestPull.head.sha.slice(0, 7)} state=${latestPull.state || 'unknown'}.`);
     return;
   }
-  
+
   const reviewedHeadShortSha = reviewHeadSha.slice(0, 7);
   let posted = 0;
   let staleReview = false;

@@ -25,6 +25,7 @@ function buildSystemPrompt(repositoryPrompt, lane) {
     'Judge claims against the supplied code. You have no browsing or code-execution tools in this request; never claim to have run tests or inspected unavailable files.',
     'Report actionable defects only when you can provide a concrete trigger, impact and an exact code quote from a supplied hunk. Set side to new for head lines or old for removed/base lines; use the corresponding hunk-header line numbers.',
     'Put speculative risks, missing evidence, manual acceptance gaps and stylistic suggestions in limitations. Do not invent a defect to fill a quota.',
+    'Never quote credentials, private documents or personal data; anchor sensitive findings using non-sensitive surrounding code.',
     'Keep all material defects; group duplicates with the same root cause. Do not restate the PR or publish private reasoning.',
     'Return a single JSON object, without a code fence or surrounding prose, in the following shape. Write the string values in Chinese. If no actionable defect exists, findings is [].',
     JSON.stringify(schema),

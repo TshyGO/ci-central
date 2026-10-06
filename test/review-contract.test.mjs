@@ -87,6 +87,12 @@ test('unavailable issues are coverage gaps, not errors or secrets in logs', asyn
   assert.ok(result.manifest.every((item) => item.state === 'unavailable'));
   assert.ok(!messages.join('').includes('PRIVATE_URL_TOKEN'));
 });
+test('legacy Markdown output instructions in repository prompts cannot contradict the JSON contract', () => {
+  const system = buildSystemPrompt('Return concise Markdown in Chinese. Always reserve enough output budget for the final Markdown review.', 'C');
+  assert.ok(!system.includes('Markdown review'));
+  assert.ok(!system.includes('Return concise Markdown'));
+  assert.ok(system.includes('final JSON report'));
+});
 test('all lanes retain core review duties and distinguish evidence from claims', () => {
   for (const lane of ['A', 'B', 'C']) {
     const system = buildSystemPrompt('Repository-specific boundaries.', lane);

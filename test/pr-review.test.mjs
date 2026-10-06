@@ -681,7 +681,7 @@ check('all active protocols receive the repository review prompt',
   && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
   && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
 check('no leftover Markdown instruction contradicts the JSON contract, which is restated after the material',
-  centralConfig.review_policy.system_prompt.includes('final Markdown review')
+  !centralConfig.review_policy.system_prompt.includes('Markdown review')
   && [healthyLaneA?.input, healthyLaneB?.messages, healthyLaneC?.messages].every((messages) =>
     !messages[0].content.includes('Markdown review') && messages[0].content.includes('final JSON report')
     && messages[1].content.trimEnd().endsWith('a Markdown review cannot be accepted.')));

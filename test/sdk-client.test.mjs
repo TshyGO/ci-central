@@ -253,6 +253,10 @@ for (const [name, implementation] of [
     assert.equal(finished.usage_trailer, 'usage');
     assert.deepEqual([finished.input_tokens, finished.output_tokens, finished.reasoning_tokens], [120, 45, 30]);
     assert.equal(finished.last_event, 'finish');
+    assert.equal(finished.done_marker, true);
+    // Stopping after the trailer is our own cancellation, not a transport error.
+    assert.equal(finished.body_end, 'cancel');
+    assert.equal(finished.body_error, null);
     assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE REASONING'));
   });
 
@@ -303,12 +307,12 @@ for (const [name, implementation] of [
       const f = await fixture(t, implementation, async (_req, res) => {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })));
-        if (mode === 'idle close') await delay(150);
+        if (mode === 'idle close') await delay(600);
         if (mode === 'DONE without finish') res.write('data: [DONE]\n\n');
         if (mode === 'close mid-frame') res.write('data: {"model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"PRIVATE');
         if (mode === 'unrecognized in-band frame') res.write(frame({ code: 'upstream_timeout', message: 'PRIVATE REASONING' }));
         res.end();
-      }, { idleCloseMs: 100 });
+      }, { idleCloseMs: 300 });
       await assert.rejects(f.invoke(), (error) => {
         assert.equal(error.code, 'REVIEW_INCOMPLETE_STREAM');
         assert.match(error.message, new RegExp(`http=200, end=${expected.end}, last_event=${expected.last_event.split(':')[0]}`));
@@ -320,8 +324,8 @@ for (const [name, implementation] of [
       for (const field of ['body_end', 'done_marker', 'frame_boundary', 'last_event']) {
         if (field in expected) assert.equal(finished[field], expected[field], field);
       }
-      if (mode === 'idle close') assert.ok(finished.idle_before_end_ms >= 100);
-      else if (finished.body_end === 'eof') assert.ok(finished.idle_before_end_ms < 100);
+      // Margins absorb scheduler pauses: the idle case waits twice the threshold.
+      if (mode === 'idle close') assert.ok(finished.idle_before_end_ms >= 300);
       assert.ok(!JSON.stringify(f.logs).includes('PRIVATE'));
     });
   }

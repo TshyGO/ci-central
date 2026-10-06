@@ -51,7 +51,8 @@ function tailFacts(tail, bytes) {
   const text = tail.toString('latin1');
   return {
     // JSON strings cannot hold a raw line break, so a line-initial marker is SSE framing.
-    done_marker: /[\r\n]data: ?\[DONE\]/.test(text) || (bytes <= tail.length && /^data: ?\[DONE\]/.test(text)),
+    done_marker: /[\r\n]data: ?\[DONE\](?=[\r\n]|$)/.test(text)
+      || (bytes <= tail.length && /^data: ?\[DONE\](?=[\r\n]|$)/.test(text)),
     frame_boundary: /[\r\n]*$/.exec(text)[0].replace(/\r\n/g, '\n').length >= 2,
   };
 }
@@ -106,6 +107,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     events: 0, last_event: null, trailer: null };
   const report = (entry) => { try { onProgress(entry); } catch { /* Diagnostics cannot alter review results. */ } };
   let stream;
+  let events;
   let dispatcher;
   let content = '';
   let usage;
@@ -167,7 +169,9 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
           async pull(controller) {
             let result;
             try { result = await source.read(); } catch (error) {
-              body.end ??= 'error'; body.error ??= describeError(error); body.ended_ms ??= Date.now() - started;
+              if (body.end === null) {
+                body.end = 'error'; body.error = describeError(error); body.ended_ms = Date.now() - started;
+              }
               throw error;
             }
             if (result.done) {
@@ -202,7 +206,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     stream = protocol === 'openai-responses'
       ? await client.responses.create({ ...payload, stream: true }, { signal, maxRetries: 0 })
       : await client.chat.completions.create({ ...payload, stream: true }, { signal, maxRetries: 0 });
-    const events = stream[Symbol.asyncIterator]();
+    events = stream[Symbol.asyncIterator]();
     for (let next = await events.next(); !next.done; next = await events.next()) {
       const event = next.value;
       signal.throwIfAborted();
@@ -301,7 +305,8 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
       timing.incomplete_end && `end=${timing.incomplete_end}`,
       timing.incomplete_end && body.last_event && `last_event=${body.last_event.split(':')[0]}`,
       Number.isInteger(timing.idle_before_end_ms) && `idle_before_end_ms=${timing.idle_before_end_ms}`,
-      timing.incomplete_end && body.error && `body_error=${body.error}`,
+      timing.incomplete_end && /^[A-Za-z]+(?:\/(?:(?:REVIEW|UND_ERR)_[A-Z_]+|E[A-Z]+))?$/.test(body.error || '')
+        && `body_error=${body.error}`,
     ].filter(Boolean).join(', ');
     const sanitized = new Error(signal?.aborted ? 'AI endpoint request aborted (model deadline reached).'
       : `SDK request failed${detail ? ` (${detail})` : ''}.`);
@@ -318,7 +323,11 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     throw sanitized;
   } finally {
     clearInterval(progressTimer);
+    // Our own cleanup abort must not be logged as a transport error on the body.
+    body.end ??= 'cancel'; body.ended_ms ??= Date.now() - started;
     try { stream?.controller?.abort(); } catch { timing.cleanup_error = 'STREAM_ABORT'; }
+    // Settle the SDK iterator as `for await` would; the abort above keeps this from waiting.
+    events?.return?.().catch(() => {});
     // The dispatcher owns only this request. Destroy also cancels error bodies
     // and connections whose stream was never constructed.
     try { await dispatcher?.destroy(); } catch { timing.cleanup_error = 'DISPATCHER_DESTROY'; }

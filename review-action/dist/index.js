@@ -73,6 +73,9 @@ function validateConfig(config, repository) {
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
     if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') throw new Error(`${location}.advisory must be a boolean.`);
+    if (lane.resend_unserved !== undefined && typeof lane.resend_unserved !== 'boolean') {
+      throw new Error(`${location}.resend_unserved must be a boolean.`);
+    }
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
     for (const field of ['request_timeout_ms', 'model_budget_ms']) {
       if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) {

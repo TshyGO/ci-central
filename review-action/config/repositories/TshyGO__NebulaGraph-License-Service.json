@@ -58,6 +58,7 @@
       "provider": "opencode-go",
       "protocol": "openai-chat-completions",
       "advisory": true,
+      "resend_unserved": true,
       "request_timeout_ms": 1800000,
       "model_budget_ms": 1800000,
       "primary": {

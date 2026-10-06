@@ -3,7 +3,8 @@
 const MARKER = '<!-- ai-pr-review-status:v1 -->';
 const labels = { running: '主模型运行中', fallback: '备用模型运行中', complete: '已生成，证据格式已校验',
   reused: '复用当前提交的有效证据', failed: '审核未生成', partial: '输出不完整，不计入 quorum',
-  publication_failed: '结果发布失败，不计入 quorum' };
+  publication_failed: '结果发布失败，不计入 quorum', resending: '模型未受理，换会话重发一次中',
+  skipped: '无可审查的文本补丁，未请求模型' };
 const cell = (text) => String(text ?? '').replace(/[|`<>\r\n]/g, ' ');
 
 function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow, runUrl, runId,
@@ -13,14 +14,16 @@ function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow
   const summaries = comments.filter((item) => item.user?.login === 'github-actions[bot]' && item.body?.split(/\r?\n/, 1)[0] === MARKER);
   let comment = summaries.at(-1);
   let queue = Promise.resolve();
+  let skipped = false;
   function body() {
     const valid = [...rows.values()].filter((row) => ['complete', 'reused'].includes(row.state)).length;
     return [MARKER, `<!-- ai-pr-review-status-head:${head} workflow:${workflow} run:${runId} -->`,
       '## AI 审核 · 当前提交状态', '', `提交：\`${head}\` · [本轮运行](${runUrl})`,
       `中央版本：\`${workflow}\``, '', '| Lane | 主模型 | 当前状态 | 实际服务模型 |', '|---|---|---|---|',
       ...lanes.map((lane) => { const row = rows.get(lane.id); return `| ${lane.id} | ${cell(row.primary)} | ${labels[row.state]} | ${cell(row.served || (row.state === 'reused' ? '见该 Lane 评论' : '—'))} |`; }),
-      '', `有效发布：${valid}/${lanes.length}${quorum ? `；至少需要 ${quorum} 路` : ''}。`,
-      'quorum 表示本次审核证据已生成，不表示模型结论正确或人工批准。',
+      '', ...(skipped ? ['本提交没有可审查的文本补丁（二进制、纯重命名或补丁不可用），未请求模型；这不是审核失败，也不代表已审核或已批准。']
+        : [`有效发布：${valid}/${lanes.length}${quorum ? `；至少需要 ${quorum} 路` : ''}。`,
+          'quorum 表示本次审核证据已生成，不表示模型结论正确或人工批准。']),
       '尚未完成的 Lane 可能仍显示历史提交的评论；以本表的完整提交 SHA 和本轮运行链接为准。',
       '本表记录最后一次观测状态；若运行被取消，最终运行状态以链接为准。',
     ].join('\n');
@@ -50,6 +53,10 @@ function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow
   return { publish, update(lane, state, served = null) {
     if (!rows.has(lane) || !Object.hasOwn(labels, state)) throw new Error('Unknown lane/status transition.');
     rows.set(lane, { ...rows.get(lane), state, served });
+    return publish();
+  }, skip() {
+    skipped = true;
+    for (const [lane, row] of rows) rows.set(lane, { ...row, state: 'skipped', served: null });
     return publish();
   } };
 }

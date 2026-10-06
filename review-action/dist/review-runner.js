@@ -79,6 +79,9 @@ var require_index = __commonJS({
         laneIds.add(lane.id);
         if (typeof lane.provider !== "string" || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
         if (lane.advisory !== void 0 && typeof lane.advisory !== "boolean") throw new Error(`${location}.advisory must be a boolean.`);
+        if (lane.resend_unserved !== void 0 && typeof lane.resend_unserved !== "boolean") {
+          throw new Error(`${location}.resend_unserved must be a boolean.`);
+        }
         if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
         for (const field of ["request_timeout_ms", "model_budget_ms"]) {
           if (lane[field] !== void 0 && (!Number.isInteger(lane[field]) || lane[field] < 1)) {
@@ -555,7 +558,9 @@ var require_review_status = __commonJS({
       reused: "\u590D\u7528\u5F53\u524D\u63D0\u4EA4\u7684\u6709\u6548\u8BC1\u636E",
       failed: "\u5BA1\u6838\u672A\u751F\u6210",
       partial: "\u8F93\u51FA\u4E0D\u5B8C\u6574\uFF0C\u4E0D\u8BA1\u5165 quorum",
-      publication_failed: "\u7ED3\u679C\u53D1\u5E03\u5931\u8D25\uFF0C\u4E0D\u8BA1\u5165 quorum"
+      publication_failed: "\u7ED3\u679C\u53D1\u5E03\u5931\u8D25\uFF0C\u4E0D\u8BA1\u5165 quorum",
+      resending: "\u6A21\u578B\u672A\u53D7\u7406\uFF0C\u6362\u4F1A\u8BDD\u91CD\u53D1\u4E00\u6B21\u4E2D",
+      skipped: "\u65E0\u53EF\u5BA1\u67E5\u7684\u6587\u672C\u8865\u4E01\uFF0C\u672A\u8BF7\u6C42\u6A21\u578B"
     };
     var cell = (text) => String(text ?? "").replace(/[|`<>\r\n]/g, " ");
     function createStatusPublisher2({
@@ -581,6 +586,7 @@ var require_review_status = __commonJS({
       const summaries = comments.filter((item) => item.user?.login === "github-actions[bot]" && item.body?.split(/\r?\n/, 1)[0] === MARKER);
       let comment = summaries.at(-1);
       let queue = Promise.resolve();
+      let skipped = false;
       function body() {
         const valid = [...rows.values()].filter((row) => ["complete", "reused"].includes(row.state)).length;
         return [
@@ -598,8 +604,10 @@ var require_review_status = __commonJS({
             return `| ${lane.id} | ${cell(row.primary)} | ${labels[row.state]} | ${cell(row.served || (row.state === "reused" ? "\u89C1\u8BE5 Lane \u8BC4\u8BBA" : "\u2014"))} |`;
           }),
           "",
-          `\u6709\u6548\u53D1\u5E03\uFF1A${valid}/${lanes.length}${quorum ? `\uFF1B\u81F3\u5C11\u9700\u8981 ${quorum} \u8DEF` : ""}\u3002`,
-          "quorum \u8868\u793A\u672C\u6B21\u5BA1\u6838\u8BC1\u636E\u5DF2\u751F\u6210\uFF0C\u4E0D\u8868\u793A\u6A21\u578B\u7ED3\u8BBA\u6B63\u786E\u6216\u4EBA\u5DE5\u6279\u51C6\u3002",
+          ...skipped ? ["\u672C\u63D0\u4EA4\u6CA1\u6709\u53EF\u5BA1\u67E5\u7684\u6587\u672C\u8865\u4E01\uFF08\u4E8C\u8FDB\u5236\u3001\u7EAF\u91CD\u547D\u540D\u6216\u8865\u4E01\u4E0D\u53EF\u7528\uFF09\uFF0C\u672A\u8BF7\u6C42\u6A21\u578B\uFF1B\u8FD9\u4E0D\u662F\u5BA1\u6838\u5931\u8D25\uFF0C\u4E5F\u4E0D\u4EE3\u8868\u5DF2\u5BA1\u6838\u6216\u5DF2\u6279\u51C6\u3002"] : [
+            `\u6709\u6548\u53D1\u5E03\uFF1A${valid}/${lanes.length}${quorum ? `\uFF1B\u81F3\u5C11\u9700\u8981 ${quorum} \u8DEF` : ""}\u3002`,
+            "quorum \u8868\u793A\u672C\u6B21\u5BA1\u6838\u8BC1\u636E\u5DF2\u751F\u6210\uFF0C\u4E0D\u8868\u793A\u6A21\u578B\u7ED3\u8BBA\u6B63\u786E\u6216\u4EBA\u5DE5\u6279\u51C6\u3002"
+          ],
           "\u5C1A\u672A\u5B8C\u6210\u7684 Lane \u53EF\u80FD\u4ECD\u663E\u793A\u5386\u53F2\u63D0\u4EA4\u7684\u8BC4\u8BBA\uFF1B\u4EE5\u672C\u8868\u7684\u5B8C\u6574\u63D0\u4EA4 SHA \u548C\u672C\u8F6E\u8FD0\u884C\u94FE\u63A5\u4E3A\u51C6\u3002",
           "\u672C\u8868\u8BB0\u5F55\u6700\u540E\u4E00\u6B21\u89C2\u6D4B\u72B6\u6001\uFF1B\u82E5\u8FD0\u884C\u88AB\u53D6\u6D88\uFF0C\u6700\u7EC8\u8FD0\u884C\u72B6\u6001\u4EE5\u94FE\u63A5\u4E3A\u51C6\u3002"
         ].join("\n");
@@ -629,6 +637,10 @@ var require_review_status = __commonJS({
       return { publish, update(lane, state, served = null) {
         if (!rows.has(lane) || !Object.hasOwn(labels, state)) throw new Error("Unknown lane/status transition.");
         rows.set(lane, { ...rows.get(lane), state, served });
+        return publish();
+      }, skip() {
+        skipped = true;
+        for (const [lane, row] of rows) rows.set(lane, { ...row, state: "skipped", served: null });
         return publish();
       } };
     }
@@ -770,6 +782,11 @@ async function runReview({
   const kimiK3Pack = packDiff(material, 1e3);
   const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join("\n");
   console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted; complete omitted hunks=${diffPack.omittedHunks}.`);
+  if (!material.some((file) => typeof file.patch === "string" && file.patch.trim() || typeof file.after_image === "string")) {
+    console.log("::notice::No changed file has a text patch (binary, rename-only or unavailable); model review skipped. This is neither a failure nor an approval.");
+    await statusPublisher.skip();
+    return;
+  }
   const contextManifest = {
     prompt_version: PROMPT_VERSION,
     head: reviewHeadSha,
@@ -858,7 +875,7 @@ ${googleDeepReviewContract}`, model.review_lane_id);
     const rawText = `${responseText || ""}
 ${requestError || ""}`;
     const text = rawText.toLowerCase();
-    const quotaExhausted = status === 429 && (text.includes("insufficient_quota") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text));
+    const quotaExhausted = status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text));
     const authenticationFailed = status === 401 || status === 403 && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text);
     const gatewayBlocked = /^\s*(<!doctype html|<html\b)/i.test(responseText || "") || !response?.ok && text.includes("\u9A8C\u8BC1\u5931\u8D25");
     const endpointUnavailable = !response && /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text);
@@ -868,16 +885,23 @@ ${requestError || ""}`;
     if (endpointUnavailable) return { kind: "endpoint-unavailable" };
     return { kind: "model-or-upstream-failure" };
   }
-  async function callModel(lane, model) {
+  function modelWindowMs(lane, model) {
     const requestTimeoutMs = model.request_timeout_ms ?? lane.request_timeout_ms ?? defaultRequestTimeoutMs;
     const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
+    return Math.min(requestTimeoutMs, modelBudgetMs);
+  }
+  async function callModel(lane, model, { windowMs = modelWindowMs(lane, model), sessionSuffix = "", attempt = 1 } = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, modelBudgetMs));
+    const timeout = setTimeout(() => controller.abort(), windowMs);
     const startedAt = Date.now();
     let response;
     let responseText = "";
     let requestError = "";
     let errorCode = "";
+    let unserved = false;
+    let httpStatus;
+    let retryAfterMs;
+    let localDeadline = false;
     try {
       const credentials = laneCredentials[lane.id];
       let proxyUrl;
@@ -909,10 +933,10 @@ ${requestError || ""}`;
         baseURL: credentials.baseUrl,
         protocol: lane.protocol,
         proxyUrl,
-        sessionId: lane.provider === "opencode-go" ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}` : void 0,
+        sessionId: lane.provider === "opencode-go" ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : void 0,
         payload: lane.protocol === "openai-responses" ? responsesPayload({ ...model, review_lane_id: lane.id }) : basePayload({ ...model, review_lane_id: lane.id }),
         signal: controller.signal,
-        timeoutMs: Math.min(requestTimeoutMs, modelBudgetMs),
+        timeoutMs: windowMs,
         onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`)
       });
       responseText = await response.text();
@@ -923,17 +947,44 @@ ${requestError || ""}`;
       }
       const code = error?.cause?.code || error?.code;
       errorCode = typeof code === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : "";
-      requestError = error?.name === "AbortError" ? "Local review deadline reached before a complete final response; this is not proof of an upstream outage." : error?.message || String(error);
+      localDeadline = error?.name === "AbortError";
+      requestError = localDeadline ? "Local review deadline reached before a complete final response; this is not proof of an upstream outage." : error?.message || String(error);
+      unserved = error?.unserved === true;
+      httpStatus = Number.isInteger(error?.status) ? error.status : error?.httpStatus;
+      retryAfterMs = Number.isSafeInteger(error?.retryAfterMs) ? error.retryAfterMs : void 0;
     } finally {
       clearTimeout(timeout);
     }
     const failure = classifyFailure(response, responseText, requestError);
     const usable = response?.ok && !requestError && failure.kind !== "gateway-blocked";
-    console.log(`[Lane ${lane.id}/${model.id}] attempt 1/1 elapsed_ms=${Date.now() - startedAt} status=${response?.status ?? "request failed"} error_code=${errorCode || "none"}`);
+    const elapsedMs = Date.now() - startedAt;
+    console.log(`[Lane ${lane.id}/${model.id}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? "request failed"} error_code=${errorCode || "none"}${usable ? "" : ` unserved=${unserved}`}`);
     if (!usable) {
       console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${lane.protocol} failed: ${(responseText || requestError || "").slice(0, 1e3)}`);
     }
-    return { response, responseText, requestError, attempts: 1, failureKind: usable ? "" : failure.kind };
+    return {
+      response,
+      responseText,
+      requestError,
+      attempts: attempt,
+      failureKind: usable ? "" : failure.kind,
+      unserved: !usable && unserved,
+      httpStatus: response?.status ?? httpStatus,
+      retryAfterMs,
+      localDeadline,
+      elapsedMs
+    };
+  }
+  const UNSERVED_RESEND_DELAY_MS = 3e4;
+  const UNSERVED_RESEND_MIN_WINDOW_MS = 6e4;
+  function unservedResend(lane, model, outcome) {
+    if (lane.resend_unserved !== true || !outcome.unserved || outcome.localDeadline) return null;
+    if (["quota-exhausted", "authentication-failed", "gateway-blocked", "endpoint-unavailable"].includes(outcome.failureKind)) return null;
+    const status = outcome.httpStatus;
+    if (!(status === 429 || status === 200 || Number.isInteger(status) && status >= 500)) return null;
+    const delayMs = status === 200 ? 0 : Math.min(outcome.retryAfterMs ?? UNSERVED_RESEND_DELAY_MS, 12e4);
+    const windowMs = modelWindowMs(lane, model) - outcome.elapsedMs - delayMs;
+    return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
   }
   function validateAndRender(text, model, complete, finishReason) {
     const supplied = model.context_profile === "kimi-k3-throttled" ? kimiK3Pack : diffPack;
@@ -1028,7 +1079,15 @@ ${requestError || ""}`;
         tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);
         continue;
       }
-      const { response, responseText, requestError, attempts, failureKind } = await callModel(lane, model);
+      let outcome = await callModel(lane, model);
+      const resend = unservedResend(lane, model, outcome);
+      if (resend) {
+        console.log(`[Lane ${lane.id}/${model.id}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
+        await statusPublisher.update(lane.id, "resending", model.id);
+        await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
+        outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: "-resend", attempt: 2 });
+      }
+      const { response, responseText, requestError, attempts, failureKind } = outcome;
       lastResponse = response;
       lastResponseText = responseText;
       lastRequestError = requestError;

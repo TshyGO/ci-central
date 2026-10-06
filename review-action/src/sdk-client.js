@@ -45,17 +45,15 @@ function appendTail(tail, chunk) {
   return joined.length > TAIL_BYTES ? joined.subarray(joined.length - TAIL_BYTES) : joined;
 }
 
-// Only booleans leave this function; the tail itself may contain reasoning text.
+// Only a boolean leaves this function; the tail itself may contain reasoning text.
 function tailFacts(tail, bytes) {
-  if (!bytes) return { done_marker: false, frame_boundary: null };
-  const text = tail.toString('latin1');
-  return {
-    // JSON strings cannot hold a raw line break, so a line-initial marker is SSE framing.
-    done_marker: /[\r\n]data: ?\[DONE\](?=[\r\n]|$)/.test(text)
-      || (bytes <= tail.length && /^data: ?\[DONE\](?=[\r\n]|$)/.test(text)),
-    frame_boundary: /[\r\n]*$/.exec(text)[0].replace(/\r\n/g, '\n').length >= 2,
-  };
+  if (!bytes) return { frame_boundary: null };
+  return { frame_boundary: /[\r\n]*$/.exec(tail.toString('latin1'))[0].replace(/\r\n/g, '\n').length >= 2 };
 }
+
+// JSON strings cannot hold a raw line break, so a line-initial marker is SSE framing.
+// Scanned per chunk with a short carry, so trailing frames cannot push it out of view.
+const DONE_LINE = /[\r\n]data: ?\[DONE\](?=[\r\n]|$)/;
 
 function usageCounts(usage) {
   return {
@@ -104,7 +102,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
   // The SDK ends iteration silently on clean EOF, [DONE] and a transport
   // AbortError alike; only the raw body can tell those terminations apart.
   const body = { end: null, error: null, ended_ms: null, max_gap_ms: 0, tail: Buffer.alloc(0),
-    events: 0, last_event: null, trailer: null };
+    done_marker: false, carry: '\n', events: 0, last_event: null, trailer: null };
   const report = (entry) => { try { onProgress(entry); } catch { /* Diagnostics cannot alter review results. */ } };
   let stream;
   let events;
@@ -192,6 +190,9 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
               throw error;
             }
             body.tail = appendTail(body.tail, chunk);
+            const scanned = body.carry + Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString('latin1');
+            body.done_marker ||= DONE_LINE.test(scanned);
+            body.carry = scanned.slice(-16);
             controller.enqueue(chunk);
           },
           cancel(reason) {
@@ -277,10 +278,9 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     }
     if (!timing.finish_reason) {
       signal.throwIfAborted();
-      const { done_marker: doneMarker } = tailFacts(body.tail, timing.bytes);
       if (body.ended_ms !== null && timing.last_byte_ms !== null) timing.idle_before_end_ms = body.ended_ms - timing.last_byte_ms;
       timing.incomplete_end = body.end === 'error' ? 'transport_error'
-        : doneMarker ? 'done_without_finish'
+        : body.done_marker ? 'done_without_finish'
           : body.end === 'eof' ? (timing.idle_before_end_ms >= idleCloseMs ? 'idle_close' : 'clean_close')
             : 'unknown';
       const error = new Error('SDK stream ended without a finish_reason.');
@@ -300,12 +300,12 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     // The message reaches the PR comment, so it carries only local vocabulary:
     // our own/transport codes, HTTP status and the observed stream termination.
     const detail = [
-      /^(?:REVIEW|UND_ERR)_[A-Z_]+$|^E[A-Z]+$/.test(code || '') && `code=${code}`,
+      /^(?:REVIEW|UND_ERR)_[A-Z_]+$|^E[A-Z_]+$/.test(code || '') && `code=${code}`,
       Number.isInteger(timing.status) && `http=${timing.status}`,
       timing.incomplete_end && `end=${timing.incomplete_end}`,
       timing.incomplete_end && body.last_event && `last_event=${body.last_event.split(':')[0]}`,
       Number.isInteger(timing.idle_before_end_ms) && `idle_before_end_ms=${timing.idle_before_end_ms}`,
-      timing.incomplete_end && /^[A-Za-z]+(?:\/(?:(?:REVIEW|UND_ERR)_[A-Z_]+|E[A-Z]+))?$/.test(body.error || '')
+      timing.incomplete_end && /^[A-Za-z]+(?:\/(?:(?:REVIEW|UND_ERR)_[A-Z_]+|E[A-Z_]+))?$/.test(body.error || '')
         && `body_error=${body.error}`,
     ].filter(Boolean).join(', ');
     const sanitized = new Error(signal?.aborted ? 'AI endpoint request aborted (model deadline reached).'
@@ -316,6 +316,14 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     sanitized.providerCode = safeCode(error.error?.code) || code;
     sanitized.providerType = safeCode(error.error?.type);
     if (signal?.aborted) sanitized.code = 'REVIEW_DEADLINE';
+    sanitized.httpStatus = Number.isInteger(timing.status) ? timing.status : undefined;
+    // No model output reached us (rejected, or queued and closed before any token),
+    // so a resend cannot duplicate a review. Responses streams count any event.
+    sanitized.unserved = !signal?.aborted && !timing.finish_reason && timing.content_chars === 0
+      && timing.reasoning_chars === 0 && (protocol !== 'openai-responses' || body.events === 0);
+    const retryAfter = Number(error?.headers?.get?.('retry-after'));
+    if (Number.isInteger(retryAfter) && retryAfter > 0 && retryAfter <= 600) sanitized.retryAfterMs = retryAfter * 1000;
+    timing.unserved = sanitized.unserved;
     timing.error_code = code || (signal?.aborted ? 'DEADLINE' : 'SDK_ERROR');
     timing.error_name = safeCode(error.name) || 'unknown';
     timing.provider_code = sanitized.providerCode;
@@ -327,12 +335,12 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     body.end ??= 'cancel'; body.ended_ms ??= Date.now() - started;
     try { stream?.controller?.abort(); } catch { timing.cleanup_error = 'STREAM_ABORT'; }
     // Settle the SDK iterator as `for await` would; the abort above keeps this from waiting.
-    events?.return?.().catch(() => {});
+    try { Promise.resolve(events?.return?.()).catch(() => {}); } catch { timing.cleanup_error = 'ITERATOR_RETURN'; }
     // The dispatcher owns only this request. Destroy also cancels error bodies
     // and connections whose stream was never constructed.
     try { await dispatcher?.destroy(); } catch { timing.cleanup_error = 'DISPATCHER_DESTROY'; }
     timing.elapsed_ms = Date.now() - started;
-    report({ ...timing, body_end: body.end, body_error: body.error, ...tailFacts(body.tail, timing.bytes),
+    report({ ...timing, body_end: body.end, body_error: body.error, done_marker: body.done_marker, ...tailFacts(body.tail, timing.bytes),
       max_gap_ms: body.max_gap_ms, events: body.events, last_event: body.last_event, usage_trailer: body.trailer,
       ...usageCounts(usage), event: 'finished' });
   }

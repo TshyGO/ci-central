@@ -241,9 +241,9 @@ for (const [name, implementation] of [
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })));
       res.write(frame(delta('final review', 'stop')));
+      // One write: the [DONE] assertion must not depend on TCP segmentation.
       res.write(frame({ model: 'glm-5.3', choices: [], usage: { prompt_tokens: 120, completion_tokens: 45,
-        total_tokens: 165, completion_tokens_details: { reasoning_tokens: 30 } } }));
-      res.write('data: [DONE]\n\n');
+        total_tokens: 165, completion_tokens_details: { reasoning_tokens: 30 } } }) + 'data: [DONE]\n\n');
       // Deliberately leave the connection open after the trailer.
     });
     const result = JSON.parse(await (await f.invoke()).text());
@@ -327,6 +327,44 @@ for (const [name, implementation] of [
       // Margins absorb scheduler pauses: the idle case waits twice the threshold.
       if (mode === 'idle close') assert.ok(finished.idle_before_end_ms >= 300);
       assert.ok(!JSON.stringify(f.logs).includes('PRIVATE'));
+    });
+  }
+
+  test(`${name}: [DONE] is recognized even when more than the tail window follows it`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })) + 'data: [DONE]\n\n'
+        + `: ${'x'.repeat(4096)}\n\n`);
+    });
+    await assert.rejects(f.invoke(), (error) => /end=done_without_finish/.test(error.message));
+    assert.equal(f.logs.at(-1).done_marker, true);
+  });
+
+  for (const [mode, expected] of [
+    ['capacity 429 with retry-after', { unserved: true, httpStatus: 429, retryAfterMs: 7000 }],
+    ['queued stream closed before any token', { unserved: true, httpStatus: 200 }],
+    ['stream closed after reasoning', { unserved: false, httpStatus: 200 }],
+  ]) {
+    test(`${name}: ${mode} reports whether any model output was produced`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        if (mode.startsWith('capacity')) {
+          res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '7' });
+          res.end(JSON.stringify({ error: { type: 'server_error', message: 'PRIVATE ERROR' } }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (mode.startsWith('queued')) res.write(': keep-alive\n\n: keep-alive\n\n');
+        else res.write(frame(delta('', null, { reasoning_content: 'PRIVATE REASONING' })));
+        res.end();
+      });
+      await assert.rejects(f.invoke(), (error) => {
+        assert.equal(error.unserved, expected.unserved);
+        assert.equal(error.httpStatus, expected.httpStatus);
+        assert.equal(error.retryAfterMs, expected.retryAfterMs);
+        assert.ok(!JSON.stringify(error).includes('PRIVATE'));
+        return true;
+      });
+      assert.equal(f.logs.at(-1).unserved, expected.unserved);
     });
   }
 

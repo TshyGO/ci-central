@@ -716,9 +716,59 @@ check('a completed non-contract response falls back once without publishing it a
   && r.posted.some(body => body.includes('served by glm-5.2'))
   && r.statusUpdates.some(body => body.includes('备用模型运行中'))
   && !r.posted.some(body => body.includes('Approved without evidence.')));
-r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 }] });
-check('missing text material publishes explicit diagnostics without making any model request', r.captured.length === 0
+r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 },
+  { filename: 'docs/new-name.md', previous_filename: 'docs/old-name.md', status: 'renamed', additions: 0, deletions: 0 }] });
+check('binary or rename-only changes skip model requests without failing the gate or posting lane comments', r.captured.length === 0
+  && !r.error && r.posted.length === 0 && r.statusUpdates.at(-1)?.includes('无可审查的文本补丁')
+  && !r.statusUpdates.at(-1)?.includes('有效发布') && r.logs.some(line => line.startsWith('::notice::')));
+r = await scenario(healthy, {}, { files: [patch('src/huge.ts', 130000)] });
+check('text that exists but cannot fit the budget still fails as missing review evidence', r.captured.length === 0
   && r.posted.length === 3 && r.error && r.posted.every(body => body.includes('No complete inspectable text patch')));
+
+// Unserved resend: only a request with no model output at all may be sent again.
+const unserved = (httpStatus, extra = {}) => Object.assign(new Error(`SDK request failed (http=${httpStatus}).`),
+  { name: 'SDKRequestError', status: httpStatus === 200 ? undefined : httpStatus, httpStatus, unserved: true,
+    providerType: 'server_error', ...extra });
+const firstCallFails = (lane, model, error) => {
+  let calls = 0;
+  return (call) => call.lane === lane && call.model === model && calls++ === 0 ? Promise.reject(error) : healthy(call);
+};
+const sessions = (result, model) => result.captured.filter((call) => call.model === model).map((call) => call.headers['x-opencode-session']);
+r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', unserved(429)));
+check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
+  && sessions(r, 'mimo-v2.6-pro').length === 2 && sessions(r, 'mimo-v2.6-pro')[1] === `${sessions(r, 'mimo-v2.6-pro')[0]}-resend`
+  && !r.captured.some(({ model }) => model === 'mimo-v2.5-pro') && r.timeouts.includes(30000)
+  && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by'))
+  && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
+r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', unserved(429, { retryAfterMs: 5000 })));
+check('a provider retry-after paces the single resend', !r.error && r.timeouts.includes(5000) && !r.timeouts.includes(30000));
+r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
+check('a stream queued and closed before any output is resent immediately', !r.error
+  && sessions(r, 'mimo-v2.6-pro').length === 2 && r.timeouts.includes(0));
+r = await scenario((call) => call.model === 'mimo-v2.6-pro' ? Promise.reject(unserved(503)) : healthy(call));
+check('a resend that is also unserved falls back once instead of retrying again', !r.error
+  && sessions(r, 'mimo-v2.6-pro').length === 2 && r.captured.filter(({ model }) => model === 'mimo-v2.5-pro').length === 1
+  && r.posted.some((body) => body.includes('served by mimo-v2.5-pro')));
+for (const [label, error] of [
+  ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
+  ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
+  ['the local deadline', Object.assign(new Error('AI endpoint request aborted (model deadline reached).'), { name: 'AbortError', unserved: false })],
+]) {
+  r = await scenario(firstCallFails('C', 'mimo-v2.6-pro', error));
+  check(`${label} are never resent`, sessions(r, 'mimo-v2.6-pro').length === 1
+    && r.captured.filter(({ model }) => model === 'mimo-v2.5-pro').length === 1);
+}
+r = await scenario(firstCallFails('B', 'glm-5.3-flash', unserved(429)));
+check('lanes without resend_unserved keep exactly one request per model', !r.error
+  && r.captured.filter(({ model }) => model === 'glm-5.3-flash').length === 1
+  && r.captured.filter(({ model }) => model === 'glm-5.2').length === 1);
+const invalidResendConfig = structuredClone(centralConfig);
+invalidResendConfig.lanes[2].resend_unserved = 'yes';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidResendConfig) });
+check('resend_unserved must be a boolean', r.captured.length === 0 && /resend_unserved must be a boolean/.test(r.error?.message || ''));
+check('Lane C opts into the unserved resend in every repository profile', fs.readdirSync(path.join(here, '..', 'review-action', 'config', 'repositories'))
+  .every((name) => JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', name), 'utf8'))
+    .lanes.every((lane) => (lane.resend_unserved === true) === (lane.id === 'C'))));
 r = await scenario(call => call.lane === 'C' ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content:
   JSON.stringify({ summary: 'PRIVATE_REPORT_CONTENT', reviewed_files: ['not-supplied.js'], findings: [], limitations: [] }) } }] })) : healthy(call));
 check('contract diagnostics expose the safe local reason without leaking rejected report content', !r.error

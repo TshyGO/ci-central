@@ -124,14 +124,44 @@ test('narrative fields are plain prose while code quotes retain their original s
 test('no-findings output is valid when its actual supplied coverage is stated', () => {
   assert.doesNotThrow(() => parseReview(JSON.stringify({ ...report, findings: [] }), context));
 });
-test('wrong files, unseen lines, invented quotes and speculative findings are rejected', () => {
+test('wrong files, unseen lines and invented quotes are withheld as unverified claims', () => {
   for (const mutation of [{ file: 'src/not-supplied.js' }, { line: 30 }, { evidence: 'missingCode()' },
-    { evidence: 'persist(user);' }, { evidence: 'return true;' }]) {
+    { evidence: 'persist(user);' }, { evidence: 'return true;' }, { priority: 'urgent' }, { title: '' }]) {
     const changed = structuredClone(report);
     Object.assign(changed.findings[0], mutation);
-    assert.throws(() => parseReview(JSON.stringify(changed), context), /Review contract/);
+    const parsed = parseReview(JSON.stringify(changed), context);
+    assert.deepEqual(parsed.findings, [], JSON.stringify(mutation));
+    assert.equal(parsed.unverified_count, 1);
+    assert.ok(parsed.limitations.at(-1).startsWith('未通过证据校验'));
+    const rendered = renderReview(parsed, context);
+    assert.ok(!rendered.includes('#### P'), 'an unverified claim is never rendered as a finding');
+    assert.ok(!rendered.includes('missingCode'), 'unverified evidence is not published');
+    assert.ok(rendered.includes('模型原结论（待确认）'));
+    assert.ok(rendered.includes('需人工核实'));
   }
   assert.throws(() => parseReview('I approve this PR.', context), /JSON report/);
+});
+test('a verified finding survives when another finding in the report fails validation', () => {
+  const changed = structuredClone(report);
+  changed.findings.push({ ...report.findings[0], title: '编造的问题', evidence: 'inventedCall();' });
+  const parsed = parseReview(JSON.stringify(changed), context);
+  assert.equal(parsed.findings.length, 1);
+  assert.equal(parsed.findings[0].title, '授权路径缺少检查');
+  assert.ok(parsed.limitations.some((item) => item.includes('编造的问题') && item.includes('code quote')));
+  assert.ok(!renderReview(parsed, context).includes('inventedCall'));
+});
+test('a JSON report wrapped in prose is used, but only its object', () => {
+  const wrapped = `以下是审核结果：\n\`\`\`json\n${JSON.stringify(report)}\n\`\`\`\n请参考。`;
+  const parsed = parseReview(wrapped, context);
+  assert.equal(parsed.findings.length, 1);
+  assert.ok(!renderReview(parsed, context).includes('请参考'));
+  assert.throws(() => parseReview('结论：{没有 JSON}', context), /JSON report/);
+});
+test('blank or oversized limitation items cannot invalidate a report', () => {
+  const changed = structuredClone(report);
+  changed.limitations = ['', '  ', 'x'.repeat(2500), 7, '有效限制'];
+  const parsed = parseReview(JSON.stringify(changed), context);
+  assert.deepEqual(parsed.limitations.map((item) => item.length), [2000, 4]);
 });
 test('coverage claims are intersected with supplied material without inventing missing coverage', () => {
   const changed = structuredClone(report);
@@ -159,7 +189,9 @@ test('honest lower confidence stays a labeled risk instead of triggering another
   changed.findings[0].side = '新增侧';
   assert.equal(parseReview(JSON.stringify(changed), context).findings[0].confidence, 'medium');
   changed.findings[0].evidence = 'notActualCode();';
-  assert.throws(() => parseReview(JSON.stringify(changed), context), /code quote/);
+  const withheld = parseReview(JSON.stringify(changed), context);
+  assert.deepEqual(withheld.findings, []);
+  assert.ok(withheld.limitations.at(-1).includes('code quote'));
 });
 test('removed-file findings can cite base lines without inventing head locations', () => {
   const deleted = packDiff([{ ...file, status: 'removed', patch: '@@ -10,2 +0,0 @@\n-authorize(user);\n-persist();' }], 1000);
@@ -167,7 +199,9 @@ test('removed-file findings can cite base lines without inventing head locations
   Object.assign(removedReport.findings[0], { side: 'old', line: 10, evidence: 'authorize(user);' });
   assert.doesNotThrow(() => parseReview(JSON.stringify(removedReport), deleted));
   removedReport.findings[0].side = 'new';
-  assert.throws(() => parseReview(JSON.stringify(removedReport), deleted), /outside supplied hunks/);
+  const withheld = parseReview(JSON.stringify(removedReport), deleted);
+  assert.deepEqual(withheld.findings, []);
+  assert.ok(withheld.limitations.at(-1).includes('outside supplied hunks'));
 });
 test('partial reports never publish raw JSON or imply complete output', () => {
   const rendered = renderPartialReview(JSON.stringify(report), context);

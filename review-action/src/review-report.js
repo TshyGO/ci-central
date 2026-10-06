@@ -56,10 +56,20 @@ function quoteLocations(lines, firstLine, quote) {
   return matches;
 }
 
+function parseJsonReport(text) {
+  const trimmed = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/, '$1');
+  try { return JSON.parse(trimmed); } catch { /* try the enclosed object below */ }
+  // Models sometimes wrap the object in a sentence or a fence; only the object is used.
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(trimmed.slice(start, end + 1)); } catch { /* rejected below */ }
+  }
+  throw new Error('Review contract: response is not a JSON report.');
+}
+
 function parseReview(text, context) {
-  let report;
-  try { report = JSON.parse(text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/, '$1')); }
-  catch { throw new Error('Review contract: response is not a JSON report.'); }
+  const report = parseJsonReport(text);
   if (!report || typeof report !== 'object' || Array.isArray(report)) throw new Error('Review contract: report is not an object.');
   const summary = plain(report.summary, 'summary', 800);
   if (!Array.isArray(report.reviewed_files) || !Array.isArray(report.findings) || !Array.isArray(report.limitations)
@@ -69,7 +79,7 @@ function parseReview(text, context) {
   const reviewed = claimed.filter(file => typeof file === 'string' && supplied.has(file));
   const excludedClaims = claimed.length - reviewed.length;
   if (!supplied.size) throw new Error('Review contract: no inspectable patch material was supplied.');
-  const findings = report.findings.map((finding) => {
+  const checkFinding = (finding) => {
     if (!finding || typeof finding !== 'object') throw new Error('Review contract: finding is not an object.');
     const priority = typeof finding.priority === 'string' ? finding.priority.trim().toUpperCase() : '';
     if (!['P0', 'P1', 'P2'].includes(priority)) throw new Error('Review contract: finding priority is unsupported.');
@@ -93,18 +103,35 @@ function parseReview(text, context) {
     const aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
     if (!aligned && locations.length !== 1) throw new Error('Review contract: code quote location is ambiguous.');
     const line = aligned ? finding.line : locations[0][0];
-    // Validated code evidence can establish supplied-file coverage even when the
-    // model accidentally leaves that path out of its self-reported file list.
-    if (!reviewed.includes(finding.file)) reviewed.push(finding.file);
-    return { priority, file: finding.file, line, reported_line: line !== finding.line ? finding.line : undefined,
+    const checked = { priority, file: finding.file, line, reported_line: line !== finding.line ? finding.line : undefined,
       confidence, side, evidence, title: plain(finding.title, 'title', 180),
       trigger: plain(finding.trigger, 'trigger'), impact: plain(finding.impact, 'impact'),
       suggestion: plain(finding.suggestion, 'suggestion') };
-  });
+    // Validated code evidence can establish supplied-file coverage even when the
+    // model accidentally leaves that path out of its self-reported file list.
+    if (!reviewed.includes(finding.file)) reviewed.push(finding.file);
+    return checked;
+  };
+  // A finding whose location or quote cannot be verified is withheld, not published,
+  // while the verified rest of the report still counts. Rejecting the whole report for
+  // one bad quote discarded complete reviews and broke the quorum on large diffs.
+  const findings = [];
+  const unverified = [];
+  for (const finding of report.findings) {
+    try { findings.push(checkFinding(finding)); } catch (error) {
+      if (!String(error?.message).startsWith('Review contract:')) throw error;
+      const priority = typeof finding?.priority === 'string' ? finding.priority.trim().toUpperCase() : '';
+      const title = typeof finding?.title === 'string' && finding.title.trim() ? finding.title.trim().slice(0, 180) : '（无标题）';
+      unverified.push(`未通过证据校验、未作为发现发布（${error.message.slice('Review contract: '.length).replace(/\.$/, '')}）：`
+        + `${['P0', 'P1', 'P2'].includes(priority) ? priority : '未知优先级'} · ${title}。该结论未被核实。`);
+    }
+  }
   if (!reviewed.length) throw new Error('Review contract: no supplied file was reviewed.');
-  const limitations = report.limitations.map((item) => plain(item, 'limitation'));
+  const limitations = report.limitations.filter((item) => typeof item === 'string' && item.trim())
+    .map((item) => item.trim().slice(0, 2000));
   if (excludedClaims) limitations.push(`模型的 ${excludedClaims} 项覆盖声明不对应实际提供的文本材料，已从覆盖统计排除；未据此假设审查完成。`);
-  return { summary, reviewed_files: reviewed, findings, limitations };
+  limitations.push(...unverified);
+  return { summary, reviewed_files: reviewed, findings, limitations, unverified_count: unverified.length };
 }
 
 const safeText = (text) => text.replace(/\s+/g, ' ').trim().replace(/&/g, '&amp;')
@@ -122,12 +149,13 @@ const fenced = (text) => {
   return `${delimiter}\n${text}\n${delimiter}`;
 };
 function renderReview(report, context, { complete = true } = {}) {
-  const hasRisks = report.findings.some(finding => finding.confidence !== 'high');
+  const hasRisks = report.findings.some(finding => finding.confidence !== 'high') || report.unverified_count > 0;
   const lines = [...(hasRisks ? ['本报告包含待核实风险；置信度是模型自报信息，不代表结论成立。',
     `模型原结论（待确认）：${safeText(report.summary)}`] : [safeText(report.summary)]), '',
     complete ? '> 模型输出完整，证据位置与代码引用已校验；这不代表结论已被人工确认，也不代表 PR 已获批准。'
       : '> 输出未完整结束，仅对可解析片段作引用定位校验；不计入 quorum，可能仍有遗漏。', '',
-    report.findings.length ? '### 有证据支持的发现' : '### 未发现有证据支持的实质缺陷'];
+    report.findings.length ? '### 有证据支持的发现' : '### 未发现有证据支持的实质缺陷',
+    ...(report.unverified_count ? ['', `另有 ${report.unverified_count} 条模型发现的位置或代码引用未通过校验，未作为发现发布；标题列在“审查范围与限制”中，需人工核实。`] : [])];
   for (const finding of report.findings) lines.push('', `#### ${finding.priority} · ${finding.confidence === 'high' ? '' : '待核实 · '}${safeText(finding.title)}`,
     `文件：${code(`${finding.file}:${finding.line}`)}（${finding.side === 'old' ? 'base/删除侧' : 'head/新增侧'}）`, '',
     ...(finding.reported_line ? [`模型原行号为 ${finding.reported_line}；已按唯一代码引用定位到上述行号。`] : []),

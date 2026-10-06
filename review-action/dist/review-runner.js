@@ -392,13 +392,24 @@ var require_review_report = __commonJS({
       }
       return matches;
     }
-    function parseReview2(text, context) {
-      let report;
+    function parseJsonReport(text) {
+      const trimmed = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/, "$1");
       try {
-        report = JSON.parse(text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/, "$1"));
+        return JSON.parse(trimmed);
       } catch {
-        throw new Error("Review contract: response is not a JSON report.");
       }
+      const start = trimmed.indexOf("{");
+      const end = trimmed.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          return JSON.parse(trimmed.slice(start, end + 1));
+        } catch {
+        }
+      }
+      throw new Error("Review contract: response is not a JSON report.");
+    }
+    function parseReview2(text, context) {
+      const report = parseJsonReport(text);
       if (!report || typeof report !== "object" || Array.isArray(report)) throw new Error("Review contract: report is not an object.");
       const summary = plain(report.summary, "summary", 800);
       if (!Array.isArray(report.reviewed_files) || !Array.isArray(report.findings) || !Array.isArray(report.limitations) || report.findings.length > 100 || report.limitations.length > 100) throw new Error("Review contract: invalid arrays.");
@@ -407,7 +418,7 @@ var require_review_report = __commonJS({
       const reviewed = claimed.filter((file) => typeof file === "string" && supplied.has(file));
       const excludedClaims = claimed.length - reviewed.length;
       if (!supplied.size) throw new Error("Review contract: no inspectable patch material was supplied.");
-      const findings = report.findings.map((finding) => {
+      const checkFinding = (finding) => {
         if (!finding || typeof finding !== "object") throw new Error("Review contract: finding is not an object.");
         const priority = typeof finding.priority === "string" ? finding.priority.trim().toUpperCase() : "";
         if (!["P0", "P1", "P2"].includes(priority)) throw new Error("Review contract: finding priority is unsupported.");
@@ -430,8 +441,7 @@ var require_review_report = __commonJS({
         const aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
         if (!aligned && locations.length !== 1) throw new Error("Review contract: code quote location is ambiguous.");
         const line = aligned ? finding.line : locations[0][0];
-        if (!reviewed.includes(finding.file)) reviewed.push(finding.file);
-        return {
+        const checked = {
           priority,
           file: finding.file,
           line,
@@ -444,11 +454,26 @@ var require_review_report = __commonJS({
           impact: plain(finding.impact, "impact"),
           suggestion: plain(finding.suggestion, "suggestion")
         };
-      });
+        if (!reviewed.includes(finding.file)) reviewed.push(finding.file);
+        return checked;
+      };
+      const findings = [];
+      const unverified = [];
+      for (const finding of report.findings) {
+        try {
+          findings.push(checkFinding(finding));
+        } catch (error) {
+          if (!String(error?.message).startsWith("Review contract:")) throw error;
+          const priority = typeof finding?.priority === "string" ? finding.priority.trim().toUpperCase() : "";
+          const title = typeof finding?.title === "string" && finding.title.trim() ? finding.title.trim().slice(0, 180) : "\uFF08\u65E0\u6807\u9898\uFF09";
+          unverified.push(`\u672A\u901A\u8FC7\u8BC1\u636E\u6821\u9A8C\u3001\u672A\u4F5C\u4E3A\u53D1\u73B0\u53D1\u5E03\uFF08${error.message.slice("Review contract: ".length).replace(/\.$/, "")}\uFF09\uFF1A${["P0", "P1", "P2"].includes(priority) ? priority : "\u672A\u77E5\u4F18\u5148\u7EA7"} \xB7 ${title}\u3002\u8BE5\u7ED3\u8BBA\u672A\u88AB\u6838\u5B9E\u3002`);
+        }
+      }
       if (!reviewed.length) throw new Error("Review contract: no supplied file was reviewed.");
-      const limitations = report.limitations.map((item) => plain(item, "limitation"));
+      const limitations = report.limitations.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 2e3));
       if (excludedClaims) limitations.push(`\u6A21\u578B\u7684 ${excludedClaims} \u9879\u8986\u76D6\u58F0\u660E\u4E0D\u5BF9\u5E94\u5B9E\u9645\u63D0\u4F9B\u7684\u6587\u672C\u6750\u6599\uFF0C\u5DF2\u4ECE\u8986\u76D6\u7EDF\u8BA1\u6392\u9664\uFF1B\u672A\u636E\u6B64\u5047\u8BBE\u5BA1\u67E5\u5B8C\u6210\u3002`);
-      return { summary, reviewed_files: reviewed, findings, limitations };
+      limitations.push(...unverified);
+      return { summary, reviewed_files: reviewed, findings, limitations, unverified_count: unverified.length };
     }
     var safeText = (text) => text.replace(/\s+/g, " ").trim().replace(/&/g, "&amp;").replace(/[<>]/g, (char) => char === "<" ? "&lt;" : "&gt;").replace(/[\\`*_{}\[\]()#!|]/g, "\\$&").replace(/@/g, "@\u200B");
     var code = (text) => {
@@ -465,7 +490,7 @@ ${text}
 ${delimiter}`;
     };
     function renderReview2(report, context, { complete = true } = {}) {
-      const hasRisks = report.findings.some((finding) => finding.confidence !== "high");
+      const hasRisks = report.findings.some((finding) => finding.confidence !== "high") || report.unverified_count > 0;
       const lines = [
         ...hasRisks ? [
           "\u672C\u62A5\u544A\u5305\u542B\u5F85\u6838\u5B9E\u98CE\u9669\uFF1B\u7F6E\u4FE1\u5EA6\u662F\u6A21\u578B\u81EA\u62A5\u4FE1\u606F\uFF0C\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u6210\u7ACB\u3002",
@@ -474,7 +499,8 @@ ${delimiter}`;
         "",
         complete ? "> \u6A21\u578B\u8F93\u51FA\u5B8C\u6574\uFF0C\u8BC1\u636E\u4F4D\u7F6E\u4E0E\u4EE3\u7801\u5F15\u7528\u5DF2\u6821\u9A8C\uFF1B\u8FD9\u4E0D\u4EE3\u8868\u7ED3\u8BBA\u5DF2\u88AB\u4EBA\u5DE5\u786E\u8BA4\uFF0C\u4E5F\u4E0D\u4EE3\u8868 PR \u5DF2\u83B7\u6279\u51C6\u3002" : "> \u8F93\u51FA\u672A\u5B8C\u6574\u7ED3\u675F\uFF0C\u4EC5\u5BF9\u53EF\u89E3\u6790\u7247\u6BB5\u4F5C\u5F15\u7528\u5B9A\u4F4D\u6821\u9A8C\uFF1B\u4E0D\u8BA1\u5165 quorum\uFF0C\u53EF\u80FD\u4ECD\u6709\u9057\u6F0F\u3002",
         "",
-        report.findings.length ? "### \u6709\u8BC1\u636E\u652F\u6301\u7684\u53D1\u73B0" : "### \u672A\u53D1\u73B0\u6709\u8BC1\u636E\u652F\u6301\u7684\u5B9E\u8D28\u7F3A\u9677"
+        report.findings.length ? "### \u6709\u8BC1\u636E\u652F\u6301\u7684\u53D1\u73B0" : "### \u672A\u53D1\u73B0\u6709\u8BC1\u636E\u652F\u6301\u7684\u5B9E\u8D28\u7F3A\u9677",
+        ...report.unverified_count ? ["", `\u53E6\u6709 ${report.unverified_count} \u6761\u6A21\u578B\u53D1\u73B0\u7684\u4F4D\u7F6E\u6216\u4EE3\u7801\u5F15\u7528\u672A\u901A\u8FC7\u6821\u9A8C\uFF0C\u672A\u4F5C\u4E3A\u53D1\u73B0\u53D1\u5E03\uFF1B\u6807\u9898\u5217\u5728\u201C\u5BA1\u67E5\u8303\u56F4\u4E0E\u9650\u5236\u201D\u4E2D\uFF0C\u9700\u4EBA\u5DE5\u6838\u5B9E\u3002`] : []
       ];
       for (const finding of report.findings) lines.push(
         "",

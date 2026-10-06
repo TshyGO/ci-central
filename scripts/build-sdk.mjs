@@ -12,6 +12,13 @@ await build({
   minify: true,
   legalComments: 'linked',
 });
+await build({
+  absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
+  entryPoints: ['review-action/src/review-runner.js'],
+  outfile: 'review-action/dist/review-runner.js',
+  bundle: true, platform: 'node', target: 'node24', format: 'cjs',
+  external: ['./sdk-client.js'], legalComments: 'none',
+});
 const notices = await Promise.all(['openai', 'undici'].map(async (name) => {
   const base = new URL(`../node_modules/${name}/`, import.meta.url);
   const { version } = JSON.parse(await readFile(new URL('package.json', base), 'utf8'));

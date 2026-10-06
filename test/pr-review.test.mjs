@@ -3,6 +3,10 @@
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+const localRequire = createRequire(import.meta.url);
+const runner = localRequire('../review-action/src/review-runner.js');
+const bundledRunner = localRequire('../review-action/dist/review-runner.js');
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -314,7 +318,7 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
-    && sha256(review) === 'c19e0369c2d16ff63d0a4ba3105ab87c142daee041b69205f924e3e1467169db';
+    && sha256(review) === '256124d4dc1e61272ae36bb895f8c34d62c1664bdd6242d85c2661096423fa5a';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
@@ -423,10 +427,10 @@ async function scenario(route, overrides = {}, options = {}) {
     // Policy tests stub the SDK boundary; sdk-client.test.mjs exercises the
     // actual bundled SDK against real socket/SSE responses separately.
     const requireSdk = (name) => {
-      if (name !== './.ci-central/review-action/dist/sdk-client.js') throw new Error('Unexpected workflow require');
-      return { requestChatCompletion: ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => fetch(`${baseURL}/${protocol === 'openai-responses' ? 'responses' : 'chat/completions'}`, {
+      if (name !== './.ci-central/review-action/dist/review-runner.js') throw new Error('Unexpected workflow require');
+      return { runReview: (args) => (options.useBundle ? bundledRunner : runner).runReview({ ...args, fetch, logger: { log: (...xs) => logs.push(xs.join(' ')) }, timers: { setTimeout: (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout }, sdk: { requestChatCompletion: ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => fetch(`${baseURL}/${protocol === 'openai-responses' ? 'responses' : 'chat/completions'}`, {
         body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl, headers: { authorization: `Bearer ${apiKey}`, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) },
-      }) };
+      }) } }) };
     };
     await runScript(github, options.context || context, { env: { RUNNER_ENVIRONMENT: 'github-hosted', ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
   } catch (caught) {

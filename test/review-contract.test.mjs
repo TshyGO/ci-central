@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { packDiff, excerpt, collectIssues } = require('../review-action/src/review-context.js');
+const { packDiff, excerpt, collectIssues, enrichWorkflows } = require('../review-action/src/review-context.js');
 const { buildSystemPrompt, parseReview, renderReview } = require('../review-action/src/review-report.js');
 
 const file = { filename: 'src/auth.js', status: 'modified', additions: 2, deletions: 1,
@@ -25,6 +25,32 @@ test('large changes preserve complete hunks and expose missing coverage', () => 
   assert.ok(!packed.text.includes('large code'));
   assert.ok(packed.text.includes('+new'));
   assert.equal(packed.manifest.length, 2);
+});
+test('generated artifacts cannot displace a smaller changed source module', () => {
+  const generated = { ...file, filename: 'dist/bundle.js', patch: '@@ -1 +1 @@\n-old\n+' + 'generated '.repeat(20) };
+  const source = { ...file, filename: 'src/access.js', patch: '@@ -1 +1 @@\n-old\n+new' };
+  const packed = packDiff([generated, source], 300);
+  assert.ok(packed.text.includes('File: src/access.js'));
+  assert.ok(!packed.text.includes('File: dist/bundle.js'));
+});
+test('large workflow removals use immutable bounded head source and disclose missing base coverage', async () => {
+  const workflow = { ...file, filename: '.github/workflows/review.yml', deletions: 900, additions: 2, patch: 'x'.repeat(25000) };
+  const calls = [];
+  const source = 'name: Review\npermissions:\n  contents: read';
+  const github = { rest: { repos: { getContent: async args => {
+    calls.push(args); return { data: { type: 'file', encoding: 'base64', size: source.length,
+      content: Buffer.from(source).toString('base64') } };
+  } } } };
+  const files = await enrichWorkflows({ github, owner: 'TshyGO', repo: 'sample', head: 'a'.repeat(40),
+    files: [workflow, { ...workflow, filename: 'private/document.txt' }], logger: { log() {} } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].ref, 'a'.repeat(40));
+  assert.equal(files[0].after_image, source);
+  assert.equal(files[1].after_image, undefined);
+  const packed = packDiff(files.slice(0, 1), 1000);
+  assert.equal(packed.coverage[0].mode, 'head_source');
+  assert.deepEqual(packed.coverage[0].old_ranges, []);
+  assert.ok(packed.text.includes('1 | name: Review'));
 });
 test('a partly supplied file retains exact visible hunk ranges', () => {
   const packed = packDiff([file], 160);

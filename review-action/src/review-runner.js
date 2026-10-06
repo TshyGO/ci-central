@@ -1,7 +1,7 @@
 'use strict';
 
 const { validateConfig } = require('./index.js');
-const { packDiff, collectIssues } = require('./review-context.js');
+const { packDiff, collectIssues, enrichWorkflows } = require('./review-context.js');
 const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
 
@@ -130,8 +130,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const issues = await collectIssues({ github, owner, repo, pull, commits: prCommits, logger: console });
   const issueContext = issues.text;
   const DIFF_BUDGET = Math.max(4000, Number(reviewPolicy.diff_char_budget) || 100000);
-  const diffPack = packDiff(files, DIFF_BUDGET);
-  const kimiK3Pack = packDiff(files, 1000);
+  const material = await enrichWorkflows({ github, owner, repo, head: reviewHeadSha, files, logger: console });
+  const diffPack = packDiff(material, DIFF_BUDGET);
+  const kimiK3Pack = packDiff(material, 1000);
   const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join('\n');
   console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted; complete omitted hunks=${diffPack.omittedHunks}.`);
   const contextManifest = { prompt_version: PROMPT_VERSION, head: reviewHeadSha, files: diffPack.manifest,
@@ -277,7 +278,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         try { proxy = new URL(proxyUrl); } catch { /* Reject without exposing credentials. */ }
         if (!proxy || proxy.protocol !== 'http:' || proxy.hostname !== '177.201.224.95' || proxy.port !== '13128'
             || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
-          throw new Error('Lane A requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.');
+          throw new Error(`Lane ${lane.id} requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
         }
       }
       const isGoogle = lane.protocol === 'google-generate-content';

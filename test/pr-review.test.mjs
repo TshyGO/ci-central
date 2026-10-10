@@ -901,14 +901,16 @@ check('protocol and credentials come from lanes', r.captured.find(({ lane }) => 
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
-check('all Go lanes use the explicit runner proxy and stable coding session',
+check('self-hosted Go routes Muse through the proxy and verified models directly with stable sessions',
   !r.error
-  && ['A', 'B', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
+  && r.captured.find(c => c.lane === 'A')?.proxy === 'http://177.201.224.95:13128'
+  && ['B', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === undefined)
   && ['A', 'B', 'C'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
   && r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session'] !== r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session']);
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: '', HTTPS_PROXY: '' });
-check('missing self-hosted Go proxy cannot silently become a direct request',
-  r.captured.length === 0
+check('missing Muse proxy does not block direct B/C evidence or weaken the two-review quorum',
+  !r.error && r.captured.length === 2 && r.captured.every(c => c.lane !== 'A' && c.proxy === undefined)
+  && ['B', 'C'].every(lane => r.posted.some(b => b.includes(`lane=${lane}`) && b.includes('status=valid')))
   && r.posted.some(b => b.includes('lane-A') && b.includes('status=diagnostic')));
 for (const runtime of ['', 'custom-runner']) {
   r = await scenario(healthy, { RUNNER_ENVIRONMENT: runtime, https_proxy: '', HTTPS_PROXY: '' });
@@ -916,7 +918,25 @@ for (const runtime of ['', 'custom-runner']) {
     r.captured.length === 0);
 }
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://unapproved.example:13128' });
-check('self-hosted Go rejects an unapproved proxy destination', r.captured.length === 0);
+check('self-hosted Go rejects an unapproved Muse proxy while verified models stay direct',
+  !r.error && r.captured.length === 2 && r.captured.every(c => c.lane !== 'A' && c.proxy === undefined));
+for (const useBundle of [false, true]) {
+  r = await scenario(call => call.lane === 'A' || (call.lane === 'B' && call.model === 'kimi-k2.7-code')
+    ? reply(503, 'unavailable') : healthy(call),
+  { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' }, { useBundle });
+  check(`source/bundle ${useBundle} keeps Muse fallbacks proxied and GLM fallback direct during proxy failure`,
+    !r.error && r.captured.filter(c => c.lane === 'A').length === 2
+    && r.captured.filter(c => c.lane === 'A').every(c => c.proxy === 'http://177.201.224.95:13128')
+    && r.captured.some(c => c.model === 'glm-5.3' && c.proxy === undefined)
+    && r.posted.some(b => b.includes('lane=B') && b.includes('status=valid'))
+    && r.posted.some(b => b.includes('lane=C') && b.includes('status=valid')));
+}
+const unknownGoModel = structuredClone(centralConfig);
+unknownGoModel.lanes[1].primary.id = 'future-go-model';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(unknownGoModel),
+  RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
+check('unverified Go models retain the approved proxy instead of inheriting Lane B direct routing',
+  r.captured.some(c => c.model === 'future-go-model' && c.proxy === 'http://177.201.224.95:13128'));
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'github-hosted', https_proxy: 'http://unapproved.example:13128' });
 check('explicit GitHub-hosted runtime ignores ambient proxy for Go', !r.error && r.captured.every(c => c.proxy === undefined));
 

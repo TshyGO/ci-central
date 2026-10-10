@@ -5,6 +5,10 @@ const { packDiff, collectIssues, enrichWorkflows } = require('./review-context.j
 const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
 
+// Verified with final model output from the self-hosted CN runner. Keep unknown
+// models (including Muse) on the approved proxy; never retry across egress paths.
+const DIRECT_GO_MODELS = new Set(['kimi-k2.7-code', 'glm-5.3', 'hy3']);
+
 // Runs only from the trusted central checkout. Runtime injection is used by contract tests.
 async function runReview({ github, context, env = globalThis.process.env, fetch = globalThis.fetch,
   timers = globalThis, logger = globalThis.console, sdk }) {
@@ -294,7 +298,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     try {
       const credentials = laneCredentials[lane.id];
       let proxyUrl;
-      if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
+      const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
+        && lane.protocol === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
+      if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
         proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || undefined;
         let proxy;
         try { proxy = new URL(proxyUrl); } catch { /* Reject without exposing credentials. */ }
@@ -302,6 +308,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
             || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
           throw new Error(`Lane ${lane.id} requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
         }
+      }
+      if (lane.provider === 'opencode-go') {
+        console.log(`[Lane ${lane.id}/${model.id}] egress=${proxyUrl ? 'approved-proxy' : 'direct'}`);
       }
       const isGoogle = lane.protocol === 'google-generate-content';
       response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {

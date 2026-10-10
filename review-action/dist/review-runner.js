@@ -655,6 +655,7 @@ var { validateConfig } = require_index();
 var { packDiff, collectIssues, enrichWorkflows } = require_review_context();
 var { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require_review_report();
 var { createStatusPublisher } = require_review_status();
+var DIRECT_GO_MODELS = /* @__PURE__ */ new Set(["kimi-k2.7-code", "glm-5.3", "hy3"]);
 async function runReview({
   github,
   context,
@@ -910,7 +911,8 @@ ${requestError || ""}`;
     try {
       const credentials = laneCredentials[lane.id];
       let proxyUrl;
-      if (lane.provider === "opencode-go" && process2.env.RUNNER_ENVIRONMENT !== "github-hosted") {
+      const directGoModel = process2.env.RUNNER_ENVIRONMENT === "self-hosted" && lane.protocol === "openai-chat-completions" && DIRECT_GO_MODELS.has(model.id);
+      if (lane.provider === "opencode-go" && process2.env.RUNNER_ENVIRONMENT !== "github-hosted" && !directGoModel) {
         proxyUrl = process2.env.https_proxy || process2.env.HTTPS_PROXY || void 0;
         let proxy;
         try {
@@ -920,6 +922,9 @@ ${requestError || ""}`;
         if (!proxy || proxy.protocol !== "http:" || proxy.hostname !== "177.201.224.95" || proxy.port !== "13128" || proxy.search || proxy.hash || !["", "/"].includes(proxy.pathname)) {
           throw new Error(`Lane ${lane.id} requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
         }
+      }
+      if (lane.provider === "opencode-go") {
+        console.log(`[Lane ${lane.id}/${model.id}] egress=${proxyUrl ? "approved-proxy" : "direct"}`);
       }
       const isGoogle = lane.protocol === "google-generate-content";
       response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {

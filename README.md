@@ -71,7 +71,7 @@ CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央�
 
 Muse Contributor 会允许供应商将提示词及回答用于训练，非 ZDR；仅在用户明确选择并在 Go 后台 opt-in 后启用。发送 `store:false` 不会撤销 Contributor 的训练许可。地区与数据政策拒绝保持诊断，不降级为批准。
 
-Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A/B/C 的固定 base 为 `https://opencode.ai/zen/go/v1`。仅当 `RUNNER_ENVIRONMENT=github-hosted` 明确时使用直接连接（忽略 ambient proxy）并接受供应商准入检查；其他情况必须使用已批准的 VPS HTTP 代理 `177.201.224.95:13128`，缺失或地址不匹配时拒绝直连。SDK 使用独立 ProxyAgent，认证只发往代理。B 和 C 同样遵守 Go 的出口策略，并各自携带稳定的 Lane session。
+Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A/B/C 的固定 base 为 `https://opencode.ai/zen/go/v1`。`RUNNER_ENVIRONMENT=github-hosted` 时直接连接并忽略 ambient proxy。明确的 `self-hosted` 环境中，Chat Completions 模型 `kimi-k2.7-code`、`glm-5.3`、`hy3` 使用独立直连 Agent；2026-10-10 已从 ci-review 的中国出口验证三者均返回非空最终内容及 `finish_reason=stop`。Muse Spark 1.3/1.2 直连返回 `403 RegionError`，继续使用已批准的 VPS HTTP 代理 `177.201.224.95:13128`。未验证模型、其他协议和未知运行环境仍保留原代理要求，代理缺失或地址不匹配时拒绝直连。SDK 的代理认证只发往代理，不会在请求失败后切换出口重试。日志仅输出模型和 `direct` / `approved-proxy` 路由，不输出代理凭据。两路有效审查的 quorum 不变；Muse 出口失效时，B/C 的有效审查仍可满足门槛。
 
 VPS 的已有 Squid 只为 `opencode.ai` 配置 Mihomo parent 且 `never_direct`；GitHub 维持原路由。Mihomo 订阅更新、健康切换、故障不直连的服务器部署独立于本仓库，不保存节点、订阅或代理密码。
 

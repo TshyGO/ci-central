@@ -907,6 +907,33 @@ check('self-hosted Go routes Muse through the proxy and verified models directly
   && ['B', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === undefined)
   && ['A', 'B', 'C'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
   && r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session'] !== r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session']);
+for (const useBundle of [false, true]) {
+  r = await scenario(call => call.model === 'muse-spark-1.3-contributor'
+    ? reply(503, 'unavailable') : healthy(call), {
+    RUNNER_ENVIRONMENT: 'self-hosted',
+    NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890',
+    https_proxy: 'http://177.201.224.95:13128',
+  }, { useBundle });
+  check('source/bundle ' + useBundle + ' selects szlab for both Muse models while B/C remain direct',
+    !r.error && r.captured.filter(c => c.lane === 'A').length === 2
+    && r.captured.filter(c => c.lane === 'A').every(c => c.proxy === 'http://192.168.122.1:17890')
+    && r.captured.filter(c => c.lane !== 'A').every(c => c.proxy === undefined));
+}
+for (const invalidProxy of ['', 'http://unapproved.example:17890', 'http://192.168.122.1:17891',
+  'http://192.168.122.1:17890/path', 'http://192.168.122.1:17890?x=1',
+  'http://192.168.122.1:17890#fragment', 'http://user:secret@192.168.122.1:17890',
+  'https://192.168.122.1:17890']) {
+  r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted',
+    NEBULA_REVIEW_PROXY_URL: invalidProxy, https_proxy: 'http://177.201.224.95:13128' });
+  check('invalid model proxy override fails closed: ' + invalidProxy,
+    !r.error && r.captured.length === 2 && r.captured.every(c => c.lane !== 'A' && c.proxy === undefined));
+}
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'custom-runner',
+  NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
+check('unknown runtime cannot use the local szlab exception', r.captured.length === 0);
+r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'github-hosted',
+  NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
+check('GitHub hosted ignores the model proxy override', !r.error && r.captured.every(c => c.proxy === undefined));
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: '', HTTPS_PROXY: '' });
 check('missing Muse proxy does not block direct B/C evidence or weaken the two-review quorum',
   !r.error && r.captured.length === 2 && r.captured.every(c => c.lane !== 'A' && c.proxy === undefined)

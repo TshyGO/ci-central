@@ -301,12 +301,20 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
         && lane.protocol === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
       if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
-        proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || undefined;
+        // Keep GitHub's runner-wide proxy independent from model egress.
+        // An invalid explicit override fails closed without trying the VPS.
+        proxyUrl = process.env.NEBULA_REVIEW_PROXY_URL !== undefined
+          ? process.env.NEBULA_REVIEW_PROXY_URL
+          : process.env.https_proxy || process.env.HTTPS_PROXY || undefined;
         let proxy;
         try { proxy = new URL(proxyUrl); } catch { /* Reject without exposing credentials. */ }
-        if (!proxy || proxy.protocol !== 'http:' || proxy.hostname !== '177.201.224.95' || proxy.port !== '13128'
+        const approvedVps = proxy?.hostname === '177.201.224.95' && proxy?.port === '13128';
+        const approvedLocal = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
+          && proxy?.hostname === '192.168.122.1' && proxy?.port === '17890'
+          && !proxy.username && !proxy.password;
+        if (!proxy || proxy.protocol !== 'http:' || !(approvedVps || approvedLocal)
             || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
-          throw new Error(`Lane ${lane.id} requires the approved VPS proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
+          throw new Error(`Lane ${lane.id} requires an approved review proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
         }
       }
       if (lane.provider === 'opencode-go') {

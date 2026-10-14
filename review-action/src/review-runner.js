@@ -485,6 +485,15 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let review = content;
     console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
     const complete = !normalizedFinishReason || normalizedFinishReason === 'stop';
+    // A provider token count is the real measure of thinking; Claude and Gemini return no
+    // thinking text by default, and Gemini thought text is only a summary.
+    const usage = payload?.usage;
+    const reasoningTokens = [usage?.completion_tokens_details?.reasoning_tokens, usage?.output_tokens_details?.reasoning_tokens,
+      usage?.output_tokens_details?.thinking_tokens, usage?.thoughtsTokenCount].find((value) => Number.isSafeInteger(value) && value >= 0);
+    if (reasoningTokens !== undefined) {
+      return { review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : '', reasoningLength: reasoningTokens,
+        reasoningUnit: 'tokens', complete, finishReason: normalizedFinishReason || 'missing' };
+    }
     return { review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : '', reasoningLength,
       reasoningUnit: reasoningLength ? 'chars' : null, complete, finishReason: normalizedFinishReason || 'missing' };
   }

@@ -387,10 +387,11 @@ const stubSdkRequest = (fetch) => async ({ apiKey, baseURL, payload, signal, pro
   const response = await fetch(url, { body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl,
     headers: { ...credential, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) } });
   if (protocol !== 'google-generate-content' || !response.ok) return response;
-  const candidate = JSON.parse(await response.text()).candidates?.[0];
+  const gemini = JSON.parse(await response.text());
+  const candidate = gemini.candidates?.[0];
   const parts = candidate?.content?.parts || [];
   const finish = String(candidate?.finishReason || '').toLowerCase();
-  const normalized = { model: payload.model, reasoning_chars: parts.filter((part) => part.thought).reduce((sum, part) => sum + (part.text || '').length, 0),
+  const normalized = { model: payload.model, usage: gemini.usageMetadata, reasoning_chars: parts.filter((part) => part.thought).reduce((sum, part) => sum + (part.text || '').length, 0),
     choices: [{ finish_reason: finish === 'max_tokens' ? 'length' : finish, message: { content: parts.filter((part) => !part.thought).map((part) => part.text || '').join('') } }] };
   return { ok: true, status: response.status, text: async () => JSON.stringify(normalized) };
 };
@@ -1180,6 +1181,17 @@ const goQuota = Object.assign(new Error('SDK request failed (http=429).'), { nam
 r = await scenario((call) => { if (call.model === 'gemini-4-argon-contributor') throw goQuota; return healthy(call); }, goModelsEnv);
 check('an exhausted Gemini allowance falls back to Hy3 once without resending Gemini', byModel(r, 'gemini-4-argon-contributor').length === 1
   && byModel(r, 'hy3').length === 1 && r.posted.some((body) => body.includes('lane-C') && body.includes('status=valid') && body.includes('served by hy3')));
+// Haiku and Gemini do not return thinking text, only thinking token counts; the comment
+// must still show that the model reasoned instead of "not reported".
+r = await scenario((call) => call.model === 'claude-haiku-5-5'
+  ? reply(200, JSON.stringify({ model: 'claude-haiku-5-5', reasoning_chars: 0,
+    usage: { input_tokens: 10, output_tokens: 5000, output_tokens_details: { thinking_tokens: 4321 } },
+    choices: [{ finish_reason: 'stop', message: { content: reportText('# review haiku') } }] }))
+  : healthy(call), goModelsEnv);
+check('thinking token counts are shown when a model returns no thinking text',
+  r.posted.some((body) => body.includes('lane-B') && body.includes('Thinking: 4321 tokens'))
+  && r.posted.some((body) => body.includes('lane-C') && body.includes('Thinking: 512 tokens')));
+
 for (const [label, mutate, message] of [
   ['an unknown model protocol', (config) => { config.lanes[1].fallbacks[0].protocol = 'grpc'; }, /fallbacks\[0\]\.protocol is not supported/],
   ['effort outside Anthropic Messages', (config) => { config.lanes[1].fallbacks[0].effort = 'high'; }, /effort is only supported by anthropic-messages/],

@@ -1084,14 +1084,14 @@ ${requestError || ""}`;
       const content2 = stripThinking(parts.filter((part) => part?.thought !== true).map((part) => part?.text || "").join("\n"));
       const finishReason2 = candidate?.finishReason;
       const normalizedFinishReason2 = typeof finishReason2 === "string" ? finishReason2.toLowerCase() : "";
-      const usage = payload?.usageMetadata || {};
-      const explicitThoughtTokens = Number(usage.thoughtsTokenCount);
-      const derivedThoughtTokens = Number(usage.totalTokenCount) - Number(usage.promptTokenCount) - Number(usage.candidatesTokenCount);
+      const usage2 = payload?.usageMetadata || {};
+      const explicitThoughtTokens = Number(usage2.thoughtsTokenCount);
+      const derivedThoughtTokens = Number(usage2.totalTokenCount) - Number(usage2.promptTokenCount) - Number(usage2.candidatesTokenCount);
       const hasExplicitThoughtTokens = Number.isFinite(explicitThoughtTokens);
       const hasDerivedThoughtTokens = Number.isFinite(derivedThoughtTokens) && derivedThoughtTokens >= 0;
       const reasoningLength2 = hasExplicitThoughtTokens ? explicitThoughtTokens : hasDerivedThoughtTokens ? derivedThoughtTokens : 0;
       const reasoningUnit = hasExplicitThoughtTokens || hasDerivedThoughtTokens ? "tokens" : null;
-      console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason2} contentLen=${content2.length} thoughtTokens=${reasoningUnit ? reasoningLength2 : "not-reported"} usage=${JSON.stringify(usage)}`);
+      console.log(`[Lane ${lane.id}/${model.id}] api=generateContent finish_reason=${finishReason2} contentLen=${content2.length} thoughtTokens=${reasoningUnit ? reasoningLength2 : "not-reported"} usage=${JSON.stringify(usage2)}`);
       let review2 = content2;
       const complete2 = normalizedFinishReason2 === "stop";
       return { review: review2 ? validateAndRender(review2, model, complete2, normalizedFinishReason2) : "", reasoningLength: reasoningLength2, reasoningUnit, complete: complete2, finishReason: normalizedFinishReason2 || "missing" };
@@ -1106,6 +1106,22 @@ ${requestError || ""}`;
     let review = content;
     console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
     const complete = !normalizedFinishReason || normalizedFinishReason === "stop";
+    const usage = payload?.usage;
+    const reasoningTokens = [
+      usage?.completion_tokens_details?.reasoning_tokens,
+      usage?.output_tokens_details?.reasoning_tokens,
+      usage?.output_tokens_details?.thinking_tokens,
+      usage?.thoughtsTokenCount
+    ].find((value) => Number.isSafeInteger(value) && value >= 0);
+    if (reasoningTokens !== void 0) {
+      return {
+        review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : "",
+        reasoningLength: reasoningTokens,
+        reasoningUnit: "tokens",
+        complete,
+        finishReason: normalizedFinishReason || "missing"
+      };
+    }
     return {
       review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : "",
       reasoningLength,

@@ -39,46 +39,50 @@
     {
       "id": "B",
       "provider": "opencode-go",
-      "protocol": "openai-chat-completions",
+      "protocol": "anthropic-messages",
       "request_timeout_ms": 1800000,
       "model_budget_ms": 1800000,
       "primary": {
-        "id": "kimi-k2.7-code",
-        "label": "Kimi K2.7 Code",
+        "id": "claude-haiku-5-5",
+        "label": "Claude Haiku 5.5",
         "request_timeout_ms": 900000,
         "context_profile": "full",
-        "max_output_tokens": 65536
+        "max_output_tokens": 120000,
+        "effort": "high",
+        "diff_char_budget": 1200000
       },
       "fallbacks": [
         {
-          "id": "glm-5.3",
-          "request_timeout_ms": 1800000,
-          "label": "GLM 5.3",
+          "id": "kimi-k2.7-code",
+          "label": "Kimi K2.7 Code",
+          "protocol": "openai-chat-completions",
+          "request_timeout_ms": 900000,
           "context_profile": "full",
-          "max_output_tokens": 65536,
-          "temperature": 0.2,
-          "diff_char_budget": 1200000
+          "max_output_tokens": 65536
         }
       ]
     },
     {
       "id": "C",
       "provider": "opencode-go",
-      "protocol": "openai-chat-completions",
+      "protocol": "google-generate-content",
       "advisory": true,
       "resend_unserved": true,
       "request_timeout_ms": 900000,
       "model_budget_ms": 900000,
       "primary": {
-        "id": "hy3",
-        "label": "Hy3",
+        "id": "gemini-4-argon-contributor",
+        "label": "Gemini 4 Argon Contributor",
         "context_profile": "full",
-        "max_output_tokens": 65536
+        "max_output_tokens": 65536,
+        "thinking_level": "high",
+        "diff_char_budget": 1200000
       },
       "fallbacks": [
         {
-          "id": "kimi-k2.7-code",
-          "label": "Kimi K2.7 Code",
+          "id": "hy3",
+          "label": "Hy3",
+          "protocol": "openai-chat-completions",
           "context_profile": "full",
           "max_output_tokens": 65536
         }

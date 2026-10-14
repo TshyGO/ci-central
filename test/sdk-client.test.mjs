@@ -37,10 +37,10 @@ async function fixture(t, implementation, route, requesterOptions = {}) {
     dispatcherOptions.push(options);
     return new Agent({ ...options, connect: { ca: certificate.cert } });
   }, usageTrailerGraceMs: 200, ...requesterOptions });
-  const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B', protocol, sessionId, onProgress = (entry) => logs.push(entry) } = {}) => {
+  const invoke = async ({ timeoutMs = 2000, payload = basePayload, lane = 'B', protocol, sessionId, basePath = `/v1/${lane}`, onProgress = (entry) => logs.push(entry) } = {}) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try { return await request({ apiKey: `test-only-${lane}`, baseURL: `https://127.0.0.1:${server.address().port}/v1/${lane}`,
+    try { return await request({ apiKey: `test-only-${lane}`, baseURL: `https://127.0.0.1:${server.address().port}${basePath}`,
       payload, timeoutMs, protocol, sessionId, signal: controller.signal, onProgress }); }
     finally { clearTimeout(timer); }
   };
@@ -473,6 +473,157 @@ for (const [name, implementation] of [
     assert.equal(f.calls[0].headers.authorization, 'Bearer test-only-B');
     assert.equal(f.calls[0].headers['openai-organization'], undefined);
     assert.equal(f.calls[0].headers['openai-project'], undefined);
+  });
+
+  // Anthropic Messages (Claude Haiku 5.5 through OpenCode Go `/messages`).
+  const anthropicEvent = (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  const anthropicPayload = { model: 'claude-haiku-5-5', max_tokens: 65536, system: 'Review.', thinking: { type: 'adaptive' },
+    output_config: { effort: 'high' }, messages: [{ role: 'user', content: 'synthetic code' }] };
+  const anthropicStream = (stopReason, { text = '中文审核' } = {}) => [
+    { type: 'message_start', message: { id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-haiku-5-5', content: [],
+      stop_reason: null, usage: { input_tokens: 20, output_tokens: 1 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'PRIVATE THOUGHT' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text } },
+    { type: 'content_block_stop', index: 1 },
+    { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: 50, output_tokens_details: { thinking_tokens: 40 } } },
+    { type: 'message_stop' },
+  ];
+  test(`${name}: Anthropic Messages publishes final text only with x-api-key and session headers`, async (t) => {
+    const names = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'];
+    const previous = names.map((key) => process.env[key]);
+    process.env.ANTHROPIC_API_KEY = 'test-only-unrelated-environment';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'test-only-unrelated-environment';
+    process.env.ANTHROPIC_BASE_URL = 'https://unrelated.example.test';
+    t.after(() => names.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }));
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      for (const event of anthropicStream('end_turn')) res.write(anthropicEvent(event));
+      res.end();
+    });
+    const result = JSON.parse(await (await f.invoke({ protocol: 'anthropic-messages', sessionId: 'repo-pr-877-lane-B',
+      basePath: '/B/v1', payload: anthropicPayload })).text());
+    assert.equal(result.choices[0].message.content, '中文审核');
+    assert.equal(result.choices[0].finish_reason, 'stop');
+    assert.equal(result.reasoning_chars, 15);
+    assert.equal(result.model, 'claude-haiku-5-5');
+    assert.equal(f.calls[0].url, '/B/v1/messages');
+    assert.equal(f.calls[0].headers['x-api-key'], 'test-only-B');
+    assert.equal(f.calls[0].headers.authorization, undefined);
+    assert.equal(f.calls[0].headers['x-opencode-session'], 'repo-pr-877-lane-B');
+    assert.ok(f.calls[0].headers['anthropic-version']);
+    assert.equal(f.calls[0].body.stream, true);
+    assert.deepEqual(f.calls[0].body.output_config, { effort: 'high' });
+    assert.deepEqual(f.calls[0].body.thinking, { type: 'adaptive' });
+    const finished = f.logs.find((entry) => entry.event === 'finished');
+    assert.equal(finished.reasoning_tokens, 40);
+    assert.equal(finished.input_tokens, 20);
+    assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE THOUGHT'));
+  });
+  for (const [stopReason, expected] of [['max_tokens', 'length'], ['refusal', 'refusal']]) {
+    test(`${name}: Anthropic Messages ${stopReason} cannot become a complete review`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        for (const event of anthropicStream(stopReason)) res.write(anthropicEvent(event));
+        res.end();
+      });
+      const result = JSON.parse(await (await f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: anthropicPayload })).text());
+      assert.equal(result.choices[0].finish_reason, expected);
+    });
+  }
+  test(`${name}: Anthropic Messages closed before a stop reason is an incomplete stream`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      for (const event of anthropicStream('end_turn').slice(0, 7)) res.write(anthropicEvent(event));
+      res.end();
+    });
+    await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: anthropicPayload }),
+      (error) => error.code === 'REVIEW_INCOMPLETE_STREAM' && !error.unserved);
+  });
+  test(`${name}: Anthropic Messages quota rejection keeps the Go usage-limit type and stays unserved`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'GoUsageLimitError', message: 'PRIVATE LIMIT DETAIL' } }));
+    });
+    await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: anthropicPayload }),
+      (error) => error.status === 429 && error.providerType === 'GoUsageLimitError' && error.unserved === true
+        && !error.message.includes('PRIVATE'));
+    assert.equal(f.calls.length, 1);
+  });
+  test(`${name}: Anthropic Messages requires a base URL that ends in /v1`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => { res.writeHead(500); res.end(); });
+    await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B', payload: anthropicPayload }),
+      (error) => error.code === 'REVIEW_INVALID_ENDPOINT');
+    assert.equal(f.calls.length, 0);
+  });
+
+  // Gemini streamGenerateContent (Gemini 4 Argon through OpenCode Go).
+  const geminiPayload = { model: 'gemini-4-argon-contributor', systemInstruction: { parts: [{ text: 'Review.' }] },
+    contents: [{ role: 'user', parts: [{ text: 'synthetic code' }] }], generationConfig: { maxOutputTokens: 65536, thinkingConfig: { thinkingLevel: 'HIGH' } } };
+  const geminiChunk = (parts, extra = {}) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, ...extra }] });
+  test(`${name}: Gemini streams final text only with Go headers and completes on finishReason`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame(geminiChunk([{ thought: true, text: 'PRIVATE THOUGHT' }])));
+      const bytes = Buffer.from(frame(geminiChunk([{ text: '中文' }])));
+      const split = bytes.indexOf(Buffer.from('中文')) + 1;
+      res.write(bytes.subarray(0, split)); await delay(20); res.write(bytes.subarray(split));
+      res.write(frame({ ...geminiChunk([{ text: '审核' }], { finishReason: 'STOP' }),
+        usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5, thoughtsTokenCount: 30 } }));
+      // A finished Gemini stream may stay open; completion must not wait for EOF.
+    });
+    const result = JSON.parse(await (await f.invoke({ protocol: 'google-generate-content', sessionId: 'repo-pr-877-lane-C',
+      payload: geminiPayload })).text());
+    assert.equal(result.choices[0].message.content, '中文审核');
+    assert.equal(result.choices[0].finish_reason, 'stop');
+    assert.equal(result.reasoning_chars, 15);
+    assert.equal(f.calls[0].url, '/v1/B/models/gemini-4-argon-contributor:streamGenerateContent?alt=sse');
+    assert.equal(f.calls[0].headers['x-goog-api-key'], 'test-only-B');
+    assert.equal(f.calls[0].headers.authorization, undefined);
+    assert.equal(f.calls[0].headers['x-opencode-session'], 'repo-pr-877-lane-C');
+    assert.equal(f.calls[0].body.model, undefined);
+    assert.deepEqual(f.calls[0].body.generationConfig, geminiPayload.generationConfig);
+    const finished = f.logs.find((entry) => entry.event === 'finished');
+    assert.deepEqual([finished.input_tokens, finished.output_tokens, finished.reasoning_tokens], [20, 35, 30]);
+    assert.ok(!JSON.stringify([result, f.logs]).includes('PRIVATE THOUGHT'));
+  });
+  for (const [reason, expected] of [['MAX_TOKENS', 'length'], ['SAFETY', 'safety']]) {
+    test(`${name}: Gemini ${reason} cannot become a complete review`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(frame(geminiChunk([{ text: 'partial' }], { finishReason: reason })));
+      });
+      const result = JSON.parse(await (await f.invoke({ protocol: 'google-generate-content', payload: geminiPayload })).text());
+      assert.equal(result.choices[0].finish_reason, expected);
+    });
+  }
+  test(`${name}: Gemini closed before a finishReason is an incomplete stream`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(frame(geminiChunk([{ text: 'partial' }])));
+    });
+    await assert.rejects(f.invoke({ protocol: 'google-generate-content', payload: geminiPayload }),
+      (error) => error.code === 'REVIEW_INCOMPLETE_STREAM' && !error.unserved);
+  });
+  test(`${name}: Gemini HTTP rejection keeps status and provider type without the body`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '7' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'GoUsageLimitError', message: 'PRIVATE LIMIT DETAIL' } }));
+    });
+    await assert.rejects(f.invoke({ protocol: 'google-generate-content', payload: geminiPayload }),
+      (error) => error.status === 429 && error.providerType === 'GoUsageLimitError' && error.unserved === true
+        && error.retryAfterMs === 7000 && !error.message.includes('PRIVATE'));
+  });
+  test(`${name}: Gemini requires a model id`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => { res.writeHead(500); res.end(); });
+    const { model, ...withoutModel } = geminiPayload;
+    await assert.rejects(f.invoke({ protocol: 'google-generate-content', payload: withoutModel }),
+      (error) => error.code === 'REVIEW_INVALID_MODEL');
+    assert.equal(f.calls.length, 0);
   });
 
   test(`${name}: diagnostic callback failures do not mask completion`, async (t) => {

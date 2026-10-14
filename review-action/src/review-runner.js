@@ -261,6 +261,40 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false };
   }
 
+  // Claude models think adaptively; effort is the only depth control.
+  function anthropicPayload(model) {
+    const throttled = model.context_profile === 'kimi-k3-throttled';
+    const payload = {
+      model: model.id,
+      max_tokens: model.max_output_tokens,
+      system: buildSystemPrompt(throttled ? kimiK3System : system, model.review_lane_id),
+      messages: [{ role: 'user', content: contextFor(model).user }],
+      thinking: { type: 'adaptive' },
+    };
+    if (model.effort) payload.output_config = { effort: model.effort };
+    return payload;
+  }
+
+  // A fallback may name its own protocol; it still uses the lane's credentials.
+  const protocolOf = (lane, model) => model.protocol ?? lane.protocol;
+  // Direct Google API lanes keep the original single generateContent request. Gemini
+  // through Go streams via the SDK client, which also applies the lane's egress.
+  const legacyGoogle = (lane, model) => protocolOf(lane, model) === 'google-generate-content' && lane.provider !== 'opencode-go';
+  // Go serves Gemini only under /inference/go/v1; the Lane secret names the /zen/go/v1 root.
+  function goGoogleBase(baseUrl) {
+    const url = new URL(baseUrl);
+    if (url.hostname === 'opencode.ai' && /^\/zen\/go\/v1\/?$/.test(url.pathname)) url.pathname = '/inference/go/v1';
+    return url.toString().replace(/\/+$/, '');
+  }
+  function sdkPayload(lane, model) {
+    const protocol = protocolOf(lane, model);
+    const scoped = { ...model, review_lane_id: lane.id };
+    if (protocol === 'openai-responses') return responsesPayload(scoped);
+    if (protocol === 'anthropic-messages') return anthropicPayload(scoped);
+    if (protocol === 'google-generate-content') return { model: model.id, ...googlePayload(scoped) };
+    return basePayload(scoped);
+  }
+
   function classifyFailure(response, responseText, requestError) {
     const status = response?.status;
     const rawText = `${responseText || ''}\n${requestError || ''}`;
@@ -315,7 +349,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const credentials = laneCredentials[lane.id];
       let proxyUrl;
       const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
-        && lane.protocol === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
+        && protocolOf(lane, model) === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
       if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
         // Keep GitHub's runner-wide proxy independent from model egress.
         // An invalid explicit override fails closed without trying the VPS.
@@ -336,8 +370,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       if (lane.provider === 'opencode-go') {
         console.log(`[Lane ${lane.id}/${model.id}] egress=${proxyUrl ? 'approved-proxy' : 'direct'}`);
       }
-      const isGoogle = lane.protocol === 'google-generate-content';
-      response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
+      const protocol = protocolOf(lane, model);
+      response = legacyGoogle(lane, model) ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
         method: 'POST',
         redirect: 'error',
         signal: controller.signal,
@@ -350,12 +384,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         body: JSON.stringify(googlePayload({ ...model, review_lane_id: lane.id })),
       }) : await requestChatCompletion({
         apiKey: credentials.apiKey,
-        baseURL: credentials.baseUrl,
-        protocol: lane.protocol,
+        baseURL: protocol === 'google-generate-content' ? goGoogleBase(credentials.baseUrl) : credentials.baseUrl,
+        protocol,
         proxyUrl,
         sessionId: lane.provider === 'opencode-go'
           ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : undefined,
-        payload: lane.protocol === 'openai-responses' ? responsesPayload({ ...model, review_lane_id: lane.id }) : basePayload({ ...model, review_lane_id: lane.id }),
+        payload: sdkPayload(lane, model),
         signal: controller.signal,
         timeoutMs: windowMs,
         onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
@@ -383,7 +417,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const elapsedMs = Date.now() - startedAt;
     console.log(`[Lane ${lane.id}/${model.id}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
     if (!usable) {
-      console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${lane.protocol} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
+      console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
     }
     return { response, responseText, requestError, attempts: attempt, failureKind: usable ? '' : failure.kind,
       unserved: !usable && unserved, httpStatus: response?.status ?? httpStatus, retryAfterMs, localDeadline, elapsedMs };
@@ -414,7 +448,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   }
   function extractReview(lane, model, responseText) {
     const payload = JSON.parse(responseText);
-    if (lane.protocol === 'google-generate-content') {
+    if (legacyGoogle(lane, model)) {
       const candidate = payload?.candidates?.[0];
       const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
       const content = stripThinking(parts

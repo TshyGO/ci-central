@@ -376,6 +376,25 @@ function laneForUrl(url) {
   return '?';
 }
 
+// Mirrors sdk-client's per-protocol endpoint and credential header. Gemini replies are
+// normalized to the chat-shaped result the real client returns after streaming.
+const stubSdkRequest = (fetch) => async ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => {
+  const url = protocol === 'google-generate-content'
+    ? `${baseURL}/models/${encodeURIComponent(payload.model)}:streamGenerateContent`
+    : `${baseURL}/${protocol === 'openai-responses' ? 'responses' : protocol === 'anthropic-messages' ? 'messages' : 'chat/completions'}`;
+  const credential = protocol === 'anthropic-messages' ? { 'x-api-key': apiKey }
+    : protocol === 'google-generate-content' ? { 'x-goog-api-key': apiKey } : { authorization: `Bearer ${apiKey}` };
+  const response = await fetch(url, { body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl,
+    headers: { ...credential, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) } });
+  if (protocol !== 'google-generate-content' || !response.ok) return response;
+  const candidate = JSON.parse(await response.text()).candidates?.[0];
+  const parts = candidate?.content?.parts || [];
+  const finish = String(candidate?.finishReason || '').toLowerCase();
+  const normalized = { model: payload.model, reasoning_chars: parts.filter((part) => part.thought).reduce((sum, part) => sum + (part.text || '').length, 0),
+    choices: [{ finish_reason: finish === 'max_tokens' ? 'length' : finish, message: { content: parts.filter((part) => !part.thought).map((part) => part.text || '').join('') } }] };
+  return { ok: true, status: response.status, text: async () => JSON.stringify(normalized) };
+};
+
 async function scenario(route, overrides = {}, options = {}) {
   const posted = [], statusUpdates = [], captured = [], logs = [], timeouts = [];
   const comments = (options.comments || []).map((comment, index) => ({
@@ -421,7 +440,7 @@ async function scenario(route, overrides = {}, options = {}) {
   const fetch = async (url, request) => {
     const body = JSON.parse(request.body);
     const lane = laneForUrl(url);
-    const match = /\/models\/([^/:]+):generateContent$/.exec(url);
+    const match = /\/models\/([^/:]+):(?:stream)?[gG]enerateContent$/.exec(url);
     const model = match ? decodeURIComponent(match[1]) : body.model;
     const call = { lane, model, body, headers: request.headers, url, signal: request.signal, redirect: request.redirect, proxy: request.requestProxy };
     captured.push(call);
@@ -433,9 +452,7 @@ async function scenario(route, overrides = {}, options = {}) {
     // actual bundled SDK against real socket/SSE responses separately.
     const requireSdk = (name) => {
       if (name !== './.ci-central/review-action/dist/review-runner.js') throw new Error('Unexpected workflow require');
-      return { runReview: (args) => (options.useBundle ? bundledRunner : runner).runReview({ ...args, fetch, logger: { log: (...xs) => logs.push(xs.join(' ')) }, timers: { setTimeout: (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout }, sdk: { requestChatCompletion: ({ apiKey, baseURL, payload, signal, protocol, sessionId, proxyUrl }) => fetch(`${baseURL}/${protocol === 'openai-responses' ? 'responses' : 'chat/completions'}`, {
-        body: JSON.stringify(payload), signal, redirect: 'error', requestProxy: proxyUrl, headers: { authorization: `Bearer ${apiKey}`, ...(sessionId ? { 'x-opencode-session': sessionId } : {}) },
-      }) } }) };
+      return { runReview: (args) => (options.useBundle ? bundledRunner : runner).runReview({ ...args, fetch, logger: { log: (...xs) => logs.push(xs.join(' ')) }, timers: { setTimeout: (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout }, sdk: { requestChatCompletion: stubSdkRequest(fetch) } }) };
     };
     await runScript(github, options.context || context, { env: { RUNNER_ENVIRONMENT: 'github-hosted', ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
   } catch (caught) {
@@ -444,6 +461,11 @@ async function scenario(route, overrides = {}, options = {}) {
   return { posted, statusUpdates, captured, comments, logs, error, pullGets, timeouts };
 }
 
+// System and user text of a captured request, whatever its protocol.
+const systemText = (body) => body?.systemInstruction ? body.systemInstruction.parts[0].text
+  : typeof body?.system === 'string' ? body.system : (body?.input || body?.messages)?.[0]?.content;
+const userText = (body) => body?.contents ? body.contents[0].parts[0].text
+  : typeof body?.system === 'string' ? body.messages[0].content : (body?.input || body?.messages)?.[1]?.content;
 const checks = [];
 const check = (name, condition) => { checks.push(Boolean(condition)); console.log(`${condition ? 'ok  ' : 'FAIL'} ${name}`); };
 const healthy = ({ model, body }) => reply(200, body.contents
@@ -671,38 +693,37 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:kimi-k2.7-code,C:hy3');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:gemini-4-argon-contributor');
 check('healthy path never calls a fallback', r.captured.length === 3
-  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'glm-5.3'].includes(model)));
+  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'hy3'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
+const reviewPolicyPrefix = centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim();
 check('all active protocols receive the repository review prompt',
-  healthyLaneA?.input[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
-  && healthyLaneB?.messages[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
-  && healthyLaneC?.messages[0].content.includes(centralConfig.review_policy.system_prompt.split('Return concise Markdown')[0].trim())
-  && !healthyLaneA?.input[0].content.includes('two independent internal review passes')
-  && !healthyLaneB?.messages[0].content.includes('two independent internal review passes')
-  && !healthyLaneC?.messages[0].content.includes('two independent internal review passes'));
+  [healthyLaneA, healthyLaneB, healthyLaneC].every((body) => systemText(body)?.includes(reviewPolicyPrefix))
+  && !systemText(healthyLaneA).includes('two independent internal review passes')
+  && !systemText(healthyLaneB).includes('two independent internal review passes')
+  // Gemini lanes add the deep-review contract to the same repository prompt.
+  && systemText(healthyLaneC).includes('two independent internal review passes'));
 check('no leftover Markdown instruction contradicts the JSON contract, which is restated after the material',
   !centralConfig.review_policy.system_prompt.includes('Markdown review')
-  && [healthyLaneA?.input, healthyLaneB?.messages, healthyLaneC?.messages].every((messages) =>
-    !messages[0].content.includes('Markdown review') && messages[0].content.includes('final JSON report')
-    && messages[1].content.trimEnd().endsWith('a Markdown review cannot be accepted.')));
-// Hy3 uses Go's Chat Completions endpoint, preserving the Lane C output ceiling.
-check('Lane C uses Chat Completions without Google thinking fields',
-  healthyLaneC?.model === 'hy3'
-  && healthyLaneC?.max_tokens === 65536
-  && healthyLaneC?.store === undefined
-  && healthyLaneC?.max_output_tokens === undefined
-  && healthyLaneC?.temperature === undefined
-  && healthyLaneC?.generationConfig === undefined);
-check('Lane B uses the configured Kimi output budget without lowering model reasoning',
-  healthyLaneB?.model === 'kimi-k2.7-code'
+  && [healthyLaneA, healthyLaneB, healthyLaneC].every((body) =>
+    !systemText(body).includes('Markdown review') && systemText(body).includes('final JSON report')
+    && userText(body).trimEnd().endsWith('a Markdown review cannot be accepted.')));
+// Gemini 4 Argon goes through Go's Gemini endpoint with its thinking level and output ceiling.
+check('Lane C uses Gemini with its thinking level and output ceiling',
+  healthyLaneC?.model === 'gemini-4-argon-contributor'
+  && healthyLaneC?.generationConfig?.maxOutputTokens === 65536
+  && healthyLaneC?.generationConfig?.thinkingConfig?.thinkingLevel === 'HIGH'
+  && healthyLaneC?.temperature === undefined && healthyLaneC?.messages === undefined);
+// Haiku at max effort spent all 65,536 tokens thinking on three large PRs; high finished them.
+check('Lane B uses Claude Haiku with adaptive thinking, high effort and its output ceiling',
+  healthyLaneB?.model === 'claude-haiku-5-5'
   && healthyLaneB?.temperature === undefined
-  && healthyLaneB?.max_tokens === 65536
-  && healthyLaneB?.reasoning_effort === undefined
-  && healthyLaneB?.thinking === undefined);
+  && healthyLaneB?.max_tokens === 120000
+  && healthyLaneB?.thinking?.type === 'adaptive'
+  && healthyLaneB?.output_config?.effort === 'high');
 check('each healthy lane publishes exactly one stable lane comment', r.posted.length === 3
   && ['A', 'B', 'C'].every((lane) => r.posted.filter((body) => body.includes(`<!-- ai-pr-review-bot:lane-${lane} -->`)).length === 1));
 check('healthy comments carry reusable v2 evidence for the full head and workflow SHAs', ['A', 'B', 'C'].every((lane) =>
@@ -719,11 +740,11 @@ check('current-head status starts pending and finishes with all actual service m
 r = await scenario(healthy, {}, { useBundle: true });
 check('production bundle preserves the same dispatch and validated publication', !r.error && r.captured.length === 3 && r.posted.length === 3
   && r.posted.every(body => body.includes('证据位置与代码引用已校验')));
-r = await scenario(call => call.lane === 'B' && call.model === 'kimi-k2.7-code'
+r = await scenario(call => call.lane === 'B' && call.model === 'claude-haiku-5-5'
   ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Approved without evidence.' } }] })) : healthy(call));
 check('a completed non-contract response falls back once without publishing it as valid evidence', !r.error
   && r.captured.filter(call => call.lane === 'B').length === 2
-  && r.posted.some(body => body.includes('served by glm-5.3'))
+  && r.posted.some(body => body.includes('served by kimi-k2.7-code'))
   && r.statusUpdates.some(body => body.includes('备用模型运行中'))
   && !r.posted.some(body => body.includes('Approved without evidence.')));
 r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 },
@@ -761,14 +782,14 @@ const longPull = { ...pull, body: `${'D'.repeat(10000)}END_OF_DESCRIPTION see #7
 const contextBudgetConfig = structuredClone(centralConfig);
 Object.assign(contextBudgetConfig.review_policy, { issue_char_budget: 60000, issue_excerpt_chars: 20000, description_char_limit: 20000 });
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(contextBudgetConfig) }, { pulls: [longPull], issues: { 7: longIssue } });
-const contextBudgetPrompt = r.captured.find(({ lane }) => lane === 'B')?.body.messages?.[1]?.content || '';
+const contextBudgetPrompt = userText(r.captured.find(({ lane }) => lane === 'B')?.body) || '';
 check('configured issue budgets supply a long issue without the middle-omitted excerpt', contextBudgetPrompt.includes('END_OF_ISSUE')
   && contextBudgetPrompt.includes('I'.repeat(15000)) && !contextBudgetPrompt.includes('Middle omitted by the issue-context budget'));
 check('a configured description limit supplies a long PR description in full', contextBudgetPrompt.includes('END_OF_DESCRIPTION'));
 const defaultContextConfig = structuredClone(centralConfig);
 for (const field of ['issue_char_budget', 'issue_excerpt_chars', 'description_char_limit']) delete defaultContextConfig.review_policy[field];
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(defaultContextConfig) }, { pulls: [longPull], issues: { 7: longIssue } });
-const defaultContextPrompt = r.captured.find(({ lane }) => lane === 'B')?.body.messages?.[1]?.content || '';
+const defaultContextPrompt = userText(r.captured.find(({ lane }) => lane === 'B')?.body) || '';
 check('without configured context budgets the issue excerpt and description limits stay unchanged',
   defaultContextPrompt.includes('Middle omitted by the issue-context budget') && !defaultContextPrompt.includes('END_OF_DESCRIPTION'));
 const invalidContextBudgetConfig = structuredClone(centralConfig);
@@ -786,34 +807,34 @@ const firstCallFails = (lane, model, error) => {
   return (call) => call.lane === lane && call.model === model && calls++ === 0 ? Promise.reject(error) : healthy(call);
 };
 const sessions = (result, model) => result.captured.filter((call) => call.model === model).map((call) => call.headers['x-opencode-session']);
-r = await scenario(firstCallFails('C', 'hy3', unserved(429)));
+r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', unserved(429)));
 check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
-  && sessions(r, 'hy3').length === 2 && sessions(r, 'hy3')[1] === `${sessions(r, 'hy3')[0]}-resend`
-  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'kimi-k2.7-code') && r.timeouts.includes(30000)
+  && sessions(r, 'gemini-4-argon-contributor').length === 2 && sessions(r, 'gemini-4-argon-contributor')[1] === `${sessions(r, 'gemini-4-argon-contributor')[0]}-resend`
+  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'hy3') && r.timeouts.includes(30000)
   && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by'))
   && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
-r = await scenario(firstCallFails('C', 'hy3', unserved(429, { retryAfterMs: 5000 })));
+r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', unserved(429, { retryAfterMs: 5000 })));
 check('a provider retry-after paces the single resend', !r.error && r.timeouts.includes(5000) && !r.timeouts.includes(30000));
-r = await scenario(firstCallFails('C', 'hy3', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
+r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
 check('a stream queued and closed before any output is resent immediately', !r.error
-  && sessions(r, 'hy3').length === 2 && r.timeouts.includes(0));
-r = await scenario((call) => call.model === 'hy3' ? Promise.reject(unserved(503)) : healthy(call));
+  && sessions(r, 'gemini-4-argon-contributor').length === 2 && r.timeouts.includes(0));
+r = await scenario((call) => call.model === 'gemini-4-argon-contributor' ? Promise.reject(unserved(503)) : healthy(call));
 check('a resend that is also unserved falls back once instead of retrying again', !r.error
-  && sessions(r, 'hy3').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'kimi-k2.7-code').length === 1
-  && r.posted.some((body) => body.includes('served by kimi-k2.7-code')));
+  && sessions(r, 'gemini-4-argon-contributor').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1
+  && r.posted.some((body) => body.includes('served by hy3')));
 for (const [label, error] of [
   ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
   ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
   ['the local deadline', Object.assign(new Error('AI endpoint request aborted (model deadline reached).'), { name: 'AbortError', unserved: false })],
 ]) {
-  r = await scenario(firstCallFails('C', 'hy3', error));
-  check(`${label} are never resent`, sessions(r, 'hy3').length === 1
-    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'kimi-k2.7-code').length === 1);
+  r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', error));
+  check(`${label} are never resent`, sessions(r, 'gemini-4-argon-contributor').length === 1
+    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1);
 }
-r = await scenario(firstCallFails('B', 'kimi-k2.7-code', unserved(429)));
+r = await scenario(firstCallFails('B', 'claude-haiku-5-5', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model', !r.error
-  && r.captured.filter(({ lane, model }) => lane === 'B' && model === 'kimi-k2.7-code').length === 1
-  && r.captured.filter(({ model }) => model === 'glm-5.3').length === 1);
+  && r.captured.filter(({ lane, model }) => lane === 'B' && model === 'claude-haiku-5-5').length === 1
+  && r.captured.filter(({ model }) => model === 'kimi-k2.7-code').length === 1);
 const invalidResendConfig = structuredClone(centralConfig);
 invalidResendConfig.lanes[2].resend_unserved = 'yes';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidResendConfig) });
@@ -821,8 +842,11 @@ check('resend_unserved must be a boolean', r.captured.length === 0 && /resend_un
 check('Lane C opts into the unserved resend in every repository profile', fs.readdirSync(path.join(here, '..', 'review-action', 'config', 'repositories'))
   .every((name) => JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', name), 'utf8'))
     .lanes.every((lane) => (lane.resend_unserved === true) === (lane.id === 'C'))));
-r = await scenario(call => call.lane === 'C' ? reply(200, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content:
-  JSON.stringify({ summary: 'PRIVATE_REPORT_CONTENT', reviewed_files: ['not-supplied.js'], findings: [], limitations: [] }) } }] })) : healthy(call));
+const privateReport = JSON.stringify({ summary: 'PRIVATE_REPORT_CONTENT', reviewed_files: ['not-supplied.js'], findings: [], limitations: [] });
+// Every Lane C model returns a well-formed but unverifiable report in its own protocol shape.
+r = await scenario(call => call.lane !== 'C' ? healthy(call) : reply(200, JSON.stringify(call.body.contents
+  ? { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: privateReport }] } }] }
+  : { choices: [{ finish_reason: 'stop', message: { content: privateReport } }] })));
 check('contract diagnostics expose the safe local reason without leaking rejected report content', !r.error
   && r.posted.some(body => body.includes('no supplied file was reviewed') && body.includes('not an authentication or HTTP failure'))
   && !r.posted.some(body => body.includes('PRIVATE_REPORT_CONTENT')));
@@ -830,9 +854,9 @@ const emptyThrottledConfig = structuredClone(centralConfig);
 emptyThrottledConfig.lanes[1].primary.context_profile = 'kimi-k3-throttled';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(emptyThrottledConfig) }, { files: [patch('src/a.ts', 500), patch('tests/a.test.ts', 500)] });
 check('a model whose actual context pack is empty is skipped without consuming a request', !r.error
-  && !r.captured.some(call => call.lane === 'B' && call.model === 'kimi-k2.7-code')
+  && !r.captured.some(call => call.lane === 'B' && call.model === 'claude-haiku-5-5')
   && r.captured.filter(call => call.lane === 'B').length === 1
-  && r.posted.some(body => body.includes('served by glm-5.3')));
+  && r.posted.some(body => body.includes('served by kimi-k2.7-code')));
 const validEvidence = ['A', 'B', 'C'].map((lane) => evidenceComment(lane));
 const quotedMarkers = validEvidence.map(item => ({ ...item }));
 quotedMarkers[0].body += '\nQuoted source: <!-- ai-pr-review-bot:lane-C -->';
@@ -934,23 +958,22 @@ check('finish reasons are normalized across provider casing', r.error === undefi
 
 r = await scenario(healthy);
 check('full-context primaries preserve input while Lane C carries its own output ceiling',
-  r.captured.every(({ body }) => (body.input || body.messages)[1].content.includes('Changed files and patches:'))
+  r.captured.every(({ body }) => userText(body).includes('Changed files and patches:'))
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
+  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 120000
+  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 65536);
 
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
-  && r.captured.find(({ lane }) => lane === 'B')?.url === 'https://lane-b.example.test/v1/chat/completions'
-  && r.captured.find(({ lane }) => lane === 'B')?.headers.authorization === 'Bearer lane-b-key'
-  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
-  && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
+  && r.captured.find(({ lane }) => lane === 'B')?.url.endsWith('/messages')
+  && r.captured.find(({ lane }) => lane === 'B')?.headers['x-api-key'] === 'lane-b-key'
+  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/models/gemini-4-argon-contributor:streamGenerateContent')
+  && r.captured.find(({ lane }) => lane === 'C')?.headers['x-goog-api-key'] === 'lane-c-key');
 
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
-check('self-hosted Go routes Muse through the proxy and verified models directly with stable sessions',
+check('self-hosted Go proxies Muse, Haiku and Gemini, which are not verified for direct egress, with stable sessions',
   !r.error
-  && r.captured.find(c => c.lane === 'A')?.proxy === 'http://177.201.224.95:13128'
-  && ['B', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === undefined)
+  && ['A', 'B', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
   && ['A', 'B', 'C'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
   && r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session'] !== r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session']);
 for (const useBundle of [false, true]) {
@@ -960,10 +983,9 @@ for (const useBundle of [false, true]) {
     NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890',
     https_proxy: 'http://177.201.224.95:13128',
   }, { useBundle });
-  check('source/bundle ' + useBundle + ' selects szlab for both Muse models while B/C remain direct',
+  check('source/bundle ' + useBundle + ' selects szlab for both Muse models and the unverified B/C primaries',
     !r.error && r.captured.filter(c => c.lane === 'A').length === 2
-    && r.captured.filter(c => c.lane === 'A').every(c => c.proxy === 'http://192.168.122.1:17890')
-    && r.captured.filter(c => c.lane !== 'A').every(c => c.proxy === undefined));
+    && r.captured.every(c => c.proxy === 'http://192.168.122.1:17890'));
 }
 for (const invalidProxy of ['', 'http://unapproved.example:17890', 'http://192.168.122.1:17891',
   'http://192.168.122.1:17890/path', 'http://192.168.122.1:17890?x=1',
@@ -994,13 +1016,13 @@ r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'h
 check('self-hosted Go rejects an unapproved Muse proxy while verified models stay direct',
   !r.error && r.captured.length === 2 && r.captured.every(c => c.lane !== 'A' && c.proxy === undefined));
 for (const useBundle of [false, true]) {
-  r = await scenario(call => call.lane === 'A' || (call.lane === 'B' && call.model === 'kimi-k2.7-code')
+  r = await scenario(call => call.lane === 'A' || (call.lane === 'B' && call.model === 'claude-haiku-5-5')
     ? reply(503, 'unavailable') : healthy(call),
   { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' }, { useBundle });
-  check(`source/bundle ${useBundle} keeps Muse fallbacks proxied and GLM fallback direct during proxy failure`,
+  check(`source/bundle ${useBundle} keeps Muse fallbacks proxied and the Kimi fallback direct during proxy failure`,
     !r.error && r.captured.filter(c => c.lane === 'A').length === 2
     && r.captured.filter(c => c.lane === 'A').every(c => c.proxy === 'http://177.201.224.95:13128')
-    && r.captured.some(c => c.model === 'glm-5.3' && c.proxy === undefined)
+    && r.captured.some(c => c.model === 'kimi-k2.7-code' && c.proxy === undefined)
     && r.posted.some(b => b.includes('lane=B') && b.includes('status=valid'))
     && r.posted.some(b => b.includes('lane=C') && b.includes('status=valid')));
 }
@@ -1018,31 +1040,30 @@ overriddenConfig.lanes[0].primary.max_output_tokens = 8192;
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig) });
 check('repository configuration supplied through the environment remains authoritative', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 8192
-  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
+  && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 120000
+  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 65536);
 
 r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Muse 1.2 only after one failed Muse 1.3 request', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 1 && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1);
 const qwenFallback = r.captured.find(({ model }) => model === 'muse-spark-1.2-contributor')?.body;
-check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 65536 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
+check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 65536 && qwenFallback?.store === false && userText(qwenFallback).includes('Changed files and patches:'));
 check('Muse 1.2 still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor')));
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, '{"error":"unavailable"}') : healthy(call));
-check('Lane B falls back once only to Go GLM 5.3',
-  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'kimi-k2.7-code').length === 1
-  && r.captured.filter(({ model }) => model === 'glm-5.3').length === 1
-  && r.captured.find(({ model }) => model === 'glm-5.3')?.body.max_tokens === 65536
-  && r.captured.find(({ model }) => model === 'glm-5.3')?.body.temperature === 0.2
-  && !r.captured.some(({ lane, model }) => lane !== 'B' && model === 'glm-5.3')
-  && !r.captured.some(({ model }) => model === 'deepseek-v4-pro-202606')
-  && r.posted.some((body) => body.includes('kimi-k2.7-code unavailable -> served by glm-5.3')));
+r = await scenario((call) => call.lane === 'B' && call.model === 'claude-haiku-5-5' ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('Lane B falls back once only to Go Kimi K2.7 Code over chat completions',
+  r.captured.filter(({ lane, model }) => lane === 'B' && model === 'claude-haiku-5-5').length === 1
+  && r.captured.filter(({ lane, model }) => lane === 'B' && model === 'kimi-k2.7-code').length === 1
+  && r.captured.find(({ lane, model }) => lane === 'B' && model === 'kimi-k2.7-code')?.body.max_tokens === 65536
+  && r.captured.find(({ lane, model }) => lane === 'B' && model === 'kimi-k2.7-code')?.url.endsWith('/chat/completions')
+  && !r.captured.some(({ model }) => model === 'glm-5.3')
+  && r.posted.some((body) => body.includes('claude-haiku-5-5 unavailable -> served by kimi-k2.7-code')));
 
-r = await scenario((call) => call.lane === 'C' && call.model === 'hy3' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to Go Kimi K2.7 Code after one failed Hy3 request',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1
-  && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'kimi-k2.7-code').length === 1
-  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'hy3,kimi-k2.7-code'
-  && r.posted.some((body) => body.includes('hy3 unavailable -> served by kimi-k2.7-code')));
+r = await scenario((call) => call.lane === 'C' && call.model === 'gemini-4-argon-contributor' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+check('Lane C falls back only to Go Hy3 after one failed Gemini request',
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'gemini-4-argon-contributor').length === 1
+  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'gemini-4-argon-contributor,hy3'
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'hy3')?.url.endsWith('/chat/completions')
+  && r.posted.some((body) => body.includes('gemini-4-argon-contributor unavailable -> served by hy3')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
@@ -1091,10 +1112,11 @@ sameModelConfig.lanes[1].fallbacks = [];
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(sameModelConfig) });
 check('identical model ids on different providers remain lane-scoped', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 2
   && r.captured.some(({ lane, model, headers }) => lane === 'A' && model === 'muse-spark-1.3-contributor' && headers.authorization === 'Bearer lane-a-key')
-  && r.captured.some(({ lane, model, headers }) => lane === 'B' && model === 'muse-spark-1.3-contributor' && headers.authorization === 'Bearer lane-b-key'));
+  && r.captured.some(({ lane, model, headers }) => lane === 'B' && model === 'muse-spark-1.3-contributor' && headers['x-api-key'] === 'lane-b-key'));
 
 const protocolConfig = structuredClone(centralConfig);
-protocolConfig.lanes[1].primary = { ...protocolConfig.lanes[1].primary, id: 'gemini-3.7-flash', label: 'Gemini via OpenAI protocol' };
+protocolConfig.lanes[1].protocol = 'openai-chat-completions';
+protocolConfig.lanes[1].primary = { id: 'gemini-3.7-flash', label: 'Gemini via OpenAI protocol', context_profile: 'full', max_output_tokens: 65536 };
 protocolConfig.lanes[1].fallbacks = [];
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(protocolConfig) });
 check('protocol is bound to lane rather than inferred from model id', r.captured.some(({ lane, model, url }) => lane === 'B' && model === 'gemini-3.7-flash' && url.endsWith('/chat/completions')));
@@ -1116,6 +1138,60 @@ check('Google protocol honors the configured throttled context profile', throttl
   && throttledGoogle.systemInstruction.parts[0].text.includes('high-confidence')
   && throttledGoogle.systemInstruction.parts[0].text.includes('two independent internal review passes')
   && throttledGoogle.contents[0].parts[0].text.includes('All changed file names:'));
+
+// Lane B: Claude Haiku 5.5 over Go's Anthropic Messages endpoint, Kimi fallback over chat
+// completions in the same lane. Lane C: Gemini 4 Argon over Go's Gemini endpoint, Hy3 fallback.
+const goModelsConfig = structuredClone(centralConfig);
+goModelsConfig.lanes[1] = { ...goModelsConfig.lanes[1], protocol: 'anthropic-messages',
+  primary: { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', context_profile: 'full', max_output_tokens: 65536, effort: 'high', diff_char_budget: 1200000 },
+  fallbacks: [{ id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', protocol: 'openai-chat-completions', request_timeout_ms: 900000, context_profile: 'full', max_output_tokens: 65536 }] };
+goModelsConfig.lanes[2] = { ...goModelsConfig.lanes[2], protocol: 'google-generate-content',
+  primary: { id: 'gemini-4-argon-contributor', label: 'Gemini 4 Argon Contributor', context_profile: 'full', max_output_tokens: 65536, thinking_level: 'high', diff_char_budget: 1200000 },
+  fallbacks: [{ id: 'hy3', label: 'Hy3', protocol: 'openai-chat-completions', context_profile: 'full', max_output_tokens: 65536 }] };
+const goModelsEnv = { PR_REVIEW_CONFIG: JSON.stringify(goModelsConfig), LANE_B_API_BASE: 'https://opencode.ai/zen/go/v1',
+  LANE_C_API_BASE: 'https://opencode.ai/zen/go/v1', RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' };
+const byModel = (result, id) => result.captured.filter(({ model }) => model === id);
+r = await scenario((call) => call.model === 'claude-haiku-5-5' ? reply(503, 'unavailable') : healthy(call), goModelsEnv);
+const haikuCall = byModel(r, 'claude-haiku-5-5')[0];
+const kimiFallbackCall = byModel(r, 'kimi-k2.7-code')[0];
+check('Claude Haiku uses Anthropic Messages with adaptive thinking, configured effort and the lane key',
+  haikuCall?.url === 'https://opencode.ai/zen/go/v1/messages' && haikuCall.headers['x-api-key'] === 'lane-b-key'
+  && haikuCall.body.thinking?.type === 'adaptive' && haikuCall.body.output_config?.effort === 'high'
+  && haikuCall.body.max_tokens === 65536 && typeof haikuCall.body.system === 'string' && haikuCall.body.system.length > 0
+  && haikuCall.body.messages?.length === 1 && haikuCall.body.messages[0].role === 'user'
+  && haikuCall.body.messages[0].content.includes('Changed files and patches:') && haikuCall.body.temperature === undefined
+  && /-lane-B$/.test(haikuCall.headers['x-opencode-session'] || ''));
+check('a fallback with its own protocol keeps chat completions and its direct Go egress inside the lane',
+  kimiFallbackCall?.url === 'https://opencode.ai/zen/go/v1/chat/completions' && kimiFallbackCall.proxy === undefined
+  && haikuCall?.proxy === 'http://192.168.122.1:17890' && kimiFallbackCall.body.messages?.[1]?.content.includes('Changed files and patches:')
+  && r.posted.some((body) => body.includes('lane-B') && body.includes('status=valid') && body.includes('served by kimi-k2.7-code')));
+r = await scenario(healthy, goModelsEnv);
+const geminiCall = byModel(r, 'gemini-4-argon-contributor')[0];
+check('Gemini through Go streams from the inference endpoint with a session header and its thinking level',
+  geminiCall?.url === 'https://opencode.ai/inference/go/v1/models/gemini-4-argon-contributor:streamGenerateContent'
+  && geminiCall.headers['x-goog-api-key'] === 'lane-c-key' && /-lane-C$/.test(geminiCall.headers['x-opencode-session'] || '')
+  && geminiCall.proxy === 'http://192.168.122.1:17890' && geminiCall.body.model === 'gemini-4-argon-contributor'
+  && geminiCall.body.generationConfig.thinkingConfig.thinkingLevel === 'HIGH' && geminiCall.body.generationConfig.maxOutputTokens === 65536
+  && geminiCall.body.contents[0].parts[0].text.includes('Changed files and patches:')
+  && r.posted.some((body) => body.includes('lane-C') && body.includes('status=valid'))
+  && !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
+const goQuota = Object.assign(new Error('SDK request failed (http=429).'), { name: 'SDKRequestError', status: 429, httpStatus: 429,
+  unserved: true, providerType: 'GoUsageLimitError' });
+r = await scenario((call) => { if (call.model === 'gemini-4-argon-contributor') throw goQuota; return healthy(call); }, goModelsEnv);
+check('an exhausted Gemini allowance falls back to Hy3 once without resending Gemini', byModel(r, 'gemini-4-argon-contributor').length === 1
+  && byModel(r, 'hy3').length === 1 && r.posted.some((body) => body.includes('lane-C') && body.includes('status=valid') && body.includes('served by hy3')));
+for (const [label, mutate, message] of [
+  ['an unknown model protocol', (config) => { config.lanes[1].fallbacks[0].protocol = 'grpc'; }, /fallbacks\[0\]\.protocol is not supported/],
+  ['effort outside Anthropic Messages', (config) => { config.lanes[1].fallbacks[0].effort = 'high'; }, /effort is only supported by anthropic-messages/],
+  ['an unknown effort', (config) => { config.lanes[1].primary.effort = 'extreme'; }, /primary\.effort is not supported/],
+  ['temperature on Anthropic Messages', (config) => { config.lanes[1].primary.temperature = 0.2; }, /temperature is not supported by anthropic-messages/],
+  ['thinking_level on a chat fallback inside a Gemini lane', (config) => { config.lanes[2].fallbacks[0].thinking_level = 'high'; }, /thinking_level is only supported by google-generate-content/],
+]) {
+  const config = structuredClone(goModelsConfig);
+  mutate(config);
+  r = await scenario(healthy, { ...goModelsEnv, PR_REVIEW_CONFIG: JSON.stringify(config) });
+  check(`${label} fails before dispatch`, r.captured.length === 0 && message.test(r.error?.message || ''));
+}
 
 const missingPromptConfig = structuredClone(centralConfig);
 delete missingPromptConfig.review_policy.system_prompt;
@@ -1276,21 +1352,21 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
   r.posted.length === 1 && r.logs.some((line) => line.includes('before comment publishing')));
 
 
-r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, 'unavailable') : healthy(call));
-// A gets ten minutes for inputs up to its 1M-token window. B's Kimi K2.7 Code primary and C's fast reviewers get
-// fifteen minutes (they finished real business PRs in 3-6 minutes during model
-// selection); B's GLM 5.3 fallback keeps a thirty-minute window.
-check('B primary gets fifteen minutes, its GLM fallback thirty, while A and C keep their configured deadlines',
-  !r.error && r.timeouts.join(',') === '600000,900000,900000,1800000');
+r = await scenario((call) => call.lane === 'B' && call.model === 'claude-haiku-5-5' ? reply(503, 'unavailable') : healthy(call));
+// A gets ten minutes for inputs up to its 1M-token window. Haiku finished 70-226K-token
+// NebulaLab PRs in 146-211 s and Gemini in 87-215 s; both get fifteen minutes, as does
+// the Kimi K2.7 Code fallback.
+check('B primary and its Kimi fallback get fifteen minutes each, while A and C keep their configured deadlines',
+  !r.error && r.timeouts.join(',') === '600000,900000,900000,900000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
-r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.lane === 'B' && call.model === 'claude-haiku-5-5' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
   r.timeouts.join(',') === '600000,900000,900000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
-r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, 'unavailable') : healthy(call),
+r = await scenario((call) => call.lane === 'B' && call.model === 'claude-haiku-5-5' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
   r.timeouts.join(',') === '600000,900000,900000,1800000');

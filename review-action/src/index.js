@@ -3,7 +3,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const ALLOWED_PROTOCOLS = new Set(['openai-chat-completions', 'openai-responses', 'google-generate-content']);
+const ALLOWED_PROTOCOLS = new Set(['openai-chat-completions', 'openai-responses', 'anthropic-messages', 'google-generate-content']);
+const ANTHROPIC_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const ALLOWED_LANES = new Set(['A', 'B', 'C']);
 
 function configFileName(repository) {
@@ -41,6 +42,10 @@ function validateModel(model, location) {
   // change than a 256K one, so the patch budget may be raised per model.
   if (model.diff_char_budget !== undefined && (!Number.isInteger(model.diff_char_budget) || model.diff_char_budget < 1)) {
     throw new Error(`${location}.diff_char_budget must be a positive integer when configured.`);
+  }
+  // A fallback may speak a different protocol than its lane primary; it still uses the lane's key.
+  if (model.protocol !== undefined && !ALLOWED_PROTOCOLS.has(model.protocol)) {
+    throw new Error(`${location}.protocol is not supported.`);
   }
 }
 
@@ -103,11 +108,20 @@ function validateConfig(config, repository) {
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
     for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
       const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;
-      if (model.omit_max_tokens && lane.protocol !== 'openai-chat-completions') {
+      const protocol = model.protocol ?? lane.protocol;
+      if (model.omit_max_tokens && protocol !== 'openai-chat-completions') {
         throw new Error(`${modelLocation}.omit_max_tokens is only supported by openai-chat-completions.`);
       }
+      if (model.effort !== undefined) {
+        if (protocol !== 'anthropic-messages') throw new Error(`${modelLocation}.effort is only supported by anthropic-messages.`);
+        if (!ANTHROPIC_EFFORTS.has(model.effort)) throw new Error(`${modelLocation}.effort is not supported.`);
+      }
+      // Claude models with adaptive thinking reject non-default sampling values.
+      if (model.temperature !== undefined && protocol === 'anthropic-messages') {
+        throw new Error(`${modelLocation}.temperature is not supported by anthropic-messages.`);
+      }
       if (model.thinking_level === undefined) continue;
-      if (lane.protocol !== 'google-generate-content') {
+      if (protocol !== 'google-generate-content') {
         throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);
       }
       if (!['minimal', 'low', 'medium', 'high'].includes(model.thinking_level)) {

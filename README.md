@@ -27,8 +27,8 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | Lane | 当前供应商 | 协议 | 模型链 | 是否阻塞 |
 |---|---|---|---|---|
 | A | OpenCode Go | OpenAI SDK / Responses SSE | Muse Spark 1.3 Contributor → 1.2 Contributor | 计入两路 quorum |
-| B | OpenCode Go | OpenAI SDK / Chat Completions SSE | Kimi K2.7 Code → GLM 5.3 | 计入两路 quorum |
-| C | OpenCode Go | OpenAI SDK / Chat Completions SSE | Hy3 → Kimi K2.7 Code | advisory；有效时计入 quorum |
+| B | OpenCode Go | Anthropic SDK / Messages SSE（备用 OpenAI SDK / Chat Completions SSE） | Claude Haiku 5.5（effort high）→ Kimi K2.7 Code | 计入两路 quorum |
+| C | OpenCode Go | Gemini streamGenerateContent SSE（备用 OpenAI SDK / Chat Completions SSE） | Gemini 4 Argon Contributor（thinking high）→ Hy3 | advisory；有效时计入 quorum |
 
 三条 Lane 均使用 OpenCode Go，各模型额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。它仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
 
@@ -40,7 +40,7 @@ A 使用官方 `openai` JavaScript SDK 的 Responses SSE；B 和 C 使用同一 
 
 SDK 负责 SSE 分帧、UTF-8 和 JSON 解码。适配层逐事件累计最终正文，只计数而不保存 `reasoning_content`、Responses reasoning item 等供应商私有思考；收到 choice 0 的 `finish_reason` 即确定审核结果，不等待 `[DONE]` 或 TCP EOF；Chat Completions 随后最多再读 1 秒 usage 尾帧，只用于 token 统计，尾帧缺失、超时、格式错误或错误事件都不改变已确定的结果。只有正文非空且 `finish_reason=stop` 才计入有效审核；断流、缺少结束原因、截断、错误事件均不能变成有效证据。Responses 仅将 `response.completed` 且状态 `completed` 的最终 `output_text` 归一为成功；incomplete、工具调用、refusal-only、错误和断流不算有效审核。
 
-安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 使用 Kimi K2.7 Code / GLM 5.3 主备，C 使用 Hy3 / Kimi K2.7 Code 主备，输出上限均为 65536。不添加 low/关闭思考参数；B 主模型与 C 主备时限 15 分钟，B 的 GLM 5.3 备用 30 分钟。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
+安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 使用 Claude Haiku 5.5 / Kimi K2.7 Code 主备（输出上限 120000 / 65536），C 使用 Gemini 4 Argon Contributor / Hy3 主备（输出上限均为 65536）。Haiku 固定 effort high、Gemini 固定 thinking high，不添加 low/关闭思考参数；B、C 主备时限各 15 分钟。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
 
 SDK 对干净 EOF、`[DONE]` 和传输层 `AbortError` 都会静默结束迭代，因此适配层在原始正文层记录终止方式。流没有结束原因时仍报 `REVIEW_INCOMPLETE_STREAM`。失败评论只附 `code`、`http`、`end`、`last_event` 类型、`idle_before_end_ms` 和本地词汇内的 `body_error`；`finished` 日志记录全部脱敏证据：`incomplete_end`（`clean_close` 正常关流、`idle_close` 静默 60 秒以上后关流、`done_without_finish` 有 `[DONE]` 无结束原因、`transport_error` 被 SDK 吞掉的传输错误；未观察到正文结束时为 `unknown`）、`body_end`/`body_error`、`done_marker`、`frame_boundary`（是否停在完整 SSE 帧之后，零字节时为 null）、`max_gap_ms`、`idle_before_end_ms`、`last_event`（Chat Completions 为 `reasoning`、`content`、`no_choice:<键名>` 等，只含键名；Responses 为事件 type）以及 usage token 数。TCP 断开或重置不属于这一类，仍报 `UND_ERR_SOCKET`/`ECONNRESET`。每个失败还带 `unserved`：请求在产生任何正文、推理或结束原因之前就失败时为 true，供“未受理重发”判断；`done_marker` 按数据块逐段扫描，`[DONE]` 之后再跟多少数据都不会漏判。
 
@@ -71,7 +71,7 @@ CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央�
 
 Muse Contributor 会允许供应商将提示词及回答用于训练，非 ZDR；仅在用户明确选择并在 Go 后台 opt-in 后启用。发送 `store:false` 不会撤销 Contributor 的训练许可。地区与数据政策拒绝保持诊断，不降级为批准。
 
-Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A/B/C 的固定 base 为 `https://opencode.ai/zen/go/v1`。`RUNNER_ENVIRONMENT=github-hosted` 时直接连接并忽略 ambient proxy。明确的 `self-hosted` 环境中，Chat Completions 模型 `kimi-k2.7-code`、`glm-5.3`、`hy3` 使用独立直连 Agent；2026-10-10 已从 ci-review 的中国出口验证三者均返回非空最终内容及 `finish_reason=stop`。Muse Spark 1.3/1.2 直连返回 `403 RegionError`，使用已批准的模型代理：自托管 runner 可通过 `NEBULA_REVIEW_PROXY_URL=http://192.168.122.1:17890` 选择 szlab 内网 Mihomo；未设置该变量时，继续读取原有 `https_proxy` / `HTTPS_PROXY`，兼容 VPS `177.201.224.95:13128`。显式空值或不在白名单内的地址会拒绝请求，不会回退到 VPS 或直连。该变量只影响需要代理的模型，不修改 GitHub 的 runner 全局代理，也不改变 Kimi/GLM/Hy3 的直连。内网入口只允许明确的 self-hosted 环境，固定端口、不接受 URL 凭据、路径、查询或片段。未验证模型、其他协议和未知运行环境仍保留原代理要求，代理缺失或地址不匹配时拒绝直连。SDK 的代理认证只发往代理，不会在请求失败后切换出口重试。日志仅输出模型和 `direct` / `approved-proxy` 路由，不输出代理凭据。两路有效审查的 quorum 不变；Muse 出口失效时，B/C 的有效审查仍可满足门槛。
+Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A/B/C 的固定 base 为 `https://opencode.ai/zen/go/v1`。`RUNNER_ENVIRONMENT=github-hosted` 时直接连接并忽略 ambient proxy。明确的 `self-hosted` 环境中，Chat Completions 模型 `kimi-k2.7-code`、`glm-5.3`、`hy3` 使用独立直连 Agent；2026-10-10 已从 ci-review 的中国出口验证三者均返回非空最终内容及 `finish_reason=stop`。Muse Spark 1.3/1.2 直连返回 `403 RegionError`，使用已批准的模型代理：自托管 runner 可通过 `NEBULA_REVIEW_PROXY_URL=http://192.168.122.1:17890` 选择 szlab 内网 Mihomo；未设置该变量时，继续读取原有 `https_proxy` / `HTTPS_PROXY`，兼容 VPS `177.201.224.95:13128`。显式空值或不在白名单内的地址会拒绝请求，不会回退到 VPS 或直连。该变量只影响需要代理的模型，不修改 GitHub 的 runner 全局代理，也不改变 Kimi/GLM/Hy3 的直连。内网入口只允许明确的 self-hosted 环境，固定端口、不接受 URL 凭据、路径、查询或片段。未验证模型、其他协议和未知运行环境仍保留原代理要求，代理缺失或地址不匹配时拒绝直连。Claude Haiku 5.5（Messages）与 Gemini 4 Argon（Gemini）尚未从 ci-review 出口验证直连，因此在 self-hosted 上与 Muse 一样走已批准代理；它们的 Kimi、Hy3 备用仍按各自的 Chat Completions 协议直连，代理失效时 B/C 会立刻切到直连备用，两路 quorum 不受代理单点影响。SDK 的代理认证只发往代理，不会在请求失败后切换出口重试。日志仅输出模型和 `direct` / `approved-proxy` 路由，不输出代理凭据。两路有效审查的 quorum 不变；Muse 出口失效时，B/C 的有效审查仍可满足门槛。
 
 VPS 的已有 Squid 只为 `opencode.ai` 配置 Mihomo parent 且 `never_direct`；GitHub 维持原路由。Mihomo 订阅更新、健康切换、故障不直连的服务器部署独立于本仓库，不保存节点、订阅或代理密码。
 
@@ -125,14 +125,16 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 - `lanes[].resend_unserved`：可选布尔值，默认 `false`。开启后，同一模型的请求在**没有产生任何模型输出**时（上游容量 429/5xx，或 200 后排队到关流都没有一个 token）可换会话重发一次；见下方“未受理重发”。当前只有 Lane C 开启。
 - `lanes[].id`：固定 `A`、`B` 或 `C`，也是 Secret 槽位。
 - `lanes[].provider`：运维标签；不会用于选择 Secret。
-- `lanes[].protocol`：`openai-chat-completions`、`openai-responses` 或保留的 `google-generate-content`。
+- `lanes[].protocol`：`openai-chat-completions`、`openai-responses`、`anthropic-messages` 或 `google-generate-content`。模型可用自己的 `protocol` 覆盖 Lane 协议（例如 B 的 Kimi 备用走 Chat Completions），仍使用该 Lane 的固定 Secret 槽位。
 - `lanes[].advisory`：可选布尔值，默认 `false`。未配置 quorum 时，该 Lane 失败不单独阻塞；配置 `min_valid_lanes` 时所有有效 Lane 都计入数量，当前七个仓库均要求任意两路有效。至少保留一条非 advisory 的 Lane。
 - `lanes[].request_timeout_ms` 与 `lanes[].model_budget_ms`：可选的 Lane 级预算覆盖；未配置时继承 `review_policy`，因此放大慢模型预算不会改变其他 Lane。
 - 模型的 `request_timeout_ms`：可选单模型请求上限，优先于 Lane/仓库默认值，但仍受 Lane 的 `model_budget_ms` 限制。B 主模型继承 1800000 ms，备用显式设为 1800000 ms；C 的 Lane 级请求上限与总预算同为 1800000 ms。
 - `primary` 与 `fallbacks`：主模型加最多一个同 Lane 备用模型。主模型一次、失败切备用一次，备用失败即结束；配置第三个模型会被拒绝。
 - 模型的 `context_profile` 与 `max_output_tokens`：Qwen、DeepSeek、GLM 均使用完整上下文。
 - `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点。2026-09-16 起没有任何活动 Lane 使用它，字段保留给将来需要该请求形状的兼容端点；`openai-responses` 或 `google-generate-content` 协议下配置该字段会失败关闭。
-- Google 协议仍保留通用兼容代码，但当前没有活动 Lane 使用它；`thinking_level` 只允许配置在 `google-generate-content` 协议，其他协议会失败关闭。
+- `thinking_level` 只允许配置在实际协议为 `google-generate-content` 的模型上，`effort`（`low`/`medium`/`high`/`xhigh`/`max`）只允许配置在 `anthropic-messages` 模型上，`anthropic-messages` 模型不接受 `temperature`；违反时失败关闭。
+- Gemini 经 Go 时由 SDK 客户端走 `streamGenerateContent?alt=sse`：Go 只在 `https://opencode.ai/inference/go/v1` 提供 Gemini，因此 Lane 的 `/zen/go/v1` base 会映射过去，并带 `x-opencode-session` 与该 Lane 的出口策略。直接接 Google API 的 Lane（provider 不是 `opencode-go`）保留原来的单次 `generateContent` 请求。
+- Claude 经 Go 的 `/messages`（Anthropic 协议）调用，使用官方 `@anthropic-ai/sdk`，以 `x-api-key` 认证；Lane base 必须以 `/v1` 结尾。请求固定开启 adaptive thinking，深度只由 `effort` 控制。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
@@ -149,11 +151,12 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - Lane 主模型成功时绝不调用 fallback。
 - 所有模型请求失败（包括超时、限流、认证、HTML 验证页、DNS/TLS、解析失败、空正文和不完整输出）都只进入同 Lane 备用一次；备用失败后发布诊断或明确标记的不完整结果，不计为有效审核。未配置该 Lane 凭据时仍直接发布配置诊断，不发送请求。
 - 不做退避重试，不做可选参数修复后重发，不跟随 HTTP 重定向。A/B/C 并行，每路一旦完整成功或主备均结束就立即校验 PR head/state 并发布稳定评论；不等待其他 Lane。最终 job 仍等待各路结束后执行原有 quorum/required 门禁，不因提早发布而提早放行。
-- 当前保留主备各一次、逐路即时发布，B 主 15 分钟、备 30 分钟；三路统一 SDK 流式接入。SDK 及连接层超时与模型预算匹配，但 DNS/TLS、网络或供应商错误仍可能提前失败。
-- B/C 均使用 OpenCode Go `https://opencode.ai/zen/go/v1` 的 Chat Completions 接口。B 通过固定 Lane B 槽位调用 `kimi-k2.7-code`，失败一次立即切同 Lane 的 `glm-5.3`（推理最深、单价最高，只在 Kimi 失败时运行）；C 通过固定 Lane C 槽位调用 `hy3`，失败一次立即切同 Lane 的 `kimi-k2.7-code`。不再使用 Ark 供应商或模型别名。主备均保留完整上下文，输出上限 65536。
+- 当前保留主备各一次、逐路即时发布，B 主备、C 主备各 15 分钟；三路统一由 SDK 客户端流式接入。SDK 及连接层超时与模型预算匹配，但 DNS/TLS、网络或供应商错误仍可能提前失败。
+- B 通过固定 Lane B 槽位调用 `claude-haiku-5-5`（Messages、effort high、输出上限 120000、diff 预算 120 万字符），失败一次立即切同 Lane 的 `kimi-k2.7-code`（Chat Completions、输出上限 65536）；C 通过固定 Lane C 槽位调用 `gemini-4-argon-contributor`（thinking high、输出上限 65536、diff 预算 120 万字符），失败一次（含 Go 月额度耗尽的 `GoUsageLimitError`）立即切同 Lane 的 `hy3`。GLM 5.3 不再使用。
+- B/C 的选型（2026-10-14）：Go Plus 按模型分别计月额度（Haiku $60、Gemini 4 Argon $240 限时双倍），订阅固定，目标是把好模型的额度用满。旧组合在 NebulaLab 上 2 天内 Kimi 有 17 次 900 秒截止、Hy3 有 17 次在约 300 秒被上游关流（成功最长 299 秒），B 是 81 次运行里 66 次的最慢 Lane。新模型在 NebulaLab #1241/#1237/#1133（7–23 万输入 tokens）实测：Haiku 5.5 effort high 146–211 秒全部有效、发现 3/5/2 条；effort max 在三个大 PR 上把 65536 个输出 token 全部用于思考、无报告，因此固定 high。Gemini 4 Argon thinking high 87–215 秒全部有效，难题 4/5–5/5，但真实 PR 上报告的问题数为 0，需在生产中继续观察。Gemini 单次约 $0.34–1.03，月额度用完后由 Hy3 接替。
 - C 的选型（2026-10-06）：在同一套真实业务 PR（NebulaLab #1106、resume #235）与带隐藏缺陷的合成审核上实测 15 个 Go 模型。MiMo V2.6 Pro 在业务 PR 上需 24–28 分钟（22–42 tok/s），已不适合作为必跑 Lane；Hy3 在难度最高的合成题上与 MiMo V2.6 Pro、GLM 5.3 同样命中 5/5 隐藏缺陷且不误报干扰项，真实 PR 约 3–4 分钟、每次约 $0.015。Kimi K2.7 Code 同样快且能发现实质问题，但引用位置常需校验扣下，作 C 的同 Lane 备用。
 - B 的选型（2026-10-06）：GLM 5.3 审核最严谨，但在业务 PR 上每次 6–15 分钟、约 $0.20–0.26；按每月约 850 次审核会单独吃掉约 $170，接近 Go Plus 月额度（约 $180 模型用量），而额度耗尽会同时阻断共用同一账户的 A/B/C。B 因此改为 Kimi K2.7 Code（真实 PR 4–6 分钟、约 $0.10–0.14，曾命中其他模型才发现的关键问题），GLM 5.3 只在 Kimi 失败时兜底；预计每月约 $130–135。Muse Spark 1.3 在同一套实测中难题 5/5、零误报、真实 PR 1–1.5 分钟，继续作为 A。
-- 每个模型最多一次产生输出的请求，Lane 的单模型窗口是截止上限（B 主 15 分钟、备 30 分钟，C 主备各 15 分钟），提前失败立即切备用，无重试、退避或参数修复重发。唯一例外是“未受理重发”：开启 `resend_unserved` 的 Lane，若请求在产生任何正文、推理或结束原因之前就被上游以 429/5xx 拒绝，或 200 后排队到关流都没有一个数据事件，则换一个 `x-opencode-session`（后缀 `-resend`，避免粘住同一上游）重发同一模型一次：429/5xx 按 `retry-after`（上限 120 秒）或 30 秒后重发，排队关流立即重发；重发只用该模型剩余的窗口（不足 60 秒则直接切备用），再失败才切备用。Go 计划额度（`*UsageLimitError`、`insufficient_quota`）、认证、端点不可达、本地截止和已产生输出的失败一律不重发。这类请求没有生成内容，重发不会产生重复审核或重复推理费用。主模型成功绝不调用备用；实际使用备用时评论明确标记，不能当成主模型成功。模型是否可用以 exact-head Lane 评论和日志验收，不能用短探针或 wrapper 绿色检查代替。
+- 每个模型最多一次产生输出的请求，Lane 的单模型窗口是截止上限（B、C 主备各 15 分钟），提前失败立即切备用，无重试、退避或参数修复重发。唯一例外是“未受理重发”：开启 `resend_unserved` 的 Lane，若请求在产生任何正文、推理或结束原因之前就被上游以 429/5xx 拒绝，或 200 后排队到关流都没有一个数据事件，则换一个 `x-opencode-session`（后缀 `-resend`，避免粘住同一上游）重发同一模型一次：429/5xx 按 `retry-after`（上限 120 秒）或 30 秒后重发，排队关流立即重发；重发只用该模型剩余的窗口（不足 60 秒则直接切备用），再失败才切备用。Go 计划额度（`*UsageLimitError`、`insufficient_quota`）、认证、端点不可达、本地截止和已产生输出的失败一律不重发。这类请求没有生成内容，重发不会产生重复审核或重复推理费用。主模型成功绝不调用备用；实际使用备用时评论明确标记，不能当成主模型成功。模型是否可用以 exact-head Lane 评论和日志验收，不能用短探针或 wrapper 绿色检查代替。
 - Muse Spark 1.2 Contributor 仅作为 Lane A 的同供应商备用；主模型固定为用户指定的 Muse Spark 1.3 Contributor。完整上下文、16384 输出上限，Responses 不添加额外思考或采样参数。
 - reusable job 兜底 70 分钟，覆盖 B 主备最多 45 分钟、C 主备最多 30 分钟（三路并行）及准备/发布。正常 `stop` 即结束，不强迫模型消耗全部预算；30 分钟是保护上限，不保证每次都能生成。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。

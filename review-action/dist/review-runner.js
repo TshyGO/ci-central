@@ -45,6 +45,9 @@ var require_index = __commonJS({
       if (model.omit_max_tokens !== void 0 && typeof model.omit_max_tokens !== "boolean") {
         throw new Error(`${location}.omit_max_tokens must be a boolean.`);
       }
+      if (model.diff_char_budget !== void 0 && (!Number.isInteger(model.diff_char_budget) || model.diff_char_budget < 1)) {
+        throw new Error(`${location}.diff_char_budget must be a positive integer when configured.`);
+      }
     }
     function validateConfig2(config, repository) {
       if (!config || typeof config !== "object" || Array.isArray(config)) {
@@ -61,6 +64,12 @@ var require_index = __commonJS({
       for (const field of ["diff_char_budget", "request_timeout_ms", "model_budget_ms", "max_attempts"]) {
         if (!Number.isInteger(config.review_policy[field]) || config.review_policy[field] < 1) {
           throw new Error(`review_policy.${field} must be a positive integer.`);
+        }
+      }
+      for (const field of ["issue_char_budget", "issue_excerpt_chars", "description_char_limit"]) {
+        const value = config.review_policy[field];
+        if (value !== void 0 && (!Number.isInteger(value) || value < 1)) {
+          throw new Error(`review_policy.${field} must be a positive integer when configured.`);
         }
       }
       if (!Array.isArray(config.lanes) || config.lanes.length === 0) {
@@ -161,6 +170,7 @@ var require_review_context = __commonJS({
     "use strict";
     var SEPARATOR = "\n\n---\n\n";
     var ISSUE_BUDGET = 2e4;
+    var ISSUE_EXCERPT_CHARS = 6e3;
     var isTestFile = (name) => /(^|\/)(tests?|__tests__|__mocks__)\//.test(name) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(name) || /(^|\/)test_[^/]+\.py$/.test(name) || /_test\.(go|py|rs)$/.test(name);
     function riskOrder(name) {
       if (/(^|\/)(dist|build|generated|coverage)\/|\.min\.js$|\.map$/.test(name)) return 5;
@@ -284,7 +294,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
       const head = Math.ceil(available / 2);
       return { text: text.slice(0, head) + note + text.slice(text.length - (available - head)), truncated: true };
     }
-    async function collectIssues2({ github, owner, repo, pull, commits, logger }) {
+    async function collectIssues2({ github, owner, repo, pull, commits, logger, budget = ISSUE_BUDGET, excerptChars = ISSUE_EXCERPT_CHARS }) {
       const sources = [pull.title || "", pull.body || "", ...commits.map((commit) => commit.commit?.message || "")];
       const escapedRepo = `${owner}/${repo}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const ownLink = new RegExp(`https://github\\.com/${escapedRepo}/issues/(\\d+)`, "g");
@@ -295,7 +305,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
       const numbers = all.slice(0, 10);
       const manifest = [];
       const blocks = [];
-      let remaining = ISSUE_BUDGET;
+      let remaining = budget;
       for (const number of numbers) {
         if (remaining < 300) {
           manifest.push({ number, state: "budget_omitted" });
@@ -310,7 +320,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
           const header = `
 ### Issue #${number}: ${issue.title}
 `;
-          const result = excerpt(issue.body || "", Math.min(6e3, Math.max(0, remaining - header.length)));
+          const result = excerpt(issue.body || "", Math.min(excerptChars, Math.max(0, remaining - header.length)));
           const block = header + result.text + "\n";
           remaining -= block.length;
           blocks.push(block);
@@ -777,14 +787,25 @@ async function runReview({
     per_page: 100
   });
   const prCommits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pullNumber, per_page: 100 });
-  const issues = await collectIssues({ github, owner, repo, pull, commits: prCommits, logger: console });
+  const issues = await collectIssues({
+    github,
+    owner,
+    repo,
+    pull,
+    commits: prCommits,
+    logger: console,
+    budget: reviewPolicy.issue_char_budget,
+    excerptChars: reviewPolicy.issue_excerpt_chars
+  });
   const issueContext = issues.text;
   const DIFF_BUDGET = Math.max(4e3, Number(reviewPolicy.diff_char_budget) || 1e5);
+  const DESCRIPTION_LIMIT = reviewPolicy.description_char_limit ?? 4e3;
   const material = await enrichWorkflows({ github, owner, repo, head: reviewHeadSha, files, logger: console });
   const diffPack = packDiff(material, DIFF_BUDGET);
   const kimiK3Pack = packDiff(material, 1e3);
   const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join("\n");
-  console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted; complete omitted hunks=${diffPack.omittedHunks}.`);
+  const logPack = (pack, budget) => console.log(`Diff packed: ${pack.kept}/${files.length} files, ${pack.packedChars}/${budget} patch chars, ${pack.omitted} omitted; complete omitted hunks=${pack.omittedHunks}.`);
+  logPack(diffPack, DIFF_BUDGET);
   if (!material.some((file) => typeof file.patch === "string" && file.patch.trim() || typeof file.after_image === "string")) {
     console.log("::notice::No changed file has a text patch (binary, rename-only or unavailable); model review skipped. This is neither a failure nor an approval.");
     await statusPublisher.skip();
@@ -808,7 +829,7 @@ async function runReview({
     `Head: ${pull.head.ref}`,
     "",
     "PR description:",
-    (pull.body || "[No description]").slice(0, options.descriptionLimit ?? 4e3),
+    (pull.body || "[No description]").slice(0, options.descriptionLimit ?? DESCRIPTION_LIMIT),
     "",
     options.issueText ?? issueContext ? `Referenced issues (background \u2014 what & why):
 ${options.issueText ?? issueContext}` : "Referenced issues: none.",
@@ -830,6 +851,18 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
     issueText: issueContext.slice(0, 2e3),
     fileList
   });
+  const budgetContexts = /* @__PURE__ */ new Map([[DIFF_BUDGET, { pack: diffPack, user }]]);
+  function contextFor(model) {
+    if (model.context_profile === "kimi-k3-throttled") return { pack: kimiK3Pack, user: kimiK3User };
+    const budget = model.diff_char_budget === void 0 ? DIFF_BUDGET : Math.max(4e3, model.diff_char_budget);
+    if (!budgetContexts.has(budget)) {
+      const pack = packDiff(material, budget);
+      logPack(pack, budget);
+      budgetContexts.set(budget, { pack, user: buildUser(pack.text, { pack }) });
+    }
+    return budgetContexts.get(budget);
+  }
+  const hasMaterial = (pack) => pack.coverage.some((file) => file.patch_available && file.supplied_hunks);
   if (reviewPolicy.max_attempts !== 1) {
     throw new Error("review_policy.max_attempts must be 1; model retries are disabled.");
   }
@@ -844,7 +877,7 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
     const throttled = model.context_profile === "kimi-k3-throttled";
     const messages = [
       { role: "system", content: buildSystemPrompt(throttled ? kimiK3System : system, model.review_lane_id) },
-      { role: "user", content: throttled ? kimiK3User : user }
+      { role: "user", content: contextFor(model).user }
     ];
     const payload = {
       model: model.id,
@@ -868,7 +901,7 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
 ${googleDeepReviewContract}`, model.review_lane_id);
     return {
       systemInstruction: { parts: [{ text: googleSystem }] },
-      contents: [{ role: "user", parts: [{ text: throttled ? kimiK3User : user }] }],
+      contents: [{ role: "user", parts: [{ text: contextFor(model).user }] }],
       generationConfig
     };
   }
@@ -999,7 +1032,7 @@ ${requestError || ""}`;
     return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
   }
   function validateAndRender(text, model, complete, finishReason) {
-    const supplied = model.context_profile === "kimi-k3-throttled" ? kimiK3Pack : diffPack;
+    const supplied = contextFor(model).pack;
     if (!complete) return renderPartialReview(text, { ...supplied, issues: issues.manifest, finishReason });
     const report = parseReview(text, supplied);
     return renderReview(report, { ...supplied, issues: issues.manifest });
@@ -1046,7 +1079,7 @@ ${requestError || ""}`;
     const primary = lane.primary;
     const chain = [primary, ...lane.fallbacks];
     const credentials = laneCredentials[lane.id];
-    if (!diffPack.coverage.some((file) => file.patch_available && file.supplied_hunks)) {
+    if (!chain.some((model) => hasMaterial(contextFor(model).pack))) {
       return {
         lane,
         primary,
@@ -1085,7 +1118,7 @@ ${requestError || ""}`;
     let bestPartial = null;
     for (const model of chain) {
       if (model !== primary) await statusPublisher.update(lane.id, "fallback", model.id);
-      const supplied = model.context_profile === "kimi-k3-throttled" ? kimiK3Pack : diffPack;
+      const supplied = contextFor(model).pack;
       if (!supplied.coverage.some((file) => file.patch_available && file.supplied_hunks)) {
         lastOutcome = "no inspectable material for the configured context profile";
         tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);

@@ -2,6 +2,7 @@
 
 const SEPARATOR = '\n\n---\n\n';
 const ISSUE_BUDGET = 20000;
+const ISSUE_EXCERPT_CHARS = 6000;
 const isTestFile = (name) => /(^|\/)(tests?|__tests__|__mocks__)\//.test(name)
   || /\.(test|spec)\.[cm]?[jt]sx?$/.test(name) || /(^|\/)test_[^/]+\.py$/.test(name) || /_test\.(go|py|rs)$/.test(name);
 
@@ -111,7 +112,7 @@ function excerpt(text, limit) {
   return { text: text.slice(0, head) + note + text.slice(text.length - (available - head)), truncated: true };
 }
 
-async function collectIssues({ github, owner, repo, pull, commits, logger }) {
+async function collectIssues({ github, owner, repo, pull, commits, logger, budget = ISSUE_BUDGET, excerptChars = ISSUE_EXCERPT_CHARS }) {
   const sources = [pull.title || '', pull.body || '', ...commits.map((commit) => commit.commit?.message || '')];
   const escapedRepo = `${owner}/${repo}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const ownLink = new RegExp(`https://github\\.com/${escapedRepo}/issues/(\\d+)`, 'g');
@@ -122,14 +123,14 @@ async function collectIssues({ github, owner, repo, pull, commits, logger }) {
   const numbers = all.slice(0, 10);
   const manifest = [];
   const blocks = [];
-  let remaining = ISSUE_BUDGET;
+  let remaining = budget;
   for (const number of numbers) {
     if (remaining < 300) { manifest.push({ number, state: 'budget_omitted' }); continue; }
     try {
       const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: number });
       if (issue.pull_request) { manifest.push({ number, state: 'pull_request_reference' }); continue; }
       const header = `\n### Issue #${number}: ${issue.title}\n`;
-      const result = excerpt(issue.body || '', Math.min(6000, Math.max(0, remaining - header.length)));
+      const result = excerpt(issue.body || '', Math.min(excerptChars, Math.max(0, remaining - header.length)));
       const block = header + result.text + '\n';
       remaining -= block.length;
       blocks.push(block);

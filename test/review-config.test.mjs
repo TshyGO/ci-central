@@ -104,6 +104,41 @@ for (const repository of repositories) {
     `${repository} quorum of 2 assumes two non-advisory lanes; changing that changes what the number means`);
 }
 
+// Context budgets are sized per model window. The worst prompt measured on NebulaLab
+// (Chinese-heavy diffs) was 2.05 characters per input token; 40,000 characters cover
+// the system prompt, coverage manifest and headers. Kimi K2.7 Code shares its window
+// with output. An unlisted model fails here until its window is recorded.
+const WORST_CHARS_PER_TOKEN = 2;
+const inputTokenRoom = {
+  'muse-spark-1.3-contributor': 1048576,
+  'muse-spark-1.2-contributor': 1048576,
+  'glm-5.3': 1000000,
+  'kimi-k2.7-code': 262144,
+  hy3: 192000,
+};
+for (const repository of repositories) {
+  const config = source.loadConfig(repository, actionPath);
+  const policy = config.review_policy;
+  assert.equal(policy.diff_char_budget, 260000, `${repository} default diff budget must fit the 256K-window models`);
+  assert.deepEqual([policy.issue_char_budget, policy.issue_excerpt_chars, policy.description_char_limit], [60000, 20000, 20000],
+    `${repository} issue and description context must not fall back to the old 20K/6K/4K cuts`);
+  for (const model of [config.lanes[0].primary, ...config.lanes[0].fallbacks]) {
+    assert.equal(model.diff_char_budget, 1200000, `${repository} ${model.id} must use its 1M-token window for large changes`);
+    assert.equal(model.max_output_tokens, 65536, `${repository} ${model.id} must not truncate its report at the old 16K ceiling`);
+  }
+  assert.deepEqual([config.lanes[0].request_timeout_ms, config.lanes[0].model_budget_ms], [600000, 600000],
+    `${repository} Lane A needs a longer window for 1M-token inputs`);
+  const promptChars = policy.issue_char_budget + policy.description_char_limit + 40000;
+  for (const lane of config.lanes) {
+    for (const model of [lane.primary, ...lane.fallbacks]) {
+      const diffChars = model.diff_char_budget ?? policy.diff_char_budget;
+      const sharedOutput = model.id === 'kimi-k2.7-code' ? model.max_output_tokens : 0;
+      assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + sharedOutput <= inputTokenRoom[model.id],
+        `${repository} Lane ${lane.id} ${model.id} context budget can exceed its model window`);
+    }
+  }
+}
+
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'opencode-go');

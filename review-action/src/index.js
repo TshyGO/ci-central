@@ -37,6 +37,11 @@ function validateModel(model, location) {
   if (model.omit_max_tokens !== undefined && typeof model.omit_max_tokens !== 'boolean') {
     throw new Error(`${location}.omit_max_tokens must be a boolean.`);
   }
+  // Context windows differ by model: a 1M-token model can take far more of a large
+  // change than a 256K one, so the patch budget may be raised per model.
+  if (model.diff_char_budget !== undefined && (!Number.isInteger(model.diff_char_budget) || model.diff_char_budget < 1)) {
+    throw new Error(`${location}.diff_char_budget must be a positive integer when configured.`);
+  }
 }
 
 function validateConfig(config, repository) {
@@ -54,6 +59,12 @@ function validateConfig(config, repository) {
   for (const field of ['diff_char_budget', 'request_timeout_ms', 'model_budget_ms', 'max_attempts']) {
     if (!Number.isInteger(config.review_policy[field]) || config.review_policy[field] < 1) {
       throw new Error(`review_policy.${field} must be a positive integer.`);
+    }
+  }
+  for (const field of ['issue_char_budget', 'issue_excerpt_chars', 'description_char_limit']) {
+    const value = config.review_policy[field];
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      throw new Error(`review_policy.${field} must be a positive integer when configured.`);
     }
   }
   if (!Array.isArray(config.lanes) || config.lanes.length === 0) {

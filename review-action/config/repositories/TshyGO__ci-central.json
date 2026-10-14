@@ -3,29 +3,36 @@
   "repository": "TshyGO/ci-central",
   "review_policy": {
     "system_prompt": "You are an experienced CI and security code reviewer. Review reusable GitHub Actions workflows, JavaScript actions, repository policy, provider routing, secret boundaries, fallback isolation, operational scripts, and tests. Prioritize correctness, least privilege, supply-chain integrity, portability, and failure visibility. Return concise Markdown in Chinese. Always reserve enough output budget for the final JSON report and never expose hidden reasoning. If there are no actionable issues, say so clearly and mention residual risks.",
-    "diff_char_budget": 100000,
+    "diff_char_budget": 260000,
     "min_valid_lanes": 2,
     "request_timeout_ms": 600000,
     "model_budget_ms": 720000,
-    "max_attempts": 1
+    "max_attempts": 1,
+    "issue_char_budget": 60000,
+    "issue_excerpt_chars": 20000,
+    "description_char_limit": 20000
   },
   "lanes": [
     {
       "id": "A",
       "provider": "opencode-go",
       "protocol": "openai-responses",
+      "request_timeout_ms": 600000,
+      "model_budget_ms": 600000,
       "primary": {
         "id": "muse-spark-1.3-contributor",
         "label": "Muse Spark 1.3 Contributor",
         "context_profile": "full",
-        "max_output_tokens": 16384
+        "max_output_tokens": 65536,
+        "diff_char_budget": 1200000
       },
       "fallbacks": [
         {
           "id": "muse-spark-1.2-contributor",
           "label": "Muse Spark 1.2 Contributor",
           "context_profile": "full",
-          "max_output_tokens": 16384
+          "max_output_tokens": 65536,
+          "diff_char_budget": 1200000
         }
       ]
     },
@@ -49,7 +56,8 @@
           "label": "GLM 5.3",
           "context_profile": "full",
           "max_output_tokens": 65536,
-          "temperature": 0.2
+          "temperature": 0.2,
+          "diff_char_budget": 1200000
         }
       ]
     },

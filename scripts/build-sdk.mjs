@@ -19,7 +19,7 @@ await build({
   bundle: true, platform: 'node', target: 'node24', format: 'cjs',
   external: ['./sdk-client.js'], legalComments: 'none',
 });
-const notices = await Promise.all(['openai', 'undici'].map(async (name) => {
+const notices = await Promise.all(['openai', '@anthropic-ai/sdk', 'undici'].map(async (name) => {
   const base = new URL(`../node_modules/${name}/`, import.meta.url);
   const { version } = JSON.parse(await readFile(new URL('package.json', base), 'utf8'));
   return `${name} ${version}\n\n${await readFile(new URL('LICENSE', base), 'utf8')}`;

@@ -1,8 +1,13 @@
 'use strict';
 
 const OpenAI = require('openai').default;
+const Anthropic = require('@anthropic-ai/sdk').default;
 const { Agent, ProxyAgent, fetch: undiciFetch } = require('undici');
 
+const PROTOCOLS = new Set(['openai-chat-completions', 'openai-responses', 'anthropic-messages', 'google-generate-content']);
+// Only `stop` is a complete review; every other terminal reason keeps its own name.
+const ANTHROPIC_FINISH = { end_turn: 'stop', stop_sequence: 'stop', max_tokens: 'length', tool_use: 'tool_calls' };
+const GEMINI_FINISH = { STOP: 'stop', MAX_TOKENS: 'length' };
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 // Compatible gateways stream token usage after choice 0's finish_reason. Read it
 // for at most this long; it is accounting only and never changes a final review.
@@ -25,7 +30,15 @@ function describeError(error) {
 // a usage trailer, a gateway cost frame or an unrecognized in-band error.
 function describeEvent(event, protocol) {
   if (!event || typeof event !== 'object') return 'non_object';
-  if (protocol === 'openai-responses') return safeCode(event.type) || 'unknown';
+  if (protocol === 'openai-responses' || protocol === 'anthropic-messages') return safeCode(event.type) || 'unknown';
+  if (protocol === 'google-generate-content') {
+    const candidate = Array.isArray(event.candidates) ? event.candidates[0] : undefined;
+    if (typeof candidate?.finishReason === 'string' && candidate.finishReason) return 'finish';
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+    if (parts.some((part) => !part?.thought && typeof part?.text === 'string' && part.text)) return 'content';
+    if (parts.some((part) => part?.thought)) return 'reasoning';
+    return event.usageMetadata ? 'usage' : 'empty_delta';
+  }
   const choice = Array.isArray(event.choices) ? event.choices.find((item) => item?.index === 0) : undefined;
   if (!choice) {
     if (event.usage) return 'usage';
@@ -56,12 +69,70 @@ function tailFacts(tail, bytes) {
 const DONE_LINE = /[\r\n]data: ?\[DONE\](?=[\r\n]|$)/;
 
 function usageCounts(usage) {
+  // Gemini reports visible and thought tokens separately; output is their sum.
+  const geminiOutput = Number.isSafeInteger(usage?.candidatesTokenCount)
+    ? usage.candidatesTokenCount + (Number.isSafeInteger(usage.thoughtsTokenCount) ? usage.thoughtsTokenCount : 0) : undefined;
   return {
-    input_tokens: safeCount(usage?.prompt_tokens ?? usage?.input_tokens),
-    output_tokens: safeCount(usage?.completion_tokens ?? usage?.output_tokens),
+    input_tokens: safeCount(usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount),
+    output_tokens: safeCount(usage?.completion_tokens ?? usage?.output_tokens ?? geminiOutput),
     reasoning_tokens: safeCount(usage?.completion_tokens_details?.reasoning_tokens
-      ?? usage?.output_tokens_details?.reasoning_tokens),
+      ?? usage?.output_tokens_details?.reasoning_tokens ?? usage?.output_tokens_details?.thinking_tokens
+      ?? usage?.thoughtsTokenCount),
   };
+}
+
+// Anthropic SDKs append /v1/messages to their base; Lane bases end in /v1 like the OpenAI ones.
+function anthropicBaseURL(endpoint) {
+  const path = endpoint.pathname.replace(/\/+$/, '');
+  if (!path.endsWith('/v1')) {
+    const error = new Error('Invalid SDK HTTPS endpoint.'); error.code = 'REVIEW_INVALID_ENDPOINT'; throw error;
+  }
+  return `${endpoint.origin}${path.slice(0, -'/v1'.length)}`;
+}
+
+// Gemini SSE frames are single JSON objects; a frame that is not JSON is a broken stream.
+async function* geminiEvents(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const parse = (frame) => {
+    const data = frame.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+    if (!data) return undefined;
+    try { return JSON.parse(data); } catch {
+      const error = new Error('Gemini stream frame was not JSON.'); error.code = 'REVIEW_INVALID_STREAM'; throw error;
+    }
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      for (let match = /\r?\n\r?\n/.exec(buffer); match; match = /\r?\n\r?\n/.exec(buffer)) {
+        const event = parse(buffer.slice(0, match.index));
+        buffer = buffer.slice(match.index + match[0].length);
+        if (event !== undefined) yield event;
+      }
+    }
+    const event = parse(buffer + decoder.decode());
+    if (event !== undefined) yield event;
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+async function geminiRejection(response) {
+  let parsed;
+  try { parsed = JSON.parse(await response.text()); } catch { /* Status alone is enough. */ }
+  // Google streaming endpoints may wrap the error object in an array.
+  const envelope = Array.isArray(parsed) ? parsed[0] : parsed;
+  const inner = envelope?.error && typeof envelope.error === 'object' ? envelope.error : undefined;
+  const error = new Error('Gemini request was rejected.');
+  error.status = response.status;
+  error.headers = response.headers;
+  // Keep string codes such as insufficient_quota: quota classification depends on them.
+  error.error = { code: safeCode(inner?.status) || safeCode(inner?.code)
+    || (Number.isSafeInteger(inner?.code) ? String(inner.code) : undefined), type: inner?.type };
+  return error;
 }
 
 // The review is already final when this runs: wait briefly, ignore errors, never fail it.
@@ -128,8 +199,13 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     if (typeof apiKey !== 'string' || !apiKey.trim()) {
       const error = new Error('SDK request requires an explicit Lane key.'); error.code = 'REVIEW_INVALID_CREDENTIAL'; throw error;
     }
-    if (!['openai-chat-completions', 'openai-responses'].includes(protocol)) {
+    if (!PROTOCOLS.has(protocol)) {
       const error = new Error('Unsupported SDK protocol.'); error.code = 'REVIEW_INVALID_PROTOCOL'; throw error;
+    }
+    const sdkBaseURL = protocol === 'anthropic-messages' ? anthropicBaseURL(endpoint) : baseURL;
+    if (protocol === 'google-generate-content'
+        && (typeof payload?.model !== 'string' || !/^[A-Za-z0-9_.-]{1,120}$/.test(payload.model))) {
+      const error = new Error('Gemini request requires a model id.'); error.code = 'REVIEW_INVALID_MODEL'; throw error;
     }
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[A-Za-z0-9_.-]{1,120}$/.test(sessionId))) {
       const error = new Error('Invalid coding session identifier.'); error.code = 'REVIEW_INVALID_SESSION'; throw error;
@@ -150,70 +226,137 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     };
     dispatcher = proxyUrl === undefined ? createDispatcher(connectionOptions)
       : createProxyDispatcher({ ...connectionOptions, uri: proxyUrl });
-    const options = {
-      apiKey, baseURL,
-      ...(sessionId ? { defaultHeaders: { 'user-agent': 'NebulaLab-CI-Review/1.0', 'x-opencode-session': sessionId } } : {}),
-      maxRetries: 0, timeout: timeoutMs, logLevel: 'off',
-      fetch: async (url, init) => {
-        const response = await fetchImpl(url, { ...init, dispatcher, redirect: 'error' });
-        timing.headers_ms = Date.now() - started;
-        timing.status = response.status;
-        report({ ...timing, event: 'headers' });
-        // Bound the raw bytes, including malformed/unframed SSE, before the SDK
-        // decoder buffers them, and record how the body itself ended. Framing and
-        // JSON parsing remain the SDK's job.
-        const source = response.body?.getReader();
-        const observed = source && new ReadableStream({
-          async pull(controller) {
-            let result;
-            try { result = await source.read(); } catch (error) {
-              if (body.end === null) {
-                body.end = 'error'; body.error = describeError(error); body.ended_ms = Date.now() - started;
-              }
-              throw error;
+    const sessionHeaders = sessionId ? { 'user-agent': 'NebulaLab-CI-Review/1.0', 'x-opencode-session': sessionId } : undefined;
+    const observedFetch = async (url, init) => {
+      const response = await fetchImpl(url, { ...init, dispatcher, redirect: 'error' });
+      timing.headers_ms = Date.now() - started;
+      timing.status = response.status;
+      report({ ...timing, event: 'headers' });
+      // Bound the raw bytes, including malformed/unframed SSE, before the SDK
+      // decoder buffers them, and record how the body itself ended. Framing and
+      // JSON parsing remain the SDK's job.
+      const source = response.body?.getReader();
+      const observed = source && new ReadableStream({
+        async pull(controller) {
+          let result;
+          try { result = await source.read(); } catch (error) {
+            if (body.end === null) {
+              body.end = 'error'; body.error = describeError(error); body.ended_ms = Date.now() - started;
             }
-            if (result.done) {
-              body.end ??= 'eof'; body.ended_ms ??= Date.now() - started;
-              controller.close();
-              return;
-            }
-            const chunk = result.value;
-            const now = Date.now() - started;
-            if (timing.last_byte_ms !== null) body.max_gap_ms = Math.max(body.max_gap_ms, now - timing.last_byte_ms);
-            timing.last_byte_ms = now;
-            timing.bytes += chunk.byteLength;
-            if (timing.bytes > MAX_RESPONSE_BYTES) {
-              const error = new Error('SDK response exceeded byte limit.');
-              error.code = 'REVIEW_RESPONSE_TOO_LARGE';
-              body.end ??= 'error'; body.error ??= describeError(error); body.ended_ms ??= now;
-              source.cancel(error).catch(() => {});
-              throw error;
-            }
-            body.tail = appendTail(body.tail, chunk);
-            const scanned = body.carry + Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString('latin1');
-            body.done_marker ||= DONE_LINE.test(scanned);
-            body.carry = scanned.slice(-16);
-            controller.enqueue(chunk);
-          },
-          cancel(reason) {
-            body.end ??= 'cancel'; body.ended_ms ??= Date.now() - started;
-            return source.cancel(reason);
-          },
-        });
-        return new Response(observed, { status: response.status, statusText: response.statusText, headers: response.headers });
-      },
+            throw error;
+          }
+          if (result.done) {
+            body.end ??= 'eof'; body.ended_ms ??= Date.now() - started;
+            controller.close();
+            return;
+          }
+          const chunk = result.value;
+          const now = Date.now() - started;
+          if (timing.last_byte_ms !== null) body.max_gap_ms = Math.max(body.max_gap_ms, now - timing.last_byte_ms);
+          timing.last_byte_ms = now;
+          timing.bytes += chunk.byteLength;
+          if (timing.bytes > MAX_RESPONSE_BYTES) {
+            const error = new Error('SDK response exceeded byte limit.');
+            error.code = 'REVIEW_RESPONSE_TOO_LARGE';
+            body.end ??= 'error'; body.error ??= describeError(error); body.ended_ms ??= now;
+            source.cancel(error).catch(() => {});
+            throw error;
+          }
+          body.tail = appendTail(body.tail, chunk);
+          const scanned = body.carry + Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString('latin1');
+          body.done_marker ||= DONE_LINE.test(scanned);
+          body.carry = scanned.slice(-16);
+          controller.enqueue(chunk);
+        },
+        cancel(reason) {
+          body.end ??= 'cancel'; body.ended_ms ??= Date.now() - started;
+          return source.cancel(reason);
+        },
+      });
+      return new Response(observed, { status: response.status, statusText: response.statusText, headers: response.headers });
     };
-    const client = new OpenAI({ ...options, organization: null, project: null });
-    stream = protocol === 'openai-responses'
-      ? await client.responses.create({ ...payload, stream: true }, { signal, maxRetries: 0 })
-      : await client.chat.completions.create({ ...payload, stream: true }, { signal, maxRetries: 0 });
-    events = stream[Symbol.asyncIterator]();
+    const options = {
+      apiKey, baseURL: sdkBaseURL,
+      ...(sessionHeaders ? { defaultHeaders: sessionHeaders } : {}),
+      maxRetries: 0, timeout: timeoutMs, logLevel: 'off',
+      fetch: observedFetch,
+    };
+    if (protocol === 'google-generate-content') {
+      // No official SDK is bundled for Gemini; this is the documented streaming REST call.
+      timing.transport = 'gemini-sse';
+      const { model, ...request } = payload;
+      const response = await observedFetch(`${baseURL.replace(/\/+$/, '')}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+        method: 'POST', signal,
+        headers: { 'content-type': 'application/json', accept: 'text/event-stream', 'x-goog-api-key': apiKey, ...sessionHeaders },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) throw await geminiRejection(response);
+      events = geminiEvents(response);
+    } else if (protocol === 'anthropic-messages') {
+      timing.transport = 'anthropic-sdk';
+      // Explicit null keeps ANTHROPIC_AUTH_TOKEN from adding a second credential.
+      const client = new Anthropic({ ...options, authToken: null });
+      stream = await client.messages.create({ ...payload, stream: true }, { signal, maxRetries: 0 });
+      events = stream[Symbol.asyncIterator]();
+    } else {
+      const client = new OpenAI({ ...options, organization: null, project: null });
+      stream = protocol === 'openai-responses'
+        ? await client.responses.create({ ...payload, stream: true }, { signal, maxRetries: 0 })
+        : await client.chat.completions.create({ ...payload, stream: true }, { signal, maxRetries: 0 });
+      events = stream[Symbol.asyncIterator]();
+    }
     for (let next = await events.next(); !next.done; next = await events.next()) {
       const event = next.value;
       signal.throwIfAborted();
       body.events += 1;
       body.last_event = describeEvent(event, protocol);
       timing.first_event_ms ??= Date.now() - started;
+      if (protocol === 'anthropic-messages') {
+        if (event.type === 'message_start') {
+          timing.upstream = safeCode(event.message?.model) || timing.upstream;
+          usage = { ...event.message?.usage };
+        }
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+          if (event.delta.text) timing.first_content_ms ??= Date.now() - started;
+          content += event.delta.text;
+          timing.content_chars = content.length;
+        }
+        if (event.type === 'content_block_delta' && event.delta?.type === 'thinking_delta' && typeof event.delta.thinking === 'string') {
+          timing.reasoning_chars += event.delta.thinking.length;
+        }
+        if (event.type === 'message_delta') {
+          // message_delta carries cumulative output usage; a zero there never replaces a
+          // count message_start already reported (some gateways zero-fill input fields).
+          for (const [key, value] of Object.entries(event.usage || {})) {
+            if (value === null || value === undefined || (value === 0 && usage?.[key] > 0)) continue;
+            usage = { ...usage, [key]: value };
+          }
+          const stop = event.delta?.stop_reason;
+          if (typeof stop === 'string' && stop) {
+            timing.finish_reason = ANTHROPIC_FINISH[stop] || safeCode(stop) || 'unknown';
+            break;
+          }
+        }
+        continue;
+      }
+      if (protocol === 'google-generate-content') {
+        timing.upstream = safeCode(event.modelVersion) || timing.upstream;
+        usage = event.usageMetadata || usage;
+        const candidate = Array.isArray(event.candidates) ? event.candidates[0] : undefined;
+        for (const part of Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []) {
+          if (typeof part?.text !== 'string') continue;
+          if (part.thought) { timing.reasoning_chars += part.text.length; continue; }
+          if (part.text) timing.first_content_ms ??= Date.now() - started;
+          content += part.text;
+          timing.content_chars = content.length;
+        }
+        // A finishReason is completion evidence; a Gemini stream may stay open after it.
+        if (typeof candidate?.finishReason === 'string' && candidate.finishReason) {
+          timing.finish_reason = GEMINI_FINISH[candidate.finishReason] || safeCode(candidate.finishReason.toLowerCase()) || 'unknown';
+          break;
+        }
+        continue;
+      }
       if (protocol === 'openai-responses') {
         timing.upstream = safeCode(event.response?.model) || timing.upstream;
         usage = event.response?.usage || usage;
@@ -313,14 +456,17 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     sanitized.name = signal?.aborted ? 'AbortError' : 'SDKRequestError';
     sanitized.code = code;
     sanitized.status = Number.isInteger(error.status) ? error.status : undefined;
-    sanitized.providerCode = safeCode(error.error?.code) || code;
-    sanitized.providerType = safeCode(error.error?.type);
+    // Anthropic error bodies nest the provider error one level deeper than OpenAI's.
+    const providerError = error.error?.error && typeof error.error.error === 'object' ? error.error.error : error.error;
+    sanitized.providerCode = safeCode(providerError?.code) || code;
+    sanitized.providerType = safeCode(providerError?.type);
     if (signal?.aborted) sanitized.code = 'REVIEW_DEADLINE';
     sanitized.httpStatus = Number.isInteger(timing.status) ? timing.status : undefined;
     // No model output reached us (rejected, or queued and closed before any token),
-    // so a resend cannot duplicate a review. Responses streams count any event.
+    // so a resend cannot duplicate a review. Responses, Messages and Gemini streams
+    // count any event, because their thinking may stream without visible text.
     sanitized.unserved = !signal?.aborted && !timing.finish_reason && timing.content_chars === 0
-      && timing.reasoning_chars === 0 && (protocol !== 'openai-responses' || body.events === 0);
+      && timing.reasoning_chars === 0 && (protocol === 'openai-chat-completions' || body.events === 0);
     const retryAfter = Number(error?.headers?.get?.('retry-after'));
     if (Number.isInteger(retryAfter) && retryAfter > 0 && retryAfter <= 600) sanitized.retryAfterMs = retryAfter * 1000;
     timing.unserved = sanitized.unserved;

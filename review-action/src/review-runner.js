@@ -156,6 +156,14 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
   const googleDeepReviewContract = 'Perform two independent internal review passes before writing the final answer: first trace correctness, edge cases, error paths, and contract preservation; then challenge security, architecture boundaries, CI or configuration, and test adequacy. Treat the PR description and passing tests as claims to verify, not proof. Write findings first. Each actionable finding must include severity, exact file or diff-hunk evidence, impact, and a concrete fix. If no actionable finding remains, state the failure paths and invariants you checked plus residual risks. Concise means omit filler and praise, never analysis. Do not invent findings or expose hidden reasoning.';
 
+  // Opt-in per model. Gemini traced real defects on NebulaLab #1237/#1241 but reported none;
+  // calibrated it reported 4 and 1. Muse went from 2/2 to 5/4 findings on #1237/#1133 and
+  // 3 on #1241. Both stayed at 0 on a clean change and 5/5 on the hard task. Haiku already
+  // reports at this level and only gained clean-change noise, so it stays uncalibrated.
+  const reportingCalibration = 'Reporting calibration: surface every plausible defect you traced, not only the ones you are certain of. When your analysis finds a changed code path that could plausibly fail, regress, leak data, bypass a guard or break a cross-file contract (for example an unvalidated fallback value, a missing or misplaced check, an unhandled error path, or inconsistent assumptions between files), report it as a finding with an exact code quote and confidence medium or low, instead of dismissing it or moving it to limitations. Keep limitations for items that have no concrete code evidence. An empty findings list is correct only when you traced the changed paths and found no plausible defect. A missed defect costs more than a medium-confidence finding that a reviewer later rejects; do not invent defects that the code does not support.';
+
+  const calibrated = (model, text) => model.reporting_calibration ? `${text}\n\n${reportingCalibration}` : text;
+
   const buildUser = (diffText, options = {}) => [
     `Repository: ${owner}/${repo}`,
     `Pull Request: #${pull.number} ${pull.title}`,
@@ -227,7 +235,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   function basePayload(model) {
     const throttled = model.context_profile === 'kimi-k3-throttled';
     const messages = [
-      { role: 'system', content: buildSystemPrompt(throttled ? kimiK3System : system, model.review_lane_id) },
+      { role: 'system', content: buildSystemPrompt(calibrated(model, throttled ? kimiK3System : system), model.review_lane_id) },
       { role: 'user', content: contextFor(model).user },
     ];
     const payload = {
@@ -248,7 +256,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         thinkingLevel: model.thinking_level.toUpperCase(),
       };
     }
-    const googleSystem = buildSystemPrompt(`${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`, model.review_lane_id);
+    const googleSystem = buildSystemPrompt(calibrated(model, `${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`), model.review_lane_id);
     return {
       systemInstruction: { parts: [{ text: googleSystem }] },
       contents: [{ role: 'user', parts: [{ text: contextFor(model).user }] }],
@@ -259,6 +267,40 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   function responsesPayload(model) {
     const chat = basePayload(model);
     return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false };
+  }
+
+  // Claude models think adaptively; effort is the only depth control.
+  function anthropicPayload(model) {
+    const throttled = model.context_profile === 'kimi-k3-throttled';
+    const payload = {
+      model: model.id,
+      max_tokens: model.max_output_tokens,
+      system: buildSystemPrompt(calibrated(model, throttled ? kimiK3System : system), model.review_lane_id),
+      messages: [{ role: 'user', content: contextFor(model).user }],
+      thinking: { type: 'adaptive' },
+    };
+    if (model.effort) payload.output_config = { effort: model.effort };
+    return payload;
+  }
+
+  // A fallback may name its own protocol; it still uses the lane's credentials.
+  const protocolOf = (lane, model) => model.protocol ?? lane.protocol;
+  // Direct Google API lanes keep the original single generateContent request. Gemini
+  // through Go streams via the SDK client, which also applies the lane's egress.
+  const legacyGoogle = (lane, model) => protocolOf(lane, model) === 'google-generate-content' && lane.provider !== 'opencode-go';
+  // Go serves Gemini only under /inference/go/v1; the Lane secret names the /zen/go/v1 root.
+  function goGoogleBase(baseUrl) {
+    const url = new URL(baseUrl);
+    if (url.hostname === 'opencode.ai' && /^\/zen\/go\/v1\/?$/.test(url.pathname)) url.pathname = '/inference/go/v1';
+    return url.toString().replace(/\/+$/, '');
+  }
+  function sdkPayload(lane, model) {
+    const protocol = protocolOf(lane, model);
+    const scoped = { ...model, review_lane_id: lane.id };
+    if (protocol === 'openai-responses') return responsesPayload(scoped);
+    if (protocol === 'anthropic-messages') return anthropicPayload(scoped);
+    if (protocol === 'google-generate-content') return { model: model.id, ...googlePayload(scoped) };
+    return basePayload(scoped);
   }
 
   function classifyFailure(response, responseText, requestError) {
@@ -315,7 +357,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const credentials = laneCredentials[lane.id];
       let proxyUrl;
       const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
-        && lane.protocol === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
+        && protocolOf(lane, model) === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
       if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
         // Keep GitHub's runner-wide proxy independent from model egress.
         // An invalid explicit override fails closed without trying the VPS.
@@ -336,8 +378,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       if (lane.provider === 'opencode-go') {
         console.log(`[Lane ${lane.id}/${model.id}] egress=${proxyUrl ? 'approved-proxy' : 'direct'}`);
       }
-      const isGoogle = lane.protocol === 'google-generate-content';
-      response = isGoogle ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
+      const protocol = protocolOf(lane, model);
+      response = legacyGoogle(lane, model) ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
         method: 'POST',
         redirect: 'error',
         signal: controller.signal,
@@ -350,12 +392,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         body: JSON.stringify(googlePayload({ ...model, review_lane_id: lane.id })),
       }) : await requestChatCompletion({
         apiKey: credentials.apiKey,
-        baseURL: credentials.baseUrl,
-        protocol: lane.protocol,
+        baseURL: protocol === 'google-generate-content' ? goGoogleBase(credentials.baseUrl) : credentials.baseUrl,
+        protocol,
         proxyUrl,
         sessionId: lane.provider === 'opencode-go'
           ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : undefined,
-        payload: lane.protocol === 'openai-responses' ? responsesPayload({ ...model, review_lane_id: lane.id }) : basePayload({ ...model, review_lane_id: lane.id }),
+        payload: sdkPayload(lane, model),
         signal: controller.signal,
         timeoutMs: windowMs,
         onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
@@ -383,7 +425,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const elapsedMs = Date.now() - startedAt;
     console.log(`[Lane ${lane.id}/${model.id}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
     if (!usable) {
-      console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${lane.protocol} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
+      console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
     }
     return { response, responseText, requestError, attempts: attempt, failureKind: usable ? '' : failure.kind,
       unserved: !usable && unserved, httpStatus: response?.status ?? httpStatus, retryAfterMs, localDeadline, elapsedMs };
@@ -414,7 +456,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   }
   function extractReview(lane, model, responseText) {
     const payload = JSON.parse(responseText);
-    if (lane.protocol === 'google-generate-content') {
+    if (legacyGoogle(lane, model)) {
       const candidate = payload?.candidates?.[0];
       const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
       const content = stripThinking(parts
@@ -451,6 +493,19 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let review = content;
     console.log(`[Lane ${lane.id}/${model.id}] api=chat/completions upstream=${payload?.model} finish_reason=${finishReason} contentLen=${message?.content?.length || 0} reasoningLen=${reasoningLength} usage=${JSON.stringify(payload?.usage)}`);
     const complete = !normalizedFinishReason || normalizedFinishReason === 'stop';
+    // A provider token count is the real measure of thinking; Claude and Gemini return no
+    // thinking text by default, and Gemini thought text is only a summary.
+    const usage = payload?.usage;
+    const reasoningTokens = [usage?.completion_tokens_details?.reasoning_tokens, usage?.output_tokens_details?.reasoning_tokens,
+      usage?.output_tokens_details?.thinking_tokens, usage?.thoughtsTokenCount,
+      // Gemini omits thoughtsTokenCount when it did not think at all (seen on diffs full of
+      // thinking-handling code); that is zero thinking, not an unreported count.
+      Number.isSafeInteger(usage?.promptTokenCount) ? 0 : undefined].find((value) => Number.isSafeInteger(value) && value >= 0);
+    // A zero count next to streamed thinking text is a missing count, not "no thinking".
+    if (reasoningTokens !== undefined && (reasoningTokens > 0 || !reasoningLength)) {
+      return { review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : '', reasoningLength: reasoningTokens,
+        reasoningUnit: 'tokens', complete, finishReason: normalizedFinishReason || 'missing' };
+    }
     return { review: review ? validateAndRender(review, model, complete, normalizedFinishReason) : '', reasoningLength,
       reasoningUnit: reasoningLength ? 'chars' : null, complete, finishReason: normalizedFinishReason || 'missing' };
   }

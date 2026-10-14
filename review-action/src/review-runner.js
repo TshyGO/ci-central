@@ -156,6 +156,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const kimiK3System = `${system} Focus on high-confidence, high-impact findings supported by the supplied file inventory and patch sample.`;
   const googleDeepReviewContract = 'Perform two independent internal review passes before writing the final answer: first trace correctness, edge cases, error paths, and contract preservation; then challenge security, architecture boundaries, CI or configuration, and test adequacy. Treat the PR description and passing tests as claims to verify, not proof. Write findings first. Each actionable finding must include severity, exact file or diff-hunk evidence, impact, and a concrete fix. If no actionable finding remains, state the failure paths and invariants you checked plus residual risks. Concise means omit filler and praise, never analysis. Do not invent findings or expose hidden reasoning.';
 
+  // Gemini traced real defects on NebulaLab #1237/#1241 but reported none (0/0); with this
+  // calibration it reported 4 and 1, still 0 on a clean change, and 5/5 on the hard task.
+  const googleReportingCalibration = 'Reporting calibration: surface every plausible defect you traced, not only the ones you are certain of. When your analysis finds a changed code path that could plausibly fail, regress, leak data, bypass a guard or break a cross-file contract (for example an unvalidated fallback value, a missing or misplaced check, an unhandled error path, or inconsistent assumptions between files), report it as a finding with an exact code quote and confidence medium or low, instead of dismissing it or moving it to limitations. Keep limitations for items that have no concrete code evidence. An empty findings list is correct only when you traced the changed paths and found no plausible defect. A missed defect costs more than a medium-confidence finding that a reviewer later rejects; do not invent defects that the code does not support.';
+
   const buildUser = (diffText, options = {}) => [
     `Repository: ${owner}/${repo}`,
     `Pull Request: #${pull.number} ${pull.title}`,
@@ -248,7 +252,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         thinkingLevel: model.thinking_level.toUpperCase(),
       };
     }
-    const googleSystem = buildSystemPrompt(`${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`, model.review_lane_id);
+    const googleSystem = buildSystemPrompt(`${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}\n\n${googleReportingCalibration}`, model.review_lane_id);
     return {
       systemInstruction: { parts: [{ text: googleSystem }] },
       contents: [{ role: 'user', parts: [{ text: contextFor(model).user }] }],

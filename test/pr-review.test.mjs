@@ -1176,6 +1176,12 @@ check('Gemini through Go streams from the inference endpoint with a session head
   && geminiCall.body.contents[0].parts[0].text.includes('Changed files and patches:')
   && r.posted.some((body) => body.includes('lane-C') && body.includes('status=valid'))
   && !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
+// Without calibration Gemini traced real defects on NebulaLab #1237/#1241 but reported none;
+// with it, it reported 4 and 1 there and still none on a clean change.
+check('Gemini is told to report plausible traced defects with medium or low confidence instead of dropping them',
+  geminiCall?.body.systemInstruction.parts[0].text.includes('two independent internal review passes')
+  && geminiCall.body.systemInstruction.parts[0].text.includes('Reporting calibration: surface every plausible defect you traced')
+  && !byModel(r, 'muse-spark-1.3-contributor')[0]?.body.input[0].content.includes('Reporting calibration'));
 const goQuota = Object.assign(new Error('SDK request failed (http=429).'), { name: 'SDKRequestError', status: 429, httpStatus: 429,
   unserved: true, providerType: 'GoUsageLimitError' });
 r = await scenario((call) => { if (call.model === 'gemini-4-argon-contributor') throw goQuota; return healthy(call); }, goModelsEnv);

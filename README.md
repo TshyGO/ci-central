@@ -135,7 +135,7 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 - `thinking_level` 只允许配置在实际协议为 `google-generate-content` 的模型上，`effort`（`low`/`medium`/`high`/`xhigh`/`max`）只允许配置在 `anthropic-messages` 模型上，`anthropic-messages` 模型不接受 `temperature`；违反时失败关闭。
 - Gemini 经 Go 时由 SDK 客户端走 `streamGenerateContent?alt=sse`：Go 只在 `https://opencode.ai/inference/go/v1` 提供 Gemini，因此 Lane 的 `/zen/go/v1` base 会映射过去，并带 `x-opencode-session` 与该 Lane 的出口策略。直接接 Google API 的 Lane（provider 不是 `opencode-go`）保留原来的单次 `generateContent` 请求。
 - 模型的 `reporting_calibration`（布尔）：在系统提示末尾追加“报告校准”，要求把有代码证据的可疑问题以 medium/low 置信度报告，而不是自行否决或放进 limitations。当前 Muse 1.3/1.2 与 Gemini 4 Argon 开启：上周生产中 Muse/Kimi/Hy3 有 76–87% 的有效审查报告 0 个问题；实测校准后 Muse 在 #1237/#1133/#1241 由 2/2/— 增至 5/4/3 条，Gemini 由 0/0 增至 4/1 条，二者在干净改动上仍为 0、难题仍 5/5。Haiku 不开启：它不校准已在大 PR 上报告 1–6 条，开启后 #1237 增至 8 条但干净改动出现 3 条（含 1 条高置信度误报）；effort xhigh/max 即使输出上限 120000 也会在大 PR 上把输出全部用于思考而无报告。
-- Gemini 已知行为：当 diff 本身大量涉及模型思考内容的处理代码（如 ci-central #63 的 `thought`/`includeThoughts`/私有推理测试串）时，Gemini 会完全不思考（usage 不含 `thoughtsTokenCount`，约 15–30 秒返回），与 session 无关；同仓库其他 PR 与业务仓库 PR 正常思考。评论脚注此时显示 `Thinking: 0 tokens`，便于识别。
+- Gemini 已知行为：Gemini 偶尔完全不思考（usage 不含 `thoughtsTokenCount`，约 15–30 秒返回）。目前只在 ci-central #63（diff 大量涉及模型思考内容的处理代码）上观察到：同一请求 6 次中 3 次不思考、3 次思考 1.2–3.1 万 tokens，固定或新 session 结果相同；同仓库 #61/#62 的 4 次与 NebulaLab PR 的二十多次均正常思考。评论脚注此时显示 `Thinking: 0 tokens`，便于在生产中统计频率。
 - Claude 经 Go 的 `/messages`（Anthropic 协议）调用，使用官方 `@anthropic-ai/sdk`，以 `x-api-key` 认证；Lane base 必须以 `/v1` 结尾。请求固定开启 adaptive thinking，深度只由 `effort` 控制。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。

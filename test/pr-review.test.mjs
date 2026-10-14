@@ -389,7 +389,11 @@ async function scenario(route, overrides = {}, options = {}) {
     rest: {
       pulls: { get: async () => ({ data: pulls[Math.min(pullGets++, pulls.length - 1)] }), listFiles: 'files', listCommits: 'commits' },
       issues: {
-        get: async () => { throw new Error('not found'); },
+        get: async ({ issue_number }) => {
+          const issue = options.issues?.[issue_number];
+          if (!issue) throw new Error('not found');
+          return { data: issue };
+        },
         listComments: 'comments',
         createComment: async ({ body }) => {
           if (options.rejectComment?.(body)) throw new Error('comment rejected');
@@ -727,9 +731,51 @@ r = await scenario(healthy, {}, { files: [{ filename: 'icon.png', status: 'modif
 check('binary or rename-only changes skip model requests without failing the gate or posting lane comments', r.captured.length === 0
   && !r.error && r.posted.length === 0 && r.statusUpdates.at(-1)?.includes('无可审查的文本补丁')
   && !r.statusUpdates.at(-1)?.includes('有效发布') && r.logs.some(line => line.startsWith('::notice::')));
-r = await scenario(healthy, {}, { files: [patch('src/huge.ts', 130000)] });
+r = await scenario(healthy, {}, { files: [patch('src/huge.ts', 450000)] });
 check('text that exists but cannot fit the budget still fails as missing review evidence', r.captured.length === 0
   && r.posted.length === 3 && r.error && r.posted.every(body => body.includes('No complete inspectable text patch')));
+
+// A model with a larger context window may see more of a large change than the
+// repository default allows, without pushing the same material at smaller models.
+const perModelBudgetConfig = structuredClone(centralConfig);
+perModelBudgetConfig.review_policy.diff_char_budget = 4000;
+for (const lane of perModelBudgetConfig.lanes) for (const model of [lane.primary, ...lane.fallbacks]) delete model.diff_char_budget;
+perModelBudgetConfig.lanes[0].primary.diff_char_budget = 20000;
+const bigFileReview = ({ model }) => reply(200, JSON.stringify({ model: `provider/${model}`, choices: [{ finish_reason: 'stop', message: {
+  content: JSON.stringify({ summary: 'big file reviewed', reviewed_files: ['src/big.ts'], findings: [], limitations: [] }) } }] }));
+r = await scenario(bigFileReview, { PR_REVIEW_CONFIG: JSON.stringify(perModelBudgetConfig) }, { files: [patch('src/big.ts', 3000)] });
+check('a model-level diff budget supplies material beyond the repository default to that model only',
+  r.captured.find(({ lane }) => lane === 'A')?.body.input?.[1]?.content.includes('File: src/big.ts')
+  && !r.captured.some(({ lane }) => lane === 'B' || lane === 'C')
+  && r.posted.some(body => body.includes('lane-A') && body.includes('提供 1/1 个文件'))
+  && r.posted.some(body => body.includes('lane-B') && body.includes('No complete inspectable text patch')));
+const invalidModelBudgetConfig = structuredClone(centralConfig);
+invalidModelBudgetConfig.lanes[0].primary.diff_char_budget = 0;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidModelBudgetConfig) });
+check('a model-level diff budget must be a positive integer', r.captured.length === 0
+  && /primary\.diff_char_budget must be a positive integer/.test(r.error?.message || ''));
+
+// Issue background and the PR description were cut at fixed sizes; repositories can raise them.
+const longIssue = { number: 7, title: 'Long background', body: `${'I'.repeat(15000)}END_OF_ISSUE` };
+const longPull = { ...pull, body: `${'D'.repeat(10000)}END_OF_DESCRIPTION see #7` };
+const contextBudgetConfig = structuredClone(centralConfig);
+Object.assign(contextBudgetConfig.review_policy, { issue_char_budget: 60000, issue_excerpt_chars: 20000, description_char_limit: 20000 });
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(contextBudgetConfig) }, { pulls: [longPull], issues: { 7: longIssue } });
+const contextBudgetPrompt = r.captured.find(({ lane }) => lane === 'B')?.body.messages?.[1]?.content || '';
+check('configured issue budgets supply a long issue without the middle-omitted excerpt', contextBudgetPrompt.includes('END_OF_ISSUE')
+  && contextBudgetPrompt.includes('I'.repeat(15000)) && !contextBudgetPrompt.includes('Middle omitted by the issue-context budget'));
+check('a configured description limit supplies a long PR description in full', contextBudgetPrompt.includes('END_OF_DESCRIPTION'));
+const defaultContextConfig = structuredClone(centralConfig);
+for (const field of ['issue_char_budget', 'issue_excerpt_chars', 'description_char_limit']) delete defaultContextConfig.review_policy[field];
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(defaultContextConfig) }, { pulls: [longPull], issues: { 7: longIssue } });
+const defaultContextPrompt = r.captured.find(({ lane }) => lane === 'B')?.body.messages?.[1]?.content || '';
+check('without configured context budgets the issue excerpt and description limits stay unchanged',
+  defaultContextPrompt.includes('Middle omitted by the issue-context budget') && !defaultContextPrompt.includes('END_OF_DESCRIPTION'));
+const invalidContextBudgetConfig = structuredClone(centralConfig);
+invalidContextBudgetConfig.review_policy.issue_char_budget = -1;
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidContextBudgetConfig) });
+check('context budgets must be positive integers when configured', r.captured.length === 0
+  && /review_policy\.issue_char_budget must be a positive integer/.test(r.error?.message || ''));
 
 // Unserved resend: only a request with no model output at all may be sent again.
 const unserved = (httpStatus, extra = {}) => Object.assign(new Error(`SDK request failed (http=${httpStatus}).`),
@@ -889,7 +935,7 @@ check('finish reasons are normalized across provider casing', r.error === undefi
 r = await scenario(healthy);
 check('full-context primaries preserve input while Lane C carries its own output ceiling',
   r.captured.every(({ body }) => (body.input || body.messages)[1].content.includes('Changed files and patches:'))
-  && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 16384
+  && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
 
@@ -978,7 +1024,7 @@ check('repository configuration supplied through the environment remains authori
 r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Muse 1.2 only after one failed Muse 1.3 request', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 1 && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1);
 const qwenFallback = r.captured.find(({ model }) => model === 'muse-spark-1.2-contributor')?.body;
-check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 16384 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
+check('Muse 1.2 fallback uses the full review contract', qwenFallback?.max_output_tokens === 65536 && qwenFallback?.store === false && qwenFallback.input[1].content.includes('Changed files and patches:'));
 check('Muse 1.2 still yields one Lane A comment', r.posted.filter((body) => body.includes('ai-pr-review-bot:lane-A')).length === 1 && r.posted.some((body) => body.includes('muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor')));
 
 r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, '{"error":"unavailable"}') : healthy(call));
@@ -1231,23 +1277,23 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
 
 
 r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, 'unavailable') : healthy(call));
-// A keeps the repository default. B's Kimi K2.7 Code primary and C's fast reviewers get
+// A gets ten minutes for inputs up to its 1M-token window. B's Kimi K2.7 Code primary and C's fast reviewers get
 // fifteen minutes (they finished real business PRs in 3-6 minutes during model
 // selection); B's GLM 5.3 fallback keeps a thirty-minute window.
 check('B primary gets fifteen minutes, its GLM fallback thirty, while A and C keep their configured deadlines',
-  !r.error && r.timeouts.join(',') === '300000,900000,900000,1800000');
+  !r.error && r.timeouts.join(',') === '600000,900000,900000,1800000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);
 delete inheritedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms;
 r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(inheritedTimeoutConfig) });
 check('models without an override still inherit their lane deadline',
-  r.timeouts.join(',') === '300000,900000,900000,1800000');
+  r.timeouts.join(',') === '600000,900000,900000,1800000');
 const cappedTimeoutConfig = structuredClone(centralConfig);
 cappedTimeoutConfig.lanes[1].fallbacks[0].request_timeout_ms = 3600000;
 r = await scenario((call) => call.lane === 'B' && call.model === 'kimi-k2.7-code' ? reply(503, 'unavailable') : healthy(call),
   { PR_REVIEW_CONFIG: JSON.stringify(cappedTimeoutConfig) });
 check('a model override cannot extend the lane model-budget cap',
-  r.timeouts.join(',') === '300000,900000,900000,1800000');
+  r.timeouts.join(',') === '600000,900000,900000,1800000');
 for (const invalid of [0, -1, 1.5, '300000', null]) {
   const config = structuredClone(centralConfig);
   config.lanes[1].fallbacks[0].request_timeout_ms = invalid;

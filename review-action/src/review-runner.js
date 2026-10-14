@@ -131,14 +131,17 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   });
 
   const prCommits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pullNumber, per_page: 100 });
-  const issues = await collectIssues({ github, owner, repo, pull, commits: prCommits, logger: console });
+  const issues = await collectIssues({ github, owner, repo, pull, commits: prCommits, logger: console,
+    budget: reviewPolicy.issue_char_budget, excerptChars: reviewPolicy.issue_excerpt_chars });
   const issueContext = issues.text;
   const DIFF_BUDGET = Math.max(4000, Number(reviewPolicy.diff_char_budget) || 100000);
+  const DESCRIPTION_LIMIT = reviewPolicy.description_char_limit ?? 4000;
   const material = await enrichWorkflows({ github, owner, repo, head: reviewHeadSha, files, logger: console });
   const diffPack = packDiff(material, DIFF_BUDGET);
   const kimiK3Pack = packDiff(material, 1000);
   const fileList = files.map((file) => `${file.filename} (${file.status}, +${file.additions} -${file.deletions})`).join('\n');
-  console.log(`Diff packed: ${diffPack.kept}/${files.length} files, ${diffPack.packedChars}/${DIFF_BUDGET} patch chars, ${diffPack.omitted} omitted; complete omitted hunks=${diffPack.omittedHunks}.`);
+  const logPack = (pack, budget) => console.log(`Diff packed: ${pack.kept}/${files.length} files, ${pack.packedChars}/${budget} patch chars, ${pack.omitted} omitted; complete omitted hunks=${pack.omittedHunks}.`);
+  logPack(diffPack, DIFF_BUDGET);
   // Binary, rename-only or patch-less changes give a reviewer nothing to inspect. Skip
   // model requests without failing the gate; the status table records the skip. Text
   // that exists but does not fit the budget still fails as missing review evidence.
@@ -161,7 +164,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     `Head: ${pull.head.ref}`,
     '',
     'PR description:',
-    (pull.body || '[No description]').slice(0, options.descriptionLimit ?? 4000),
+    (pull.body || '[No description]').slice(0, options.descriptionLimit ?? DESCRIPTION_LIMIT),
     '',
     (options.issueText ?? issueContext)
       ? `Referenced issues (background — what & why):\n${options.issueText ?? issueContext}`
@@ -184,6 +187,19 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     issueText: issueContext.slice(0, 2000),
     fileList,
   });
+  // A model-level diff budget gets its own pack and prompt; models sharing a budget share them.
+  const budgetContexts = new Map([[DIFF_BUDGET, { pack: diffPack, user }]]);
+  function contextFor(model) {
+    if (model.context_profile === 'kimi-k3-throttled') return { pack: kimiK3Pack, user: kimiK3User };
+    const budget = model.diff_char_budget === undefined ? DIFF_BUDGET : Math.max(4000, model.diff_char_budget);
+    if (!budgetContexts.has(budget)) {
+      const pack = packDiff(material, budget);
+      logPack(pack, budget);
+      budgetContexts.set(budget, { pack, user: buildUser(pack.text, { pack }) });
+    }
+    return budgetContexts.get(budget);
+  }
+  const hasMaterial = (pack) => pack.coverage.some(file => file.patch_available && file.supplied_hunks);
 
   // Model ids are scoped to a lane, never globally. The same model id may be routed
   // through two providers without changing credentials or fallback ownership.
@@ -212,7 +228,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const throttled = model.context_profile === 'kimi-k3-throttled';
     const messages = [
       { role: 'system', content: buildSystemPrompt(throttled ? kimiK3System : system, model.review_lane_id) },
-      { role: 'user', content: throttled ? kimiK3User : user },
+      { role: 'user', content: contextFor(model).user },
     ];
     const payload = {
       model: model.id,
@@ -235,7 +251,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const googleSystem = buildSystemPrompt(`${throttled ? kimiK3System : system}\n\n${googleDeepReviewContract}`, model.review_lane_id);
     return {
       systemInstruction: { parts: [{ text: googleSystem }] },
-      contents: [{ role: 'user', parts: [{ text: throttled ? kimiK3User : user }] }],
+      contents: [{ role: 'user', parts: [{ text: contextFor(model).user }] }],
       generationConfig,
     };
   }
@@ -391,7 +407,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   }
 
   function validateAndRender(text, model, complete, finishReason) {
-    const supplied = model.context_profile === 'kimi-k3-throttled' ? kimiK3Pack : diffPack;
+    const supplied = contextFor(model).pack;
     if (!complete) return renderPartialReview(text, { ...supplied, issues: issues.manifest, finishReason });
     const report = parseReview(text, supplied);
     return renderReview(report, { ...supplied, issues: issues.manifest });
@@ -444,7 +460,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const primary = lane.primary;
     const chain = [primary, ...lane.fallbacks];
     const credentials = laneCredentials[lane.id];
-    if (!diffPack.coverage.some(file => file.patch_available && file.supplied_hunks)) {
+    if (!chain.some((model) => hasMaterial(contextFor(model).pack))) {
       return { lane, primary, servedBy: null, reasoningLength: 0, degraded: false, status: 'diagnostic',
         review: '> AI review was not generated.\n\nNo complete inspectable text patch was supplied. No model request was sent; binary, unavailable or omitted patches cannot establish review evidence.' };
     }
@@ -477,7 +493,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
 
     for (const model of chain) {
       if (model !== primary) await statusPublisher.update(lane.id, 'fallback', model.id);
-      const supplied = model.context_profile === 'kimi-k3-throttled' ? kimiK3Pack : diffPack;
+      const supplied = contextFor(model).pack;
       if (!supplied.coverage.some(file => file.patch_available && file.supplied_hunks)) {
         lastOutcome = 'no inspectable material for the configured context profile';
         tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);

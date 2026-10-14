@@ -554,6 +554,18 @@ for (const [name, implementation] of [
         && !error.message.includes('PRIVATE'));
     assert.equal(f.calls.length, 1);
   });
+  test(`${name}: Anthropic Messages keeps the message_start input count when message_delta reports zero`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const events = anthropicStream('end_turn');
+      events[8] = { ...events[8], usage: { input_tokens: 0, output_tokens: 50, output_tokens_details: { thinking_tokens: 40 } } };
+      for (const event of events) res.write(anthropicEvent(event));
+      res.end();
+    });
+    await f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: anthropicPayload });
+    const finished = f.logs.find((entry) => entry.event === 'finished');
+    assert.deepEqual([finished.input_tokens, finished.output_tokens, finished.reasoning_tokens], [20, 50, 40]);
+  });
   test(`${name}: Anthropic Messages requires a base URL that ends in /v1`, async (t) => {
     const f = await fixture(t, implementation, async (_req, res) => { res.writeHead(500); res.end(); });
     await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B', payload: anthropicPayload }),
@@ -618,6 +630,19 @@ for (const [name, implementation] of [
       (error) => error.status === 429 && error.providerType === 'GoUsageLimitError' && error.unserved === true
         && error.retryAfterMs === 7000 && !error.message.includes('PRIVATE'));
   });
+  for (const [shape, body, expected] of [
+    ['string code', { error: { code: 'insufficient_quota', message: 'PRIVATE LIMIT DETAIL' } }, 'insufficient_quota'],
+    ['Google array', [{ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'PRIVATE LIMIT DETAIL' } }], 'RESOURCE_EXHAUSTED'],
+  ]) {
+    test(`${name}: Gemini rejection keeps a ${shape} error code`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(429, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+      });
+      await assert.rejects(f.invoke({ protocol: 'google-generate-content', payload: geminiPayload }),
+        (error) => error.status === 429 && error.providerCode === expected && !error.message.includes('PRIVATE'));
+    });
+  }
   test(`${name}: Gemini requires a model id`, async (t) => {
     const f = await fixture(t, implementation, async (_req, res) => { res.writeHead(500); res.end(); });
     const { model, ...withoutModel } = geminiPayload;

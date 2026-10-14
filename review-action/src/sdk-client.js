@@ -123,11 +123,15 @@ async function* geminiEvents(response) {
 async function geminiRejection(response) {
   let parsed;
   try { parsed = JSON.parse(await response.text()); } catch { /* Status alone is enough. */ }
-  const inner = parsed?.error && typeof parsed.error === 'object' ? parsed.error : undefined;
+  // Google streaming endpoints may wrap the error object in an array.
+  const envelope = Array.isArray(parsed) ? parsed[0] : parsed;
+  const inner = envelope?.error && typeof envelope.error === 'object' ? envelope.error : undefined;
   const error = new Error('Gemini request was rejected.');
   error.status = response.status;
   error.headers = response.headers;
-  error.error = { code: safeCode(inner?.status) || (Number.isSafeInteger(inner?.code) ? String(inner.code) : undefined), type: inner?.type };
+  // Keep string codes such as insufficient_quota: quota classification depends on them.
+  error.error = { code: safeCode(inner?.status) || safeCode(inner?.code)
+    || (Number.isSafeInteger(inner?.code) ? String(inner.code) : undefined), type: inner?.type };
   return error;
 }
 
@@ -321,8 +325,12 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
           timing.reasoning_chars += event.delta.thinking.length;
         }
         if (event.type === 'message_delta') {
-          // message_delta carries cumulative output usage; keep message_start's input count.
-          for (const [key, value] of Object.entries(event.usage || {})) if (value !== null && value !== undefined) usage = { ...usage, [key]: value };
+          // message_delta carries cumulative output usage; a zero there never replaces a
+          // count message_start already reported (some gateways zero-fill input fields).
+          for (const [key, value] of Object.entries(event.usage || {})) {
+            if (value === null || value === undefined || (value === 0 && usage?.[key] > 0)) continue;
+            usage = { ...usage, [key]: value };
+          }
           const stop = event.delta?.stop_reason;
           if (typeof stop === 'string' && stop) {
             timing.finish_reason = ANTHROPIC_FINISH[stop] || safeCode(stop) || 'unknown';

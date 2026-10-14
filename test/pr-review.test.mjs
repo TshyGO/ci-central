@@ -1147,7 +1147,7 @@ goModelsConfig.lanes[1] = { ...goModelsConfig.lanes[1], protocol: 'anthropic-mes
   primary: { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', context_profile: 'full', max_output_tokens: 65536, effort: 'high', diff_char_budget: 1200000 },
   fallbacks: [{ id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', protocol: 'openai-chat-completions', request_timeout_ms: 900000, context_profile: 'full', max_output_tokens: 65536 }] };
 goModelsConfig.lanes[2] = { ...goModelsConfig.lanes[2], protocol: 'google-generate-content',
-  primary: { id: 'gemini-4-argon-contributor', label: 'Gemini 4 Argon Contributor', context_profile: 'full', max_output_tokens: 65536, thinking_level: 'high', diff_char_budget: 1200000 },
+  primary: { id: 'gemini-4-argon-contributor', label: 'Gemini 4 Argon Contributor', context_profile: 'full', max_output_tokens: 65536, thinking_level: 'high', diff_char_budget: 1200000, reporting_calibration: true },
   fallbacks: [{ id: 'hy3', label: 'Hy3', protocol: 'openai-chat-completions', context_profile: 'full', max_output_tokens: 65536 }] };
 const goModelsEnv = { PR_REVIEW_CONFIG: JSON.stringify(goModelsConfig), LANE_B_API_BASE: 'https://opencode.ai/zen/go/v1',
   LANE_C_API_BASE: 'https://opencode.ai/zen/go/v1', RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' };
@@ -1178,10 +1178,23 @@ check('Gemini through Go streams from the inference endpoint with a session head
   && !r.posted.some((body) => body.includes('PRIVATE GEMINI THOUGHT')));
 // Without calibration Gemini traced real defects on NebulaLab #1237/#1241 but reported none;
 // with it, it reported 4 and 1 there and still none on a clean change.
-check('Gemini is told to report plausible traced defects with medium or low confidence instead of dropping them',
+check('a calibrated model is told to report plausible traced defects with medium or low confidence instead of dropping them',
   geminiCall?.body.systemInstruction.parts[0].text.includes('two independent internal review passes')
-  && geminiCall.body.systemInstruction.parts[0].text.includes('Reporting calibration: surface every plausible defect you traced')
+  && geminiCall.body.systemInstruction.parts[0].text.includes('Reporting calibration: surface every plausible defect you traced'));
+// Calibration is opt-in per model: Haiku already reports at this level and gained only noise.
+const uncalibratedConfig = structuredClone(goModelsConfig);
+for (const lane of uncalibratedConfig.lanes) for (const model of [lane.primary, ...lane.fallbacks]) delete model.reporting_calibration;
+uncalibratedConfig.lanes[1].primary.reporting_calibration = true;
+r = await scenario(healthy, { ...goModelsEnv, PR_REVIEW_CONFIG: JSON.stringify(uncalibratedConfig) });
+check('reporting calibration follows the model flag across protocols',
+  byModel(r, 'claude-haiku-5-5')[0]?.body.system.includes('Reporting calibration: surface every plausible defect you traced')
+  && !byModel(r, 'gemini-4-argon-contributor')[0]?.body.systemInstruction.parts[0].text.includes('Reporting calibration')
   && !byModel(r, 'muse-spark-1.3-contributor')[0]?.body.input[0].content.includes('Reporting calibration'));
+r = await scenario(healthy);
+check('production Muse and Gemini are calibrated while Haiku is not',
+  r.captured.find(({ lane }) => lane === 'A')?.body.input[0].content.includes('Reporting calibration: surface every plausible defect you traced')
+  && r.captured.find(({ lane }) => lane === 'C')?.body.systemInstruction.parts[0].text.includes('Reporting calibration: surface every plausible defect you traced')
+  && !r.captured.find(({ lane }) => lane === 'B')?.body.system.includes('Reporting calibration'));
 const goQuota = Object.assign(new Error('SDK request failed (http=429).'), { name: 'SDKRequestError', status: 429, httpStatus: 429,
   unserved: true, providerType: 'GoUsageLimitError' });
 r = await scenario((call) => { if (call.model === 'gemini-4-argon-contributor') throw goQuota; return healthy(call); }, goModelsEnv);
@@ -1198,7 +1211,24 @@ check('thinking token counts are shown when a model returns no thinking text',
   r.posted.some((body) => body.includes('lane-B') && body.includes('Thinking: 4321 tokens'))
   && r.posted.some((body) => body.includes('lane-C') && body.includes('Thinking: 512 tokens')));
 
+r = await scenario((call) => call.model === 'claude-haiku-5-5'
+  ? reply(200, JSON.stringify({ model: 'claude-haiku-5-5', reasoning_chars: 777,
+    usage: { output_tokens: 900, completion_tokens_details: { reasoning_tokens: 0 } },
+    choices: [{ finish_reason: 'stop', message: { content: reportText('# review haiku') } }] }))
+  : healthy(call), goModelsEnv);
+check('a zero thinking-token count never hides streamed thinking characters',
+  r.posted.some((body) => body.includes('lane-B') && body.includes('Thinking: 777 chars')));
+
+// Gemini skipped thinking entirely on a diff full of thinking-handling code (ci-central #63);
+// its usage then omits thoughtsTokenCount. Show that as zero rather than "not reported".
+r = await scenario((call) => call.model === 'gemini-4-argon-contributor'
+  ? reply(200, geminiResult('# review gemini', { usageMetadata: { promptTokenCount: 54000, candidatesTokenCount: 900, totalTokenCount: 54900 } }))
+  : healthy(call), goModelsEnv);
+check('a Gemini answer without thought tokens is shown as zero thinking',
+  r.posted.some((body) => body.includes('lane-C') && body.includes('Thinking: 0 tokens')));
+
 for (const [label, mutate, message] of [
+  ['a non-boolean reporting calibration', (config) => { config.lanes[1].primary.reporting_calibration = 'yes'; }, /primary\.reporting_calibration must be a boolean/],
   ['an unknown model protocol', (config) => { config.lanes[1].fallbacks[0].protocol = 'grpc'; }, /fallbacks\[0\]\.protocol is not supported/],
   ['effort outside Anthropic Messages', (config) => { config.lanes[1].fallbacks[0].effort = 'high'; }, /effort is only supported by anthropic-messages/],
   ['an unknown effort', (config) => { config.lanes[1].primary.effort = 'extreme'; }, /primary\.effort is not supported/],

@@ -24,7 +24,8 @@
         "label": "Muse Spark 1.3 Contributor",
         "context_profile": "full",
         "max_output_tokens": 65536,
-        "diff_char_budget": 1200000
+        "diff_char_budget": 1200000,
+        "reporting_calibration": true
       },
       "fallbacks": [
         {
@@ -32,7 +33,8 @@
           "label": "Muse Spark 1.2 Contributor",
           "context_profile": "full",
           "max_output_tokens": 65536,
-          "diff_char_budget": 1200000
+          "diff_char_budget": 1200000,
+          "reporting_calibration": true
         }
       ]
     },
@@ -76,7 +78,8 @@
         "context_profile": "full",
         "max_output_tokens": 65536,
         "thinking_level": "high",
-        "diff_char_budget": 1200000
+        "diff_char_budget": 1200000,
+        "reporting_calibration": true
       },
       "fallbacks": [
         {

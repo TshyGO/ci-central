@@ -50,6 +50,9 @@ for (const repository of repositories) {
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
   assert.equal(fromSource.lanes[1].primary.effort, 'high', `${repository} Haiku must stay at high effort`);
   assert.equal(fromSource.lanes[2].primary.thinking_level, 'high', `${repository} Gemini must think at the high level`);
+  // Calibration doubled Muse and Gemini findings with no clean-change noise; on Haiku it only added noise.
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => [lane.primary, ...lane.fallbacks]).filter((model) => model.reporting_calibration).map((model) => model.id),
+    ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor', 'gemini-4-argon-contributor'], `${repository} calibration must stay limited to Muse and Gemini`);
   assert.ok([fromSource.lanes[0], fromSource.lanes[1]].every((lane) => lane.primary.thinking_level === undefined
     && lane.fallbacks.every((model) => model.thinking_level === undefined))
     && fromSource.lanes[2].fallbacks[0].thinking_level === undefined, `${repository} only Gemini may configure Google thinking`);

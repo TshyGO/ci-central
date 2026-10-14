@@ -43,6 +43,9 @@ function validateModel(model, location) {
   if (model.diff_char_budget !== undefined && (!Number.isInteger(model.diff_char_budget) || model.diff_char_budget < 1)) {
     throw new Error(`${location}.diff_char_budget must be a positive integer when configured.`);
   }
+  if (model.reporting_calibration !== undefined && typeof model.reporting_calibration !== 'boolean') {
+    throw new Error(`${location}.reporting_calibration must be a boolean.`);
+  }
   // A fallback may speak a different protocol than its lane primary; it still uses the lane's key.
   if (model.protocol !== undefined && !ALLOWED_PROTOCOLS.has(model.protocol)) {
     throw new Error(`${location}.protocol is not supported.`);

@@ -40,6 +40,13 @@ for (const repository of repositories) {
   // Lanes A/B draw on the OpenCode Go plan and Lane C on Command Code, so one exhausted plan
   // never empties every lane; each lane keeps its fallback with the same provider and key.
   assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', 'opencode-go', 'command-code'], `${repository} lane providers changed`);
+  // Go's quota is one pool, so when it runs out Lanes A/B overflow to the same models on
+  // Command Code through the Lane C slot. Command Code GOAT served all four on 2026-10-15.
+  assert.deepEqual(fromSource.lanes.map((lane) => [lane.primary, ...lane.fallbacks].map((model) => model.quota_overflow ?? null)), [
+    [{ credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' }, { credential_lane: 'C', id: 'meta/muse-spark-1.2-contributor' }],
+    [{ credential_lane: 'C', id: 'claude-haiku-5-5' }, { credential_lane: 'C', id: 'moonshotai/Kimi-K2.7-Code' }],
+    [null, null],
+  ], `${repository} quota overflow must map each Go model to the same model on Command Code`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
   assert.equal(fromSource.lanes[2].fallbacks[0].id, 'zai-org/GLM-5.3');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
@@ -136,8 +143,12 @@ const inputTokenRoom = {
   // Command Code lists a 262,144-token window for Hy3 and 1M for GLM 5.3; Hy3's output is counted against it.
   'tencent/hy3-paid': 262144,
   'zai-org/GLM-5.3': 1000000,
+  // Quota overflow targets, from Command Code's /models context_length.
+  'meta/muse-spark-1.3-contributor': 1048576,
+  'meta/muse-spark-1.2-contributor': 1048576,
+  'moonshotai/Kimi-K2.7-Code': 256000,
 };
-const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'tencent/hy3-paid']);
+const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'tencent/hy3-paid', 'moonshotai/Kimi-K2.7-Code']);
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
   const policy = config.review_policy;
@@ -159,6 +170,13 @@ for (const repository of repositories) {
       const sharedOutput = sharesWindowWithOutput.has(model.id) ? model.max_output_tokens : 0;
       assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + sharedOutput <= inputTokenRoom[model.id],
         `${repository} Lane ${lane.id} ${model.id} context budget can exceed its model window`);
+      // The overflow resends the same prompt, so it must fit the target model's window too.
+      const overflowId = model.quota_overflow?.id;
+      if (overflowId) {
+        const overflowOutput = sharesWindowWithOutput.has(overflowId) ? model.max_output_tokens : 0;
+        assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + overflowOutput <= inputTokenRoom[overflowId],
+          `${repository} Lane ${lane.id} ${model.id} overflow ${overflowId} context budget can exceed its model window`);
+      }
     }
   }
 }
@@ -229,6 +247,24 @@ assert.throws(() => source.validateConfig(invalidAdvisory, 'TshyGO/NebulaLab'), 
 const everyLaneAdvisory = structuredClone(nebula);
 for (const lane of everyLaneAdvisory.lanes) lane.advisory = true;
 assert.throws(() => source.validateConfig(everyLaneAdvisory, 'TshyGO/NebulaLab'), /At least one lane must be required/);
+
+// Quota overflow is the only cross-provider path, so its shape is strict.
+for (const loader of [source, bundled]) {
+  for (const [mutate, message] of [
+    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'A'; }, /must name another configured lane/],
+    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'D'; }, /must name another configured lane/],
+    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'B'; }, /provider other than the lane's own/],
+    [(config) => { config.lanes[0].primary.quota_overflow.id = ' '; }, /quota_overflow\.id must be a non-empty string/],
+    [(config) => { config.lanes[0].primary.quota_overflow.provider = 'other'; }, /only credential_lane and id/],
+    [(config) => { config.lanes[0].primary.quota_overflow = 'C'; }, /only credential_lane and id/],
+    [(config) => { config.lanes[2].primary.quota_overflow = { credential_lane: 'A', id: 'muse-spark-1.3-contributor' }; }, /cannot target a lane that overflows itself/],
+    [(config) => { config.lanes[0].protocol = 'google-generate-content'; }, /not supported by google-generate-content/],
+  ]) {
+    const config = structuredClone(nebula);
+    mutate(config);
+    assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), message);
+  }
+}
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-config-'));
 const output = path.join(tmp, 'output.txt');

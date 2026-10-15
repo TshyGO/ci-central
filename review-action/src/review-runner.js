@@ -338,10 +338,16 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return Math.min(requestTimeoutMs, modelBudgetMs);
   }
 
+  // Where one request goes: the lane's own provider and fixed secret slot, or the model's
+  // quota overflow (the same model through another lane's provider and slot).
+  const ownRoute = (lane, model) => ({ provider: lane.provider, credentialLane: lane.id, modelId: model.id });
+
   // One served request per model. No retry, backoff, optional-field repair, or
-  // redirect can silently send the same review again; the only resend is the opt-in
-  // unserved case in requestReview, where no model output was produced at all.
-  async function callModel(lane, model, { windowMs = modelWindowMs(lane, model), sessionSuffix = '', attempt = 1 } = {}) {
+  // redirect can silently send the same review again; the only resends are the opt-in
+  // unserved case and the quota overflow in requestReview, where no model output was
+  // produced at all.
+  async function callModel(lane, model, { windowMs = modelWindowMs(lane, model), sessionSuffix = '', attempt = 1,
+    route = ownRoute(lane, model) } = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), windowMs);
     const startedAt = Date.now();
@@ -354,11 +360,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let retryAfterMs;
     let localDeadline = false;
     try {
-      const credentials = laneCredentials[lane.id];
+      const credentials = laneCredentials[route.credentialLane];
+      const goRoute = route.provider === 'opencode-go';
       let proxyUrl;
       const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
-        && protocolOf(lane, model) === 'openai-chat-completions' && DIRECT_GO_MODELS.has(model.id);
-      if (lane.provider === 'opencode-go' && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
+        && protocolOf(lane, model) === 'openai-chat-completions' && DIRECT_GO_MODELS.has(route.modelId);
+      if (goRoute && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
         // Keep GitHub's runner-wide proxy independent from model egress.
         // An invalid explicit override fails closed without trying the VPS.
         proxyUrl = process.env.NEBULA_REVIEW_PROXY_URL !== undefined
@@ -375,8 +382,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
           throw new Error(`Lane ${lane.id} requires an approved review proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
         }
       }
-      if (lane.provider === 'opencode-go') {
-        console.log(`[Lane ${lane.id}/${model.id}] egress=${proxyUrl ? 'approved-proxy' : 'direct'}`);
+      if (goRoute) {
+        console.log(`[Lane ${lane.id}/${route.modelId}] egress=${proxyUrl ? 'approved-proxy' : 'direct'}`);
       }
       const protocol = protocolOf(lane, model);
       response = legacyGoogle(lane, model) ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
@@ -395,12 +402,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         baseURL: protocol === 'google-generate-content' ? goGoogleBase(credentials.baseUrl) : credentials.baseUrl,
         protocol,
         proxyUrl,
-        sessionId: lane.provider === 'opencode-go'
+        sessionId: goRoute
           ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : undefined,
-        payload: sdkPayload(lane, model),
+        payload: sdkPayload(lane, route.modelId === model.id ? model : { ...model, id: route.modelId }),
         signal: controller.signal,
         timeoutMs: windowMs,
-        onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`),
+        onProgress: (progress) => console.log(`[Lane ${lane.id}/${route.modelId}] sdk=${JSON.stringify(progress)}`),
       });
       responseText = await response.text();
     } catch (error) {
@@ -423,9 +430,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const failure = classifyFailure(response, responseText, requestError);
     const usable = response?.ok && !requestError && failure.kind !== 'gateway-blocked';
     const elapsedMs = Date.now() - startedAt;
-    console.log(`[Lane ${lane.id}/${model.id}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
+    console.log(`[Lane ${lane.id}/${route.modelId}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
     if (!usable) {
-      console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
+      console.log(`[Lane ${lane.id}/${route.modelId}] provider=${route.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
     }
     return { response, responseText, requestError, attempts: attempt, failureKind: usable ? '' : failure.kind,
       unserved: !usable && unserved, httpStatus: response?.status ?? httpStatus, retryAfterMs, localDeadline, elapsedMs };
@@ -446,6 +453,29 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const delayMs = status === 200 ? 0 : Math.min(outcome.retryAfterMs ?? UNSERVED_RESEND_DELAY_MS, 120000);
     const windowMs = modelWindowMs(lane, model) - outcome.elapsedMs - delayMs;
     return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
+  }
+
+  // A plan quota (Go's 5-hour/weekly/monthly pool) covers every model on the provider, so no
+  // model there can serve until it resets. Only then does a model with a configured overflow
+  // send the same request once to the same model through another lane's provider and fixed
+  // secret slot. The exhausted request produced no output, so this cannot duplicate a review;
+  // every other failure stays with the lane's own provider.
+  // The overflow shares the model's window with everything already spent on it, and like the
+  // unserved resend it is skipped when too little of that window is left to finish a review.
+  function quotaOverflow(lane, model, outcome, remainingMs) {
+    const overflow = model.quota_overflow;
+    if (!overflow || outcome.failureKind !== 'quota-exhausted') return null;
+    const target = lanes.find((candidate) => candidate.id === overflow.credential_lane);
+    const credentials = laneCredentials[overflow.credential_lane];
+    if (!target || !credentials?.apiKey || !credentials?.baseUrl) {
+      console.log(`[Lane ${lane.id}/${model.id}] quota overflow is configured, but the Lane ${overflow.credential_lane} secret slot is not provisioned.`);
+      return null;
+    }
+    if (remainingMs < UNSERVED_RESEND_MIN_WINDOW_MS) {
+      console.log(`[Lane ${lane.id}/${model.id}] quota overflow skipped: only ${remainingMs} ms of the model window remain.`);
+      return null;
+    }
+    return { provider: target.provider, credentialLane: target.id, modelId: overflow.id, windowMs: remainingMs };
   }
 
   function validateAndRender(text, model, complete, finishReason) {
@@ -510,7 +540,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       reasoningUnit: reasoningLength ? 'chars' : null, complete, finishReason: normalizedFinishReason || 'missing' };
   }
 
-  // Primary once, then the same-lane fallback once on failure; never retry either.
+  // Primary once, then the same-lane fallback once on failure; never retry either. A
+  // model whose provider quota is exhausted may first overflow once (quotaOverflow).
   async function requestReview(lane) {
     const primary = lane.primary;
     const chain = [primary, ...lane.fallbacks];
@@ -555,13 +586,23 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         continue;
       }
       let outcome = await callModel(lane, model);
+      let spentMs = outcome.elapsedMs;
       const resend = unservedResend(lane, model, outcome);
       if (resend) {
         console.log(`[Lane ${lane.id}/${model.id}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
         await statusPublisher.update(lane.id, 'resending', model.id);
         await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
         outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: '-resend', attempt: 2 });
+        spentMs += resend.delayMs + outcome.elapsedMs;
       }
+      const via = quotaOverflow(lane, model, outcome, modelWindowMs(lane, model) - spentMs);
+      if (via) {
+        tried.push(`${model.id} -> ${lane.provider} plan quota exhausted (${outcome.attempts} attempt(s))`);
+        console.log(`[Lane ${lane.id}/${model.id}] ${lane.provider} plan quota is exhausted; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
+        await statusPublisher.update(lane.id, 'overflow', `${via.modelId} @ ${via.provider}`);
+        outcome = await callModel(lane, model, { route: via, windowMs: via.windowMs });
+      }
+      const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
       const { response, responseText, requestError, attempts, failureKind } = outcome;
       lastResponse = response;
       lastResponseText = responseText;
@@ -576,6 +617,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               lane,
               primary,
               servedBy: model,
+              servedVia: via,
               review,
               reasoningLength,
               reasoningUnit,
@@ -591,6 +633,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               lane,
               primary,
               servedBy: model,
+              servedVia: via,
               review,
               reasoningLength,
               reasoningUnit,
@@ -607,7 +650,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
           console.log(`[Lane ${lane.id}/${model.id}] report rejected: ${error?.message?.startsWith('Review contract:') ? error.message : 'invalid report envelope'}`);
         }
       }
-      tried.push(`${model.id} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
+      tried.push(`${attemptLabel} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
@@ -688,13 +731,17 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       return;
     }
     const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = result;
+    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status } = result;
+    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} quota exhausted)` : '';
     const modelLine = degraded
-      ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}`
-      : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
-    const banner = degraded
-      ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 未产生可用审核，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`, '']
-      : [];
+      ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}`
+      : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${viaText}`;
+    const banner = [
+      ...(degraded ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 未产生可用审核，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`] : []),
+      ...(servedVia ? [`> ℹ️ Lane ${lane.id} 的 \`${lane.provider}\` 套餐额度已用尽，本条 review 由同一模型经 \`${servedVia.provider}\`（Lane ${servedVia.credentialLane} 的固定 Secret 槽位）生成。`] : []),
+    ];
+    if (banner.length) banner.push('');
+    const servedLabel = servedBy && servedVia ? `${servedBy.id} via ${servedVia.provider}` : servedBy?.id;
     const body = [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
@@ -737,12 +784,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       }
       posted++;
       if (status === 'valid') validLaneIds.add(lane.id);
-      await statusPublisher.update(lane.id, status === 'valid' ? 'complete' : status === 'partial' ? 'partial' : 'failed', servedBy?.id);
+      await statusPublisher.update(lane.id, status === 'valid' ? 'complete' : status === 'partial' ? 'partial' : 'failed', servedLabel);
       console.log(`${currentComment ? 'Updated' : 'Created'} AI PR Review comment ${publishedComment.id} for Lane ${lane.id} with status=${status}.`);
     } catch (error) {
       // One failed comment must not swallow the others.
       console.log(`Failed to post comment for Lane ${lane.id}.`);
-      await statusPublisher.update(lane.id, 'publication_failed', servedBy?.id);
+      await statusPublisher.update(lane.id, 'publication_failed', servedLabel);
     }
   }
   const settled = await Promise.allSettled(lanesToReview.map(reviewAndPublish));

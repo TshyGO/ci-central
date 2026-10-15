@@ -133,8 +133,18 @@ var require_index = __commonJS({
         if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
         if (lane.fallbacks.length > 1) throw new Error(`${location} supports at most one fallback.`);
         lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
-        for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
-          const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;
+        const modelEntries = [
+          [lane.primary, `${location}.primary`],
+          ...lane.fallbacks.map((model, modelIndex) => [model, `${location}.fallbacks[${modelIndex}]`])
+        ];
+        if (lane.first_pass !== void 0) {
+          validateModel(lane.first_pass, `${location}.first_pass`);
+          if (lane.first_pass.quota_overflow !== void 0) {
+            throw new Error(`${location}.first_pass cannot configure quota_overflow; the lane's own chain serves when it cannot.`);
+          }
+          modelEntries.unshift([lane.first_pass, `${location}.first_pass`]);
+        }
+        for (const [model, modelLocation] of modelEntries) {
           const protocol = model.protocol ?? lane.protocol;
           if (model.omit_max_tokens && protocol !== "openai-chat-completions") {
             throw new Error(`${modelLocation}.omit_max_tokens is only supported by openai-chat-completions.`);
@@ -155,9 +165,9 @@ var require_index = __commonJS({
             throw new Error(`${modelLocation}.thinking_level is not supported.`);
           }
         }
-        const ids = [lane.primary.id, ...lane.fallbacks.map((model) => model.id)];
+        const ids = modelEntries.map(([model]) => model.id);
         if (new Set(ids).size !== ids.length) {
-          throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
+          throw new Error(`Lane ${lane.id} contains a duplicate first-pass/primary/fallback model id.`);
         }
       }
       if (config.lanes.every((lane) => lane.advisory === true)) {
@@ -781,6 +791,17 @@ async function runReview({
       reusableLaneIds.add(lane.id);
     }
   }
+  const FIRST_PASS_END = "<!-- /ai-pr-review-first-pass:v1 -->";
+  const firstPassPattern = /<!-- ai-pr-review-first-pass:v1 lane=([A-C]) head=([0-9a-f]{40}) model=([A-Za-z0-9._/-]{1,120}) -->\n([\s\S]*?)\n<!-- \/ai-pr-review-first-pass:v1 -->/;
+  const firstPassBegin = (laneId, head, modelId) => `<!-- ai-pr-review-first-pass:v1 lane=${laneId} head=${head} model=${modelId} -->`;
+  const withoutFirstPassMarkers = (text) => String(text).replace(/<!-- \/?ai-pr-review-first-pass:v1[^>]*-->/g, "");
+  function priorFirstPass(lane) {
+    if (!lane.first_pass) return null;
+    const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
+    const comment = existingComments.filter((item) => item.user?.login === "github-actions[bot]" && item.body?.startsWith(marker + "\n")).at(-1);
+    const match = comment && firstPassPattern.exec(comment.body || "");
+    return match && match[1] === lane.id ? { head: match[2], model: match[3], review: match[4] } : null;
+  }
   const isManualReview = context.eventName === "issue_comment";
   const lanesToReview = isManualReview ? lanes : lanes.filter((lane) => !reusableLaneIds.has(lane.id));
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
@@ -984,7 +1005,7 @@ ${googleDeepReviewContract}`), model.review_lane_id);
     const rawText = `${responseText || ""}
 ${requestError || ""}`;
     const text = rawText.toLowerCase();
-    const quotaExhausted = status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text));
+    const quotaExhausted = status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"');
     const authenticationFailed = status === 401 || status === 403 && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text);
     const gatewayBlocked = /^\s*(<!doctype html|<html\b)/i.test(responseText || "") || !response?.ok && text.includes("\u9A8C\u8BC1\u5931\u8D25");
     const endpointUnavailable = !response && /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text);
@@ -1038,6 +1059,18 @@ ${requestError || ""}`;
       if (goRoute) {
         console.log(`[Lane ${lane.id}/${route.modelId}] egress=${proxyUrl ? "approved-proxy" : "direct"}`);
       }
+      if (route.provider === "anthropic") {
+        let proxy;
+        try {
+          proxy = new URL(process2.env.NEBULA_REVIEW_PROXY_URL);
+        } catch {
+        }
+        if (process2.env.RUNNER_ENVIRONMENT !== "self-hosted" || !proxy || proxy.protocol !== "http:" || proxy.hostname !== "192.168.122.1" || proxy.port !== "17890" || proxy.username || proxy.password || proxy.search || proxy.hash || !["", "/"].includes(proxy.pathname)) {
+          throw new Error(`Lane ${lane.id} sends Anthropic requests only through the szlab Taiwan egress on a self-hosted review runner; refusing any other route.`);
+        }
+        proxyUrl = process2.env.NEBULA_REVIEW_PROXY_URL;
+        console.log(`[Lane ${lane.id}/${route.modelId}] egress=tw-proxy`);
+      }
       const protocol = protocolOf(lane, model);
       response = legacyGoogle(lane, model) ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
         method: "POST",
@@ -1065,7 +1098,11 @@ ${requestError || ""}`;
     } catch (error) {
       if (Number.isInteger(error?.status)) {
         response = { status: error.status, ok: false };
-        responseText = JSON.stringify({ error: { code: error.providerCode, type: error.providerType } });
+        responseText = JSON.stringify({ error: {
+          code: error.providerCode,
+          type: error.providerType,
+          ...error.creditExhausted === true ? { credit: "exhausted" } : {}
+        } });
       }
       const code = error?.cause?.code || error?.code;
       errorCode = typeof code === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : "";
@@ -1188,7 +1225,11 @@ ${requestError || ""}`;
   }
   async function requestReview(lane) {
     const primary = lane.primary;
-    const chain = [primary, ...lane.fallbacks];
+    const firstPass = lane.first_pass && !priorFirstPass(lane) ? lane.first_pass : null;
+    if (firstPass) {
+      console.log(`[Lane ${lane.id}] this PR has no first-pass review yet; ${firstPass.id} leads, and later commits go to ${primary.id}.`);
+    }
+    const chain = [...firstPass ? [firstPass] : [], primary, ...lane.fallbacks];
     const credentials = laneCredentials[lane.id];
     if (!chain.some((model) => hasMaterial(contextFor(model).pack))) {
       return {
@@ -1228,7 +1269,7 @@ ${requestError || ""}`;
     let lastOutcome = "";
     let bestPartial = null;
     for (const model of chain) {
-      if (model !== primary) await statusPublisher.update(lane.id, "fallback", model.id);
+      if (model !== chain[0]) await statusPublisher.update(lane.id, "fallback", model.id);
       const supplied = contextFor(model).pack;
       if (!supplied.coverage.some((file) => file.patch_available && file.supplied_hunks)) {
         lastOutcome = "no inspectable material for the configured context profile";
@@ -1271,7 +1312,9 @@ ${requestError || ""}`;
               review: review2,
               reasoningLength,
               reasoningUnit,
-              degraded: model !== primary,
+              // The primary after a first pass that could not serve is the lane's normal path.
+              degraded: model !== primary && model !== firstPass,
+              firstPass: model === firstPass,
               status: "valid"
             };
           }
@@ -1285,7 +1328,7 @@ ${requestError || ""}`;
               review: review2,
               reasoningLength,
               reasoningUnit,
-              degraded: model !== primary,
+              degraded: model !== primary && model !== firstPass,
               status: "partial"
             };
             console.log(`[Lane ${lane.id}/${model.id}] response was incomplete; trying the next model in the lane.`);
@@ -1324,7 +1367,7 @@ ${snippet}
 ${fence}
 </details>` : "",
       "",
-      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? "Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review." : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
+      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lane.provider === "anthropic" ? "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : "Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review." : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
     ].join("\n");
     return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false, status: "diagnostic" };
   }
@@ -1352,27 +1395,46 @@ ${fence}
       return;
     }
     const reviewedAt = (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status } = result;
+    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status, firstPass } = result;
     const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} quota exhausted)` : "";
-    const modelLine = degraded ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}` : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${viaText}`;
+    const isFirstPass = firstPass === true && status === "valid";
+    const prior = isFirstPass ? null : priorFirstPass(lane);
+    const modelLine = degraded ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}` : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${isFirstPass ? " (first pass)" : ""}${viaText}`;
     const banner = [
       ...degraded ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${primary.label}\` \u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u672C\u6761 review \u7531\u540C\u901A\u9053\u5907\u7528\u6A21\u578B \`${servedBy.label}\` \u751F\u6210\u3002`] : [],
       ...servedVia ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${lane.provider}\` \u5957\u9910\u989D\u5EA6\u5DF2\u7528\u5C3D\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF \`${servedVia.provider}\`\uFF08Lane ${servedVia.credentialLane} \u7684\u56FA\u5B9A Secret \u69FD\u4F4D\uFF09\u751F\u6210\u3002`] : []
     ];
+    if (isFirstPass) {
+      banner.push(`> \u2139\uFE0F \u8FD9\u662F\u672C PR \u7684\u9996\u6B21\u5BA1\u6838\uFF0C\u7531 \`${servedBy.label}\` \u5B8C\u6210\uFF1B\u540E\u7EED\u63D0\u4EA4\u7531 \`${primary.label}\` \u5BA1\u6838\uFF0C\u672C\u6761\u9996\u5BA1\u4F1A\u6298\u53E0\u4FDD\u7559\u5728\u8BC4\u8BBA\u5E95\u90E8\u3002`);
+    }
     if (banner.length) banner.push("");
     const servedLabel = servedBy && servedVia ? `${servedBy.id} via ${servedVia.provider}` : servedBy?.id;
-    const body = [
+    const priorLabel = prior && (prior.model === lane.first_pass?.id ? lane.first_pass.label : prior.model);
+    const carried = (content) => prior ? [
+      "",
+      `<details><summary>\u9996\u5BA1 \xB7 ${priorLabel} \xB7 \u63D0\u4EA4 ${prior.head.slice(0, 7)}</summary>`,
+      "",
+      firstPassBegin(lane.id, prior.head, prior.model),
+      content,
+      FIRST_PASS_END,
+      "",
+      "</details>"
+    ] : [];
+    const compose = (carriedContent) => [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
-      `## AI PR Review \xB7 Lane ${lane.id} \xB7 ${servedBy?.label ?? primary.label}`,
+      `## AI PR Review \xB7 Lane ${lane.id} \xB7 ${servedBy?.label ?? primary.label}${isFirstPass ? " \xB7 \u9996\u5BA1" : ""}`,
       "",
       `> \u5BA1\u6838\u63D0\u4EA4\uFF1A\`${reviewedHeadShortSha}\` \xB7 \u66F4\u65B0\u65F6\u95F4\uFF1A\`${reviewedAt}\` \xB7 \u6B64\u8BC4\u8BBA\u4F1A\u968F PR \u65B0\u63D0\u4EA4\u539F\u5730\u66F4\u65B0 \xB7 [Run](${runUrl})`,
       "",
       ...banner,
-      review,
+      ...isFirstPass ? [firstPassBegin(lane.id, reviewHeadSha, servedBy.id), withoutFirstPassMarkers(review), FIRST_PASS_END] : [review],
       "",
-      `<sub>${modelLine} \xB7 Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : "not reported"} \xB7 Commit: ${reviewedHeadShortSha} \xB7 [Run](${runUrl})</sub>`
+      `<sub>${modelLine} \xB7 Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : "not reported"} \xB7 Commit: ${reviewedHeadShortSha} \xB7 [Run](${runUrl})</sub>`,
+      ...carried(carriedContent)
     ].join("\n");
+    let body = compose(prior?.review);
+    if (prior && body.length > 65e3) body = compose("> \u9996\u5BA1\u5185\u5BB9\u8FC7\u957F\uFF0C\u672C\u6B21\u66F4\u65B0\u672A\u5C55\u5F00\uFF1B\u53EF\u5728\u672C\u8BC4\u8BBA\u7684\u7F16\u8F91\u5386\u53F2\u4E2D\u67E5\u770B\u3002");
     try {
       const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
       const priorLaneComments = existingComments.filter((comment) => comment.user?.login === "github-actions[bot]" && comment.body?.startsWith(marker + "\n"));

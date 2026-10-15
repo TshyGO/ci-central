@@ -327,7 +327,13 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const runResolver = new AsyncFunction('core', 'process', resolverScript);
 const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', 'require', reviewScript);
 
-const centralConfig = JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', 'TshyGO__NebulaLab.json'), 'utf8'));
+const repositoryConfig = (name) => JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', `TshyGO__${name}.json`), 'utf8'));
+// NebulaLab's own config (Lane B on Anthropic with a Sonnet first pass) has its own checks below.
+// The shared policy checks keep the Go Lane B every other repository still uses.
+const nebulaConfig = repositoryConfig('NebulaLab');
+const centralConfig = structuredClone(nebulaConfig);
+centralConfig.lanes = centralConfig.lanes.map((lane) => lane.id === 'B'
+  ? repositoryConfig('NebulaGraph-License-Service').lanes.find(({ id }) => id === 'B') : lane);
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
 const files = [patch('src/a.ts', 100), patch('tests/a.test.ts', 100)];
 const headSha = 'deadbeef'.repeat(5);
@@ -1516,4 +1522,90 @@ for (const invalid of [0, -1, 1.5, '300000', null]) {
   check(`invalid per-model timeout ${invalid} fails before dispatch`,
     r.captured.length === 0 && /request_timeout_ms must be a positive integer/.test(r.error?.message || ''));
 }
+
+// NebulaLab: Lane B on Anthropic. Sonnet 5.5 reviews a PR's first commit and Haiku 5.5 the later
+// ones, with the first review kept folded in the lane comment. Anthropic traffic leaves only
+// through the szlab Taiwan egress on a self-hosted review runner.
+const twEgress = { PR_REVIEW_CONFIG: JSON.stringify(nebulaConfig), RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' };
+const laneBCalls = (result) => result.captured.filter(({ lane }) => lane === 'B').map(({ model }) => model).join(',');
+const laneBBody = (result) => result.posted.filter((body) => body.includes('lane=B')).at(-1) || '';
+const firstPassMark = (head) => `<!-- ai-pr-review-first-pass:v1 lane=B head=${head} model=claude-sonnet-5-5 -->`;
+const commit = (sha) => ({ pulls: [{ ...pull, head: { ...pull.head, sha } }],
+  context: { ...context, payload: { pull_request: { number: 42, head: { sha } } } } });
+r = await scenario(healthy, twEgress);
+const firstPassBody = laneBBody(r);
+const sonnetCall = r.captured.find(({ lane, model }) => lane === 'B' && model === 'claude-sonnet-5-5');
+check('NebulaLab: the first review of a PR runs Sonnet 5.5 through the Taiwan egress only', !r.error
+  && laneBCalls(r) === 'claude-sonnet-5-5'
+  && sonnetCall?.url === 'https://lane-b.example.test/v1/messages' && sonnetCall.headers['x-api-key'] === 'lane-b-key'
+  && sonnetCall.proxy === 'http://192.168.122.1:17890' && sonnetCall.headers['x-opencode-session'] === undefined
+  && sonnetCall.body.output_config?.effort === 'high' && sonnetCall.body.max_tokens === 120000 && sonnetCall.body.thinking?.type === 'adaptive'
+  && r.logs.some((line) => line.includes('[Lane B/claude-sonnet-5-5] egress=tw-proxy'))
+  && r.logs.some((line) => line.includes('[Lane B] this PR has no first-pass review yet'))
+  && firstPassBody.includes('status=valid') && firstPassBody.includes('· Claude Sonnet 5.5 · 首审')
+  && firstPassBody.includes(firstPassMark(headSha)) && firstPassBody.includes('<!-- /ai-pr-review-first-pass:v1 -->')
+  && firstPassBody.includes('review claude-sonnet-5-5') && firstPassBody.includes('Lane B: claude-sonnet-5-5 (first pass)')
+  && !firstPassBody.includes('<details><summary>首审') && r.logs.some((line) => line.includes('Quorum gate: 3/3')));
+
+const nextHead = 'cafebabe'.repeat(5);
+r = await scenario(healthy, twEgress, { comments: [{ body: firstPassBody }], ...commit(nextHead) });
+const followUpBody = laneBBody(r);
+check('NebulaLab: later commits go to Haiku 5.5 and keep the first review folded in the same comment', !r.error
+  && laneBCalls(r) === 'claude-haiku-5-5'
+  && r.captured.find(({ model }) => model === 'claude-haiku-5-5')?.proxy === 'http://192.168.122.1:17890'
+  && r.comments.filter(({ body }) => body.startsWith('<!-- ai-pr-review-bot:lane-B -->\n')).length === 1
+  && followUpBody.includes(`head=${nextHead}`) && followUpBody.includes('## AI PR Review · Lane B · Claude Haiku 5.5\n')
+  && followUpBody.includes(`<details><summary>首审 · Claude Sonnet 5.5 · 提交 ${headSha.slice(0, 7)}</summary>`)
+  && followUpBody.includes(firstPassMark(headSha)) && followUpBody.includes('review claude-sonnet-5-5')
+  && followUpBody.includes('review claude-haiku-5-5') && !followUpBody.includes('未产生可用审核'));
+r = await scenario(healthy, twEgress, { useBundle: true });
+const bundledFirstPass = laneBBody(r);
+r = await scenario(healthy, twEgress, { useBundle: true, comments: [{ body: bundledFirstPass }], ...commit(nextHead) });
+check('NebulaLab: the bundled runner marks the first pass and carries it to later commits', !r.error
+  && bundledFirstPass.includes(firstPassMark(headSha)) && laneBCalls(r) === 'claude-haiku-5-5' && laneBBody(r).includes(firstPassMark(headSha)));
+r = await scenario(healthy, twEgress, { comments: [{ body: followUpBody }], ...commit('abad1dea'.repeat(5)) });
+check('NebulaLab: the folded first review survives every later commit unchanged', !r.error && laneBCalls(r) === 'claude-haiku-5-5'
+  && laneBBody(r).includes(firstPassMark(headSha)) && (laneBBody(r).match(/ai-pr-review-first-pass:v1 lane=/g) || []).length === 1);
+r = await scenario(healthy, twEgress, { comments: [{ body: firstPassBody.replace('review claude-sonnet-5-5', 'x'.repeat(70000)) }], ...commit(nextHead) });
+check('NebulaLab: an oversized folded first review keeps its mark but yields its text', !r.error && laneBCalls(r) === 'claude-haiku-5-5'
+  && laneBBody(r).length < 65536 && laneBBody(r).includes(firstPassMark(headSha)) && laneBBody(r).includes('首审内容过长'));
+
+r = await scenario((call) => call.model === 'claude-sonnet-5-5' ? reply(503, '{"error":"overloaded"}') : healthy(call), twEgress);
+const unmarkedBody = laneBBody(r);
+check('NebulaLab: when the first pass cannot serve, Haiku reviews without a first-pass mark or a degraded banner', !r.error
+  && laneBCalls(r) === 'claude-sonnet-5-5,claude-haiku-5-5' && unmarkedBody.includes('status=valid')
+  && !unmarkedBody.includes('ai-pr-review-first-pass') && !unmarkedBody.includes('未产生可用审核'));
+r = await scenario(healthy, twEgress, { comments: [{ body: unmarkedBody }], ...commit(nextHead) });
+check('NebulaLab: so the next commit tries the first pass again', !r.error && laneBCalls(r) === 'claude-sonnet-5-5'
+  && laneBBody(r).includes(firstPassMark(nextHead)));
+
+for (const [label, overrides, quorumHolds] of [
+  ['a GitHub-hosted runner', { RUNNER_ENVIRONMENT: 'github-hosted' }, true],
+  ['the VPS proxy', { NEBULA_REVIEW_PROXY_URL: 'http://177.201.224.95:13128' }, true],
+  ['a self-hosted runner without a review proxy', { NEBULA_REVIEW_PROXY_URL: undefined }, false],
+]) {
+  r = await scenario(healthy, { ...twEgress, ...overrides });
+  check(`NebulaLab: Anthropic is refused on ${label}`, !r.captured.some(({ lane }) => lane === 'B')
+    && laneBBody(r).includes('status=diagnostic') && laneBBody(r).includes('only through the szlab Taiwan egress')
+    && (!quorumHolds || (!r.error && r.logs.some((line) => line.includes('Quorum gate: 2/3')))));
+}
+
+r = await scenario((call) => call.lane === 'B' ? reply(402, '{"type":"error","error":{"type":"billing_error","message":"insufficient credit"}}') : healthy(call), twEgress);
+const overflowHaiku = r.captured.find(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5');
+check('NebulaLab: an exhausted Anthropic credit sends Haiku once to Command Code through the Lane C slot', !r.error
+  && laneBCalls(r) === 'claude-sonnet-5-5,claude-haiku-5-5'
+  && overflowHaiku?.url === 'https://lane-c.example.test/v1/messages' && overflowHaiku.headers['x-api-key'] === 'lane-c-key'
+  && overflowHaiku.proxy === undefined && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'claude-sonnet-5-5')
+  && laneBBody(r).includes('Lane B: claude-haiku-5-5 via command-code claude-haiku-5-5 (anthropic quota exhausted)')
+  && !laneBBody(r).includes('ai-pr-review-first-pass'));
+r = await scenario((call) => call.lane === 'B' ? Promise.reject(unserved(400, { providerType: 'invalid_request_error', creditExhausted: true })) : healthy(call), twEgress);
+check('NebulaLab: a 400 "credit balance is too low" is an exhausted credit too', !r.error
+  && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5').length === 1);
+r = await scenario((call) => call.lane === 'B' ? Promise.reject(unserved(400, { providerType: 'invalid_request_error' })) : healthy(call), twEgress);
+check('NebulaLab: an ordinary 400 never leaves Anthropic', !r.error
+  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5')
+  && laneBBody(r).includes('status=diagnostic') && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
+r = await scenario((call) => call.lane === 'B' ? reply(402, '{"type":"error","error":{"type":"billing_error"}}') : healthy(call),
+  { ...twEgress, LANE_C_KEY: '', LANE_C_API_BASE: '' });
+check('NebulaLab: without the Lane C slot an exhausted credit says so', laneBBody(r).includes('Anthropic API credit balance is exhausted'));
 if (checks.some((value) => !value)) process.exitCode = 1;

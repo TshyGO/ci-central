@@ -460,6 +460,10 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     const providerError = error.error?.error && typeof error.error.error === 'object' ? error.error.error : error.error;
     sanitized.providerCode = safeCode(providerError?.code) || code;
     sanitized.providerType = safeCode(providerError?.type);
+    // Only a boolean leaves: Anthropic reports an exhausted credit balance as 402 billing_error,
+    // or as a 400 whose message says the credit balance is too low.
+    sanitized.creditExhausted = sanitized.status === 402 || providerError?.type === 'billing_error'
+      || /credit balance is too low/i.test(typeof providerError?.message === 'string' ? providerError.message : '');
     if (signal?.aborted) sanitized.code = 'REVIEW_DEADLINE';
     sanitized.httpStatus = Number.isInteger(timing.status) ? timing.status : undefined;
     // No model output reached us (rejected, or queued and closed before any token),

@@ -29,32 +29,43 @@ assert.match(probeScript, /request\.max_tokens = 512\b/, 'provider probe must le
 assert.match(probeScript, /foreach \(\$modelConfig in \$models\) \{\s*\$model = \$modelConfig\.id\s*[\s\S]*?\$protocol = if \(\[string\]::IsNullOrWhiteSpace\(\$modelConfig\.protocol\)\) \{ \$laneConfig\.protocol \} else \{ \$modelConfig\.protocol \}/, 'provider probe must validate every configured model with its own protocol');
 assert.match(probeScript, /elseif \(\$protocol -eq 'google-generate-content'\)[\s\S]*?inference\/go\/v1/, 'Go Gemini probe must use the inference endpoint');
 assert.match(probeScript, /elseif \(\$protocol -eq 'anthropic-messages'\)[\s\S]*?'x-api-key' = \$key/, 'Anthropic Messages probe must authenticate with x-api-key');
+// NebulaLab's Lane B runs on Anthropic: Sonnet 5.5 reviews each PR's first commit and Haiku 5.5
+// the later ones, on one provider and key. The other repositories keep Haiku on OpenCode Go.
+const anthropicLaneB = new Set(['TshyGO/NebulaLab']);
 for (const repository of repositories) {
   const fromSource = source.loadConfig(repository, actionPath);
   const fromBundle = bundled.loadConfig(repository, actionPath);
+  const onAnthropic = anthropicLaneB.has(repository);
   assert.equal(fromSource.review_policy.max_attempts, 1);
-  assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 1));
+  assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === (onAnthropic && lane.id === 'B' ? 0 : 1)));
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
   // Lanes A/B draw on the OpenCode Go plan and Lane C on Command Code, so one exhausted plan
   // never empties every lane; each lane keeps its fallback with the same provider and key.
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', 'opencode-go', 'command-code'], `${repository} lane providers changed`);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', onAnthropic ? 'anthropic' : 'opencode-go', 'command-code'], `${repository} lane providers changed`);
   // Go's quota is one pool, so when it runs out Lanes A/B overflow to the same models on
   // Command Code through the Lane C slot. Command Code GOAT served all four on 2026-10-15.
+  // An exhausted Anthropic credit sends NebulaLab's Haiku the same way.
   assert.deepEqual(fromSource.lanes.map((lane) => [lane.primary, ...lane.fallbacks].map((model) => model.quota_overflow ?? null)), [
     [{ credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' }, { credential_lane: 'C', id: 'meta/muse-spark-1.2-contributor' }],
-    [{ credential_lane: 'C', id: 'claude-haiku-5-5' }, { credential_lane: 'C', id: 'moonshotai/Kimi-K2.7-Code' }],
+    onAnthropic ? [{ credential_lane: 'C', id: 'claude-haiku-5-5' }]
+      : [{ credential_lane: 'C', id: 'claude-haiku-5-5' }, { credential_lane: 'C', id: 'moonshotai/Kimi-K2.7-Code' }],
     [null, null],
-  ], `${repository} quota overflow must map each Go model to the same model on Command Code`);
+  ], `${repository} quota overflow must map each model to the same model on Command Code`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
   assert.equal(fromSource.lanes[2].fallbacks[0].id, 'zai-org/GLM-5.3');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
   assert.equal(fromSource.lanes[2].fallbacks[0].max_output_tokens, 65536);
-  assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'kimi-k2.7-code', `${repository} Lane B must fall back to Go-hosted Kimi K2.7 Code`);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'zai-org/GLM-5.3']);
-  // Lane B's Kimi fallback speaks chat completions while its Haiku primary does not.
-  assert.equal(fromSource.lanes[1].fallbacks[0].protocol, 'openai-chat-completions', `${repository} the Kimi fallback must name its own protocol`);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)),
+    onAnthropic ? ['muse-spark-1.2-contributor', 'zai-org/GLM-5.3'] : ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'zai-org/GLM-5.3']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.first_pass?.id ?? null), [null, onAnthropic ? 'claude-sonnet-5-5' : null, null],
+    `${repository} only NebulaLab's Lane B has a first pass`);
+  if (!onAnthropic) {
+    assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'kimi-k2.7-code', `${repository} Lane B must fall back to Go-hosted Kimi K2.7 Code`);
+    // Lane B's Kimi fallback speaks chat completions while its Haiku primary does not.
+    assert.equal(fromSource.lanes[1].fallbacks[0].protocol, 'openai-chat-completions', `${repository} the Kimi fallback must name its own protocol`);
+  }
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
   assert.equal(fromSource.lanes[1].primary.effort, 'high', `${repository} Haiku must stay at high effort`);
   // Calibration took Muse and Hy3 from near-silent to 1-5 findings on large NebulaLab PRs with no
@@ -89,7 +100,7 @@ for (const repository of repositories) {
   // room for larger changes under its 128K ceiling.
   assert.deepEqual(
     [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-    [120000, 65536],
+    anthropicLaneB.has(repository) ? [120000] : [120000, 65536],
     `${repository} Lane B must preserve the Haiku output ceiling and the Kimi fallback ceiling`,
   );
   assert.equal(config.lanes[1].request_timeout_ms, 1800000, `${repository} Lane B preserves reasoning with a thirty-minute request ceiling`);
@@ -103,7 +114,13 @@ for (const repository of repositories) {
   assert.equal(config.lanes[2].fallbacks[0].request_timeout_ms, 1800000, `${repository} the GLM 5.3 fallback keeps its thirty-minute window`);
   // Measured 2026-10-14: Haiku finished 71-226K-token NebulaLab PRs in 146-211 s.
   assert.equal(config.lanes[1].primary.request_timeout_ms, 900000, `${repository} Lane B Haiku primary uses a fifteen-minute window`);
-  assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 900000, `${repository} Lane B Kimi fallback keeps its measured fifteen-minute window`);
+  if (anthropicLaneB.has(repository)) {
+    // Measured 2026-10-15 through the TW egress: Sonnet 5.5 finished 71-226K-token NebulaLab PRs
+    // in 54-174 s. Its fifteen minutes and Haiku's fit the lane's thirty together.
+    assert.equal(config.lanes[1].first_pass.request_timeout_ms, 900000, `${repository} the Sonnet first pass uses a fifteen-minute window`);
+  } else {
+    assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 900000, `${repository} Lane B Kimi fallback keeps its measured fifteen-minute window`);
+  }
   // A/C budgets are deliberately unchanged even where advisory C can outlast B.
 }
 
@@ -137,6 +154,7 @@ const inputTokenRoom = {
   'muse-spark-1.3-contributor': 1048576,
   'muse-spark-1.2-contributor': 1048576,
   'claude-haiku-5-5': 1000000,
+  'claude-sonnet-5-5': 1000000,
   'glm-5.3': 1000000,
   'kimi-k2.7-code': 262144,
   hy3: 192000,
@@ -148,7 +166,7 @@ const inputTokenRoom = {
   'meta/muse-spark-1.2-contributor': 1048576,
   'moonshotai/Kimi-K2.7-Code': 256000,
 };
-const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'tencent/hy3-paid', 'moonshotai/Kimi-K2.7-Code']);
+const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'moonshotai/Kimi-K2.7-Code']);
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
   const policy = config.review_policy;
@@ -165,7 +183,7 @@ for (const repository of repositories) {
     `${repository} Lane A needs a longer window for 1M-token inputs`);
   const promptChars = policy.issue_char_budget + policy.description_char_limit + 40000;
   for (const lane of config.lanes) {
-    for (const model of [lane.primary, ...lane.fallbacks]) {
+    for (const model of [...(lane.first_pass ? [lane.first_pass] : []), lane.primary, ...lane.fallbacks]) {
       const diffChars = model.diff_char_budget ?? policy.diff_char_budget;
       const sharedOutput = sharesWindowWithOutput.has(model.id) ? model.max_output_tokens : 0;
       assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + sharedOutput <= inputTokenRoom[model.id],
@@ -183,11 +201,36 @@ for (const repository of repositories) {
 
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'opencode-go');
-assert.equal(nebula.lanes[1].provider, 'opencode-go');
+assert.equal(nebula.lanes[1].provider, 'anthropic');
 assert.equal(nebula.lanes[2].provider, 'command-code');
 assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
 assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
+// Sonnet 5.5 found real defects Haiku missed and none of Haiku's false P1s on NebulaLab
+// #1133/#1237/#1241 (2026-10-15), at 0.4x Haiku's output. A first review sees a median 97% of
+// the final diff, so it runs once per PR and Haiku reviews the later commits.
+assert.deepEqual(nebula.lanes[1].first_pass, {
+  id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', request_timeout_ms: 900000, context_profile: 'full',
+  max_output_tokens: 120000, effort: 'high', diff_char_budget: 1200000,
+}, 'NebulaLab Lane B first pass changed without a measurement behind it');
+assert.equal(nebula.lanes[1].primary.reporting_calibration, undefined, 'Haiku stays uncalibrated');
+
+// A first pass is validated like any lane model, stays on the lane's own provider, and cannot
+// share an id with the models that follow it.
+for (const loader of [source, bundled]) {
+  for (const [mutate, message] of [
+    [(config) => { config.lanes[1].first_pass.quota_overflow = { credential_lane: 'C', id: 'claude-sonnet-5-5' }; }, /first_pass cannot configure quota_overflow/],
+    [(config) => { config.lanes[1].first_pass.id = config.lanes[1].primary.id; }, /duplicate first-pass\/primary\/fallback/],
+    [(config) => { config.lanes[1].first_pass.effort = 'extreme'; }, /first_pass\.effort is not supported/],
+    [(config) => { config.lanes[1].first_pass.temperature = 0.2; }, /first_pass\.temperature is not supported by anthropic-messages/],
+    [(config) => { config.lanes[1].first_pass.max_output_tokens = 0; }, /first_pass\.max_output_tokens must be a positive integer/],
+    [(config) => { config.lanes[1].first_pass = 'claude-sonnet-5-5'; }, /first_pass must be an object/],
+  ]) {
+    const config = structuredClone(nebula);
+    mutate(config);
+    assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), message);
+  }
+}
 
 for (const loader of [source, bundled]) {
   const badAttempts = structuredClone(nebula);
@@ -200,7 +243,7 @@ for (const loader of [source, bundled]) {
 for (const loader of [source, bundled]) {
   for (const invalid of [0, -1, 1.5, '300000', null]) {
     const config = structuredClone(nebula);
-    config.lanes[1].fallbacks[0].request_timeout_ms = invalid;
+    config.lanes[2].fallbacks[0].request_timeout_ms = invalid;
     assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), /request_timeout_ms must be a positive integer/);
   }
 }
@@ -210,7 +253,7 @@ assert.doesNotThrow(() => source.validateConfig(duplicateAcrossLanes, 'TshyGO/Ne
 
 const duplicateInsideLane = structuredClone(nebula);
 duplicateInsideLane.lanes[0].fallbacks[0].id = duplicateInsideLane.lanes[0].primary.id;
-assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab'), /duplicate primary\/fallback/);
+assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab'), /duplicate first-pass\/primary\/fallback/);
 
 const invalidThinkingLevel = structuredClone(nebula);
 invalidThinkingLevel.lanes[2].protocol = 'google-generate-content';
@@ -253,7 +296,9 @@ for (const loader of [source, bundled]) {
   for (const [mutate, message] of [
     [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'A'; }, /must name another configured lane/],
     [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'D'; }, /must name another configured lane/],
-    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'B'; }, /provider other than the lane's own/],
+    // NebulaLab's Lane B is on Anthropic, and its Haiku overflows itself.
+    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'B'; }, /cannot target a lane that overflows itself/],
+    [(config) => { config.lanes[1].provider = 'opencode-go'; config.lanes[1].primary.quota_overflow.credential_lane = 'A'; }, /provider other than the lane's own/],
     [(config) => { config.lanes[0].primary.quota_overflow.id = ' '; }, /quota_overflow\.id must be a non-empty string/],
     [(config) => { config.lanes[0].primary.quota_overflow.provider = 'other'; }, /only credential_lane and id/],
     [(config) => { config.lanes[0].primary.quota_overflow = 'C'; }, /only credential_lane and id/],

@@ -48,10 +48,19 @@
     },
     {
       "id": "B",
-      "provider": "opencode-go",
+      "provider": "anthropic",
       "protocol": "anthropic-messages",
       "request_timeout_ms": 1800000,
       "model_budget_ms": 1800000,
+      "first_pass": {
+        "id": "claude-sonnet-5-5",
+        "label": "Claude Sonnet 5.5",
+        "request_timeout_ms": 900000,
+        "context_profile": "full",
+        "max_output_tokens": 120000,
+        "effort": "high",
+        "diff_char_budget": 1200000
+      },
       "primary": {
         "id": "claude-haiku-5-5",
         "label": "Claude Haiku 5.5",
@@ -65,20 +74,7 @@
           "id": "claude-haiku-5-5"
         }
       },
-      "fallbacks": [
-        {
-          "id": "kimi-k2.7-code",
-          "label": "Kimi K2.7 Code",
-          "protocol": "openai-chat-completions",
-          "request_timeout_ms": 900000,
-          "context_profile": "full",
-          "max_output_tokens": 65536,
-          "quota_overflow": {
-            "credential_lane": "C",
-            "id": "moonshotai/Kimi-K2.7-Code"
-          }
-        }
-      ]
+      "fallbacks": []
     },
     {
       "id": "C",

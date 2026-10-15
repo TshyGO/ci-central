@@ -1420,7 +1420,8 @@ ${fence}
       "",
       "</details>"
     ] : [];
-    const compose = (carriedContent) => [
+    const mainReview = withoutFirstPassMarkers(review);
+    const compose = (main, carriedContent) => [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
       `## AI PR Review \xB7 Lane ${lane.id} \xB7 ${servedBy?.label ?? primary.label}${isFirstPass ? " \xB7 \u9996\u5BA1" : ""}`,
@@ -1428,13 +1429,20 @@ ${fence}
       `> \u5BA1\u6838\u63D0\u4EA4\uFF1A\`${reviewedHeadShortSha}\` \xB7 \u66F4\u65B0\u65F6\u95F4\uFF1A\`${reviewedAt}\` \xB7 \u6B64\u8BC4\u8BBA\u4F1A\u968F PR \u65B0\u63D0\u4EA4\u539F\u5730\u66F4\u65B0 \xB7 [Run](${runUrl})`,
       "",
       ...banner,
-      ...isFirstPass ? [firstPassBegin(lane.id, reviewHeadSha, servedBy.id), withoutFirstPassMarkers(review), FIRST_PASS_END] : [review],
+      ...isFirstPass ? [firstPassBegin(lane.id, reviewHeadSha, servedBy.id), main, FIRST_PASS_END] : [main],
       "",
       `<sub>${modelLine} \xB7 Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : "not reported"} \xB7 Commit: ${reviewedHeadShortSha} \xB7 [Run](${runUrl})</sub>`,
       ...carried(carriedContent)
     ].join("\n");
-    let body = compose(prior?.review);
-    if (prior && body.length > 65e3) body = compose("> \u9996\u5BA1\u5185\u5BB9\u8FC7\u957F\uFF0C\u672C\u6B21\u66F4\u65B0\u672A\u5C55\u5F00\uFF1B\u53EF\u5728\u672C\u8BC4\u8BBA\u7684\u7F16\u8F91\u5386\u53F2\u4E2D\u67E5\u770B\u3002");
+    const foldedNote = "> \u9996\u5BA1\u5185\u5BB9\u8FC7\u957F\uFF0C\u672C\u6B21\u66F4\u65B0\u672A\u5C55\u5F00\uFF1B\u53EF\u5728\u672C\u8BC4\u8BBA\u7684\u7F16\u8F91\u5386\u53F2\u4E2D\u67E5\u770B\u3002";
+    let body = compose(mainReview, prior?.review);
+    if (prior && body.length > 65e3) body = compose(mainReview, foldedNote);
+    if (body.length > 65e3) {
+      const keep = Math.max(0, mainReview.length - (body.length - 64e3));
+      body = compose(`${mainReview.slice(0, keep)}
+
+> \u5BA1\u6838\u5185\u5BB9\u8D85\u8FC7 GitHub \u8BC4\u8BBA\u957F\u5EA6\u4E0A\u9650\uFF0C\u5DF2\u622A\u65AD\u3002`, prior ? foldedNote : void 0);
+    }
     try {
       const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
       const priorLaneComments = existingComments.filter((comment) => comment.user?.login === "github-actions[bot]" && comment.body?.startsWith(marker + "\n"));

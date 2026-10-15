@@ -793,7 +793,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const carried = (content) => prior ? ['',
       `<details><summary>首审 · ${priorLabel} · 提交 ${prior.head.slice(0, 7)}</summary>`, '',
       firstPassBegin(lane.id, prior.head, prior.model), content, FIRST_PASS_END, '', '</details>'] : [];
-    const compose = (carriedContent) => [
+    // Model output is untrusted: no review may carry a first-pass mark the runner did not write.
+    const mainReview = withoutFirstPassMarkers(review);
+    const compose = (main, carriedContent) => [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
       `## AI PR Review · Lane ${lane.id} · ${servedBy?.label ?? primary.label}${isFirstPass ? ' · 首审' : ''}`,
@@ -801,15 +803,21 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       `> 审核提交：\`${reviewedHeadShortSha}\` · 更新时间：\`${reviewedAt}\` · 此评论会随 PR 新提交原地更新 · [Run](${runUrl})`,
       '',
       ...banner,
-      ...(isFirstPass ? [firstPassBegin(lane.id, reviewHeadSha, servedBy.id), withoutFirstPassMarkers(review), FIRST_PASS_END] : [review]),
+      ...(isFirstPass ? [firstPassBegin(lane.id, reviewHeadSha, servedBy.id), main, FIRST_PASS_END] : [main]),
       '',
       `<sub>${modelLine} · Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : 'not reported'} · Commit: ${reviewedHeadShortSha} · [Run](${runUrl})</sub>`,
       ...carried(carriedContent),
     ].join('\n');
-    let body = compose(prior?.review);
     // GitHub rejects comments over 65536 characters. The marker must survive so the PR never
-    // gets a second first pass; the folded text yields to the comment's edit history.
-    if (prior && body.length > 65000) body = compose('> 首审内容过长，本次更新未展开；可在本评论的编辑历史中查看。');
+    // gets a second first pass: the folded text yields to the edit history first, then the
+    // review itself is trimmed rather than losing the whole comment.
+    const foldedNote = '> 首审内容过长，本次更新未展开；可在本评论的编辑历史中查看。';
+    let body = compose(mainReview, prior?.review);
+    if (prior && body.length > 65000) body = compose(mainReview, foldedNote);
+    if (body.length > 65000) {
+      const keep = Math.max(0, mainReview.length - (body.length - 64000));
+      body = compose(`${mainReview.slice(0, keep)}\n\n> 审核内容超过 GitHub 评论长度上限，已截断。`, prior ? foldedNote : undefined);
+    }
     try {
       const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
       const priorLaneComments = existingComments.filter((comment) =>

@@ -694,9 +694,9 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:hy3');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:tencent/hy3-paid');
 check('healthy path never calls a fallback', r.captured.length === 3
-  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'glm-5.3'].includes(model)));
+  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'zai-org/GLM-5.3'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -711,9 +711,9 @@ check('no leftover Markdown instruction contradicts the JSON contract, which is 
   && [healthyLaneA, healthyLaneB, healthyLaneC].every((body) =>
     !systemText(body).includes('Markdown review') && systemText(body).includes('final JSON report')
     && userText(body).trimEnd().endsWith('a Markdown review cannot be accepted.')));
-// Hy3 uses Go's Chat Completions endpoint, preserving the Lane C output ceiling.
-check('Lane C uses Hy3 over Chat Completions without Google thinking fields',
-  healthyLaneC?.model === 'hy3'
+// Lane C runs Hy3 through Command Code's Chat Completions endpoint, preserving its output ceiling.
+check('Lane C uses Command Code Hy3 over Chat Completions without Google thinking fields',
+  healthyLaneC?.model === 'tencent/hy3-paid'
   && healthyLaneC?.max_tokens === 65536
   && healthyLaneC?.temperature === undefined
   && healthyLaneC?.generationConfig === undefined);
@@ -807,29 +807,29 @@ const firstCallFails = (lane, model, error) => {
   return (call) => call.lane === lane && call.model === model && calls++ === 0 ? Promise.reject(error) : healthy(call);
 };
 const sessions = (result, model) => result.captured.filter((call) => call.model === model).map((call) => call.headers['x-opencode-session']);
-r = await scenario(firstCallFails('C', 'hy3', unserved(429)));
+r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(429)));
 check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
-  && sessions(r, 'hy3').length === 2 && sessions(r, 'hy3')[1] === `${sessions(r, 'hy3')[0]}-resend`
-  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'glm-5.3') && r.timeouts.includes(30000)
+  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2
+  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3') && r.timeouts.includes(30000)
   && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by'))
   && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
-r = await scenario(firstCallFails('C', 'hy3', unserved(429, { retryAfterMs: 5000 })));
+r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(429, { retryAfterMs: 5000 })));
 check('a provider retry-after paces the single resend', !r.error && r.timeouts.includes(5000) && !r.timeouts.includes(30000));
-r = await scenario(firstCallFails('C', 'hy3', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
+r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
 check('a stream queued and closed before any output is resent immediately', !r.error
-  && sessions(r, 'hy3').length === 2 && r.timeouts.includes(0));
-r = await scenario((call) => call.model === 'hy3' ? Promise.reject(unserved(503)) : healthy(call));
+  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.timeouts.includes(0));
+r = await scenario((call) => call.model === 'tencent/hy3-paid' ? Promise.reject(unserved(503)) : healthy(call));
 check('a resend that is also unserved falls back once instead of retrying again', !r.error
-  && sessions(r, 'hy3').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'glm-5.3').length === 1
-  && r.posted.some((body) => body.includes('served by glm-5.3')));
+  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3').length === 1
+  && r.posted.some((body) => body.includes('served by zai-org/GLM-5.3')));
 for (const [label, error] of [
   ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
   ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
   ['the local deadline', Object.assign(new Error('AI endpoint request aborted (model deadline reached).'), { name: 'AbortError', unserved: false })],
 ]) {
-  r = await scenario(firstCallFails('C', 'hy3', error));
-  check(`${label} are never resent`, sessions(r, 'hy3').length === 1
-    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'glm-5.3').length === 1);
+  r = await scenario(firstCallFails('C', 'tencent/hy3-paid', error));
+  check(`${label} are never resent`, r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 1
+    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3').length === 1);
 }
 r = await scenario(firstCallFails('B', 'claude-haiku-5-5', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model', !r.error
@@ -975,7 +975,9 @@ check('self-hosted Go proxies Muse and Haiku, which are not verified for direct 
   !r.error
   && ['A', 'B'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
   && r.captured.find(c => c.lane === 'C')?.proxy === undefined
-  && ['A', 'B', 'C'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
+  && ['A', 'B'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
+  // Command Code (Lane C) has no session-routing header.
+  && r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session'] === undefined
   && r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session'] !== r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session']);
 for (const useBundle of [false, true]) {
   r = await scenario(call => call.model === 'muse-spark-1.3-contributor'
@@ -999,7 +1001,9 @@ for (const invalidProxy of ['', 'http://unapproved.example:17890', 'http://192.1
 }
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'custom-runner',
   NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
-check('unknown runtime cannot use the local szlab exception', r.captured.length === 0);
+// The Go proxy requirement is Go's alone: only Command Code's Lane C dispatches on an unknown runtime.
+check('unknown runtime cannot use the local szlab exception', r.captured.length === 1
+  && r.captured[0].model === 'tencent/hy3-paid' && r.captured[0].proxy === undefined);
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'github-hosted',
   NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
 check('GitHub hosted ignores the model proxy override', !r.error && r.captured.every(c => c.proxy === undefined));
@@ -1011,7 +1015,7 @@ check('missing Muse proxy does not block direct B/C evidence or weaken the two-r
 for (const runtime of ['', 'custom-runner']) {
   r = await scenario(healthy, { RUNNER_ENVIRONMENT: runtime, https_proxy: '', HTTPS_PROXY: '' });
   check(`unknown runtime ${runtime || 'missing'} cannot bypass the Go proxy requirement`,
-    r.captured.length === 0);
+    r.captured.every((call) => call.lane === 'C' && call.model === 'tencent/hy3-paid'));
 }
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://unapproved.example:13128' });
 check('self-hosted Go rejects an unapproved Muse proxy while verified models stay direct',
@@ -1059,13 +1063,13 @@ check('Lane B falls back once only to Go Kimi K2.7 Code over chat completions',
   && !r.captured.some(({ model }) => model === 'glm-5.3')
   && r.posted.some((body) => body.includes('claude-haiku-5-5 unavailable -> served by kimi-k2.7-code')));
 
-r = await scenario((call) => call.lane === 'C' && call.model === 'hy3' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to Go GLM 5.3 after one failed Hy3 request',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1
-  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'hy3,glm-5.3'
-  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'glm-5.3')?.body.max_tokens === 65536
-  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'glm-5.3')?.body.temperature === 0.2
-  && r.posted.some((body) => body.includes('hy3 unavailable -> served by glm-5.3')));
+r = await scenario((call) => call.lane === 'C' && call.model === 'tencent/hy3-paid' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+check('Lane C falls back only to Command Code GLM 5.3 after one failed Hy3 request',
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'tencent/hy3-paid').length === 1
+  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'tencent/hy3-paid,zai-org/GLM-5.3'
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3')?.body.max_tokens === 65536
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3')?.body.temperature === 0.2
+  && r.posted.some((body) => body.includes('tencent/hy3-paid unavailable -> served by zai-org/GLM-5.3')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
@@ -1147,7 +1151,7 @@ const goModelsConfig = structuredClone(centralConfig);
 goModelsConfig.lanes[1] = { ...goModelsConfig.lanes[1], protocol: 'anthropic-messages',
   primary: { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', context_profile: 'full', max_output_tokens: 65536, effort: 'high', diff_char_budget: 1200000 },
   fallbacks: [{ id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', protocol: 'openai-chat-completions', request_timeout_ms: 900000, context_profile: 'full', max_output_tokens: 65536 }] };
-goModelsConfig.lanes[2] = { ...goModelsConfig.lanes[2], protocol: 'google-generate-content',
+goModelsConfig.lanes[2] = { ...goModelsConfig.lanes[2], provider: 'opencode-go', protocol: 'google-generate-content',
   primary: { id: 'gemini-4-argon-contributor', label: 'Gemini 4 Argon Contributor', context_profile: 'full', max_output_tokens: 65536, thinking_level: 'high', diff_char_budget: 1200000, reporting_calibration: true },
   fallbacks: [{ id: 'hy3', label: 'Hy3', protocol: 'openai-chat-completions', context_profile: 'full', max_output_tokens: 65536 }] };
 const goModelsEnv = { PR_REVIEW_CONFIG: JSON.stringify(goModelsConfig), LANE_B_API_BASE: 'https://opencode.ai/zen/go/v1',

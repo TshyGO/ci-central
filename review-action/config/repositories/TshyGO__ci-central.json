@@ -66,23 +66,23 @@
     },
     {
       "id": "C",
-      "provider": "opencode-go",
+      "provider": "command-code",
       "protocol": "openai-chat-completions",
       "advisory": true,
       "resend_unserved": true,
       "request_timeout_ms": 900000,
       "model_budget_ms": 1800000,
       "primary": {
-        "id": "hy3",
-        "label": "Hy3",
+        "id": "tencent/hy3-paid",
+        "label": "Hy3 (Command Code)",
         "context_profile": "full",
         "max_output_tokens": 65536,
         "reporting_calibration": true
       },
       "fallbacks": [
         {
-          "id": "glm-5.3",
-          "label": "GLM 5.3",
+          "id": "zai-org/GLM-5.3",
+          "label": "GLM 5.3 (Command Code)",
           "request_timeout_ms": 1800000,
           "context_profile": "full",
           "max_output_tokens": 65536,

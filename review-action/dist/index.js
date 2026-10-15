@@ -52,6 +52,33 @@ function validateModel(model, location) {
   }
 }
 
+// The one cross-provider path: a plan quota covers the whole provider account, so when it is
+// exhausted the same model may be asked once through the provider behind another lane's fixed
+// secret slot. It stays this lane's review, by the same model; nothing else crosses providers.
+function validateQuotaOverflow(config, lane, model, protocol, location) {
+  const overflow = model.quota_overflow;
+  if (!overflow || typeof overflow !== 'object' || Array.isArray(overflow)
+    || Object.keys(overflow).some((key) => !['credential_lane', 'id'].includes(key))) {
+    throw new Error(`${location}.quota_overflow must be an object with only credential_lane and id.`);
+  }
+  if (typeof overflow.id !== 'string' || !overflow.id.trim()) {
+    throw new Error(`${location}.quota_overflow.id must be a non-empty string.`);
+  }
+  const target = config.lanes.find((candidate) => candidate?.id === overflow.credential_lane);
+  if (!target || overflow.credential_lane === lane.id) {
+    throw new Error(`${location}.quota_overflow.credential_lane must name another configured lane.`);
+  }
+  if (typeof target.provider !== 'string' || target.provider === lane.provider) {
+    throw new Error(`${location}.quota_overflow must use a provider other than the lane's own; a quota covers the whole provider.`);
+  }
+  if (protocol === 'google-generate-content') {
+    throw new Error(`${location}.quota_overflow is not supported by google-generate-content.`);
+  }
+  if ([target.primary, ...(Array.isArray(target.fallbacks) ? target.fallbacks : [])].some((candidate) => candidate?.quota_overflow !== undefined)) {
+    throw new Error(`${location}.quota_overflow cannot target a lane that overflows itself.`);
+  }
+}
+
 function validateConfig(config, repository) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) {
     throw new Error('Repository config must be a JSON object.');
@@ -123,6 +150,7 @@ function validateConfig(config, repository) {
       if (model.temperature !== undefined && protocol === 'anthropic-messages') {
         throw new Error(`${modelLocation}.temperature is not supported by anthropic-messages.`);
       }
+      if (model.quota_overflow !== undefined) validateQuotaOverflow(config, lane, model, protocol, modelLocation);
       if (model.thinking_level === undefined) continue;
       if (protocol !== 'google-generate-content') {
         throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);

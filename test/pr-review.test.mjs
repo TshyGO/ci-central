@@ -1071,7 +1071,12 @@ check('Lane C falls back only to Command Code GLM 5.3 after one failed Hy3 reque
   && r.captured.find(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3')?.body.temperature === 0.2
   && r.posted.some((body) => body.includes('tencent/hy3-paid unavailable -> served by zai-org/GLM-5.3')));
 
-r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
+// Without a configured overflow, a plan quota keeps the lane on its own provider: the
+// fallback is tried once and the lane publishes a quota diagnostic.
+const noOverflowConfig = structuredClone(centralConfig);
+for (const lane of noOverflowConfig.lanes) for (const model of [lane.primary, ...lane.fallbacks]) delete model.quota_overflow;
+r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call),
+  { PR_REVIEW_CONFIG: JSON.stringify(noOverflowConfig) });
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
   && r.captured.some(({ model }) => model === 'muse-spark-1.2-contributor') && r.captured.some(({ lane }) => lane === 'B') && r.captured.some(({ lane }) => lane === 'C'));
 // The case the quorum exists for. A provider's quota is exhausted for days, not
@@ -1081,6 +1086,66 @@ check('a quota failure on one lane publishes its diagnostic without failing the 
   && r.posted.length === 3
   && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted') && body.includes('status=diagnostic'))
   && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
+
+// Go's quota is one pool for the whole workspace. Once it is exhausted, Lanes A and B send
+// the same request once to the same model on Command Code through the Lane C slot.
+const goQuotaReply = () => reply(429, '{"error":{"type":"GoUsageLimitError","message":"weekly usage limit reached"}}');
+const goExhausted = (call) => ['A', 'B'].includes(call.lane) ? goQuotaReply() : healthy(call);
+for (const useBundle of [false, true]) {
+  r = await scenario(goExhausted, {}, { useBundle });
+  const goA = r.captured.find(({ lane, model }) => lane === 'A' && model === 'muse-spark-1.3-contributor');
+  const goB = r.captured.find(({ lane, model }) => lane === 'B' && model === 'claude-haiku-5-5');
+  const overflowA = r.captured.find(({ lane, model }) => lane === 'C' && model === 'meta/muse-spark-1.3-contributor');
+  const overflowB = r.captured.find(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5');
+  check(`source/bundle ${useBundle} an exhausted Go quota overflows Lanes A/B once to the same model through the Lane C slot`, !r.error
+    && r.captured.length === 5
+    && overflowA?.url === 'https://lane-c.example.test/v1/responses' && overflowA.headers.authorization === 'Bearer lane-c-key'
+    && overflowA.headers['x-opencode-session'] === undefined && Boolean(goA?.headers['x-opencode-session'])
+    && JSON.stringify(overflowA.body.input) === JSON.stringify(goA.body.input) && overflowA.body.max_output_tokens === goA.body.max_output_tokens
+    && overflowB?.url === 'https://lane-c.example.test/v1/messages' && overflowB.headers['x-api-key'] === 'lane-c-key'
+    && overflowB.body.system === goB?.body.system && overflowB.body.messages[0].content === goB.body.messages[0].content
+    && overflowB.body.output_config?.effort === 'high' && overflowB.body.max_tokens === 120000
+    && !r.captured.some(({ model }) => /muse-spark-1\.2|kimi/i.test(model))
+    && r.posted.filter((body) => body.includes('status=valid')).length === 3
+    && r.posted.some((body) => body.includes('lane=A') && body.includes('套餐额度已用尽')
+      && body.includes('Lane A: muse-spark-1.3-contributor via command-code meta/muse-spark-1.3-contributor (opencode-go quota exhausted)'))
+    && r.posted.some((body) => body.includes('lane=B') && body.includes('Lane B: claude-haiku-5-5 via command-code claude-haiku-5-5 (opencode-go quota exhausted)'))
+    && r.statusUpdates.some((body) => body.includes('同模型经溢出供应商运行中'))
+    && r.statusUpdates.at(-1).includes('muse-spark-1.3-contributor via command-code')
+    && r.logs.some((line) => line.includes('Quorum gate: 3/3')));
+}
+r = await scenario((call) => call.lane === 'A' ? goQuotaReply()
+  : call.model === 'meta/muse-spark-1.3-contributor' ? reply(503, '{"error":"overloaded"}') : healthy(call));
+check('a failed overflow moves to the lane fallback, which overflows once in turn', !r.error
+  && r.captured.filter(({ model }) => model.includes('muse-spark')).map(({ lane, model }) => `${lane}:${model}`).join(',')
+    === 'A:muse-spark-1.3-contributor,C:meta/muse-spark-1.3-contributor,A:muse-spark-1.2-contributor,C:meta/muse-spark-1.2-contributor'
+  && r.posted.some((body) => body.includes('Lane A: muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor via command-code meta/muse-spark-1.2-contributor (opencode-go quota exhausted)')));
+for (const [label, failure] of [
+  ['a provider outage', () => reply(503, '{"error":"upstream unavailable"}')],
+  ['a capacity 429 without a plan quota', () => reply(429, '{"error":{"type":"rate_limit_error"}}')],
+  ['an authentication failure', () => reply(401, '{"error":"invalid api key"}')],
+  ['a network failure', () => { throw new Error('fetch failed'); }],
+]) {
+  r = await scenario((call) => call.lane === 'A' ? failure() : healthy(call));
+  check(`${label} never leaves the lane's own provider`, r.captured.filter(({ lane }) => lane === 'A').length === 2
+    && !r.captured.some(({ model }) => model.startsWith('meta/')));
+}
+r = await scenario(goExhausted, { LANE_C_KEY: '', LANE_C_API_BASE: '' });
+check('without a provisioned Lane C slot a Go quota stays a quota diagnostic', r.captured.length === 4
+  && r.captured.every(({ lane }) => ['A', 'B'].includes(lane)) && /0 of 3 lanes/.test(r.error?.message || '')
+  && r.posted.some((body) => body.includes('lane=A') && body.includes('shared Token Plan quota is exhausted'))
+  && r.logs.some((line) => line.includes('the Lane C secret slot is not provisioned')));
+r = await scenario(goExhausted, { RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
+check('on self-hosted runners the overflow leaves the Go proxy for the direct Command Code route', !r.error
+  && r.captured.find(({ lane, model }) => lane === 'A' && model === 'muse-spark-1.3-contributor')?.proxy === 'http://192.168.122.1:17890'
+  && r.captured.filter(({ lane }) => lane === 'C').length === 3 && r.captured.filter(({ lane }) => lane === 'C').every(({ proxy }) => proxy === undefined)
+  && r.logs.some((line) => line.includes('[Lane A/muse-spark-1.3-contributor] egress=approved-proxy'))
+  && !r.logs.some((line) => line.includes('[Lane A/meta/muse-spark-1.3-contributor] egress=')));
+const sameProviderOverflow = structuredClone(centralConfig);
+sameProviderOverflow.lanes[0].primary.quota_overflow.credential_lane = 'B';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(sameProviderOverflow) });
+check("an overflow onto the lane's own provider fails before dispatch", r.captured.length === 0
+  && /provider other than the lane's own/.test(r.error?.message || ''));
 
 r = await scenario((call) => { if (call.lane === 'A') throw new Error('fetch failed'); return healthy(call); });
 check('network failures try primary and fallback exactly once', r.captured.filter(({ lane }) => lane === 'A').length === 2
@@ -1154,6 +1219,8 @@ goModelsConfig.lanes[1] = { ...goModelsConfig.lanes[1], protocol: 'anthropic-mes
 goModelsConfig.lanes[2] = { ...goModelsConfig.lanes[2], provider: 'opencode-go', protocol: 'google-generate-content',
   primary: { id: 'gemini-4-argon-contributor', label: 'Gemini 4 Argon Contributor', context_profile: 'full', max_output_tokens: 65536, thinking_level: 'high', diff_char_budget: 1200000, reporting_calibration: true },
   fallbacks: [{ id: 'hy3', label: 'Hy3', protocol: 'openai-chat-completions', context_profile: 'full', max_output_tokens: 65536 }] };
+// Every lane is on Go here, so Lane A has no other provider to overflow to.
+for (const model of [goModelsConfig.lanes[0].primary, ...goModelsConfig.lanes[0].fallbacks]) delete model.quota_overflow;
 const goModelsEnv = { PR_REVIEW_CONFIG: JSON.stringify(goModelsConfig), LANE_B_API_BASE: 'https://opencode.ai/zen/go/v1',
   LANE_C_API_BASE: 'https://opencode.ai/zen/go/v1', RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' };
 const byModel = (result, id) => result.captured.filter(({ model }) => model === id);

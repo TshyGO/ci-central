@@ -56,6 +56,28 @@ var require_index = __commonJS({
         throw new Error(`${location}.protocol is not supported.`);
       }
     }
+    function validateQuotaOverflow(config, lane, model, protocol, location) {
+      const overflow = model.quota_overflow;
+      if (!overflow || typeof overflow !== "object" || Array.isArray(overflow) || Object.keys(overflow).some((key) => !["credential_lane", "id"].includes(key))) {
+        throw new Error(`${location}.quota_overflow must be an object with only credential_lane and id.`);
+      }
+      if (typeof overflow.id !== "string" || !overflow.id.trim()) {
+        throw new Error(`${location}.quota_overflow.id must be a non-empty string.`);
+      }
+      const target = config.lanes.find((candidate) => candidate?.id === overflow.credential_lane);
+      if (!target || overflow.credential_lane === lane.id) {
+        throw new Error(`${location}.quota_overflow.credential_lane must name another configured lane.`);
+      }
+      if (typeof target.provider !== "string" || target.provider === lane.provider) {
+        throw new Error(`${location}.quota_overflow must use a provider other than the lane's own; a quota covers the whole provider.`);
+      }
+      if (protocol === "google-generate-content") {
+        throw new Error(`${location}.quota_overflow is not supported by google-generate-content.`);
+      }
+      if ([target.primary, ...Array.isArray(target.fallbacks) ? target.fallbacks : []].some((candidate) => candidate?.quota_overflow !== void 0)) {
+        throw new Error(`${location}.quota_overflow cannot target a lane that overflows itself.`);
+      }
+    }
     function validateConfig2(config, repository) {
       if (!config || typeof config !== "object" || Array.isArray(config)) {
         throw new Error("Repository config must be a JSON object.");
@@ -124,6 +146,7 @@ var require_index = __commonJS({
           if (model.temperature !== void 0 && protocol === "anthropic-messages") {
             throw new Error(`${modelLocation}.temperature is not supported by anthropic-messages.`);
           }
+          if (model.quota_overflow !== void 0) validateQuotaOverflow(config, lane, model, protocol, modelLocation);
           if (model.thinking_level === void 0) continue;
           if (protocol !== "google-generate-content") {
             throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);
@@ -587,6 +610,7 @@ var require_review_status = __commonJS({
       partial: "\u8F93\u51FA\u4E0D\u5B8C\u6574\uFF0C\u4E0D\u8BA1\u5165 quorum",
       publication_failed: "\u7ED3\u679C\u53D1\u5E03\u5931\u8D25\uFF0C\u4E0D\u8BA1\u5165 quorum",
       resending: "\u6A21\u578B\u672A\u53D7\u7406\uFF0C\u6362\u4F1A\u8BDD\u91CD\u53D1\u4E00\u6B21\u4E2D",
+      overflow: "\u4F9B\u5E94\u5546\u989D\u5EA6\u5DF2\u7528\u5C3D\uFF0C\u540C\u6A21\u578B\u7ECF\u6EA2\u51FA\u4F9B\u5E94\u5546\u8FD0\u884C\u4E2D",
       skipped: "\u65E0\u53EF\u5BA1\u67E5\u7684\u6587\u672C\u8865\u4E01\uFF0C\u672A\u8BF7\u6C42\u6A21\u578B"
     };
     var cell = (text) => String(text ?? "").replace(/[|`<>\r\n]/g, " ");
@@ -975,7 +999,13 @@ ${requestError || ""}`;
     const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
     return Math.min(requestTimeoutMs, modelBudgetMs);
   }
-  async function callModel(lane, model, { windowMs = modelWindowMs(lane, model), sessionSuffix = "", attempt = 1 } = {}) {
+  const ownRoute = (lane, model) => ({ provider: lane.provider, credentialLane: lane.id, modelId: model.id });
+  async function callModel(lane, model, {
+    windowMs = modelWindowMs(lane, model),
+    sessionSuffix = "",
+    attempt = 1,
+    route = ownRoute(lane, model)
+  } = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), windowMs);
     const startedAt = Date.now();
@@ -988,10 +1018,11 @@ ${requestError || ""}`;
     let retryAfterMs;
     let localDeadline = false;
     try {
-      const credentials = laneCredentials[lane.id];
+      const credentials = laneCredentials[route.credentialLane];
+      const goRoute = route.provider === "opencode-go";
       let proxyUrl;
-      const directGoModel = process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(model.id);
-      if (lane.provider === "opencode-go" && process2.env.RUNNER_ENVIRONMENT !== "github-hosted" && !directGoModel) {
+      const directGoModel = process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(route.modelId);
+      if (goRoute && process2.env.RUNNER_ENVIRONMENT !== "github-hosted" && !directGoModel) {
         proxyUrl = process2.env.NEBULA_REVIEW_PROXY_URL !== void 0 ? process2.env.NEBULA_REVIEW_PROXY_URL : process2.env.https_proxy || process2.env.HTTPS_PROXY || void 0;
         let proxy;
         try {
@@ -1004,8 +1035,8 @@ ${requestError || ""}`;
           throw new Error(`Lane ${lane.id} requires an approved review proxy unless explicitly GitHub-hosted; refusing direct fallback.`);
         }
       }
-      if (lane.provider === "opencode-go") {
-        console.log(`[Lane ${lane.id}/${model.id}] egress=${proxyUrl ? "approved-proxy" : "direct"}`);
+      if (goRoute) {
+        console.log(`[Lane ${lane.id}/${route.modelId}] egress=${proxyUrl ? "approved-proxy" : "direct"}`);
       }
       const protocol = protocolOf(lane, model);
       response = legacyGoogle(lane, model) ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
@@ -1024,11 +1055,11 @@ ${requestError || ""}`;
         baseURL: protocol === "google-generate-content" ? goGoogleBase(credentials.baseUrl) : credentials.baseUrl,
         protocol,
         proxyUrl,
-        sessionId: lane.provider === "opencode-go" ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : void 0,
-        payload: sdkPayload(lane, model),
+        sessionId: goRoute ? `${owner}-${repo}-pr-${pullNumber}-lane-${lane.id}${sessionSuffix}` : void 0,
+        payload: sdkPayload(lane, route.modelId === model.id ? model : { ...model, id: route.modelId }),
         signal: controller.signal,
         timeoutMs: windowMs,
-        onProgress: (progress) => console.log(`[Lane ${lane.id}/${model.id}] sdk=${JSON.stringify(progress)}`)
+        onProgress: (progress) => console.log(`[Lane ${lane.id}/${route.modelId}] sdk=${JSON.stringify(progress)}`)
       });
       responseText = await response.text();
     } catch (error) {
@@ -1049,9 +1080,9 @@ ${requestError || ""}`;
     const failure = classifyFailure(response, responseText, requestError);
     const usable = response?.ok && !requestError && failure.kind !== "gateway-blocked";
     const elapsedMs = Date.now() - startedAt;
-    console.log(`[Lane ${lane.id}/${model.id}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? "request failed"} error_code=${errorCode || "none"}${usable ? "" : ` unserved=${unserved}`}`);
+    console.log(`[Lane ${lane.id}/${route.modelId}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? "request failed"} error_code=${errorCode || "none"}${usable ? "" : ` unserved=${unserved}`}`);
     if (!usable) {
-      console.log(`[Lane ${lane.id}/${model.id}] provider=${lane.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || "").slice(0, 1e3)}`);
+      console.log(`[Lane ${lane.id}/${route.modelId}] provider=${route.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || "").slice(0, 1e3)}`);
     }
     return {
       response,
@@ -1076,6 +1107,17 @@ ${requestError || ""}`;
     const delayMs = status === 200 ? 0 : Math.min(outcome.retryAfterMs ?? UNSERVED_RESEND_DELAY_MS, 12e4);
     const windowMs = modelWindowMs(lane, model) - outcome.elapsedMs - delayMs;
     return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
+  }
+  function quotaOverflow(lane, model, outcome) {
+    const overflow = model.quota_overflow;
+    if (!overflow || outcome.failureKind !== "quota-exhausted") return null;
+    const target = lanes.find((candidate) => candidate.id === overflow.credential_lane);
+    const credentials = laneCredentials[overflow.credential_lane];
+    if (!target || !credentials?.apiKey || !credentials?.baseUrl) {
+      console.log(`[Lane ${lane.id}/${model.id}] quota overflow is configured, but the Lane ${overflow.credential_lane} secret slot is not provisioned.`);
+      return null;
+    }
+    return { provider: target.provider, credentialLane: target.id, modelId: overflow.id };
   }
   function validateAndRender(text, model, complete, finishReason) {
     const supplied = contextFor(model).pack;
@@ -1197,6 +1239,14 @@ ${requestError || ""}`;
         await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
         outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: "-resend", attempt: 2 });
       }
+      const via = quotaOverflow(lane, model, outcome);
+      if (via) {
+        tried.push(`${model.id} -> ${lane.provider} plan quota exhausted (${outcome.attempts} attempt(s))`);
+        console.log(`[Lane ${lane.id}/${model.id}] ${lane.provider} plan quota is exhausted; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
+        await statusPublisher.update(lane.id, "overflow", `${via.modelId} @ ${via.provider}`);
+        outcome = await callModel(lane, model, { route: via, windowMs: Math.max(1, modelWindowMs(lane, model) - outcome.elapsedMs) });
+      }
+      const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
       const { response, responseText, requestError, attempts, failureKind } = outcome;
       lastResponse = response;
       lastResponseText = responseText;
@@ -1211,6 +1261,7 @@ ${requestError || ""}`;
               lane,
               primary,
               servedBy: model,
+              servedVia: via,
               review: review2,
               reasoningLength,
               reasoningUnit,
@@ -1224,6 +1275,7 @@ ${requestError || ""}`;
               lane,
               primary,
               servedBy: model,
+              servedVia: via,
               review: review2,
               reasoningLength,
               reasoningUnit,
@@ -1240,7 +1292,7 @@ ${requestError || ""}`;
           console.log(`[Lane ${lane.id}/${model.id}] report rejected: ${error?.message?.startsWith("Review contract:") ? error.message : "invalid report envelope"}`);
         }
       }
-      tried.push(`${model.id} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? "request failed"}`} (${attempts ?? 0} attempt(s))`);
+      tried.push(`${attemptLabel} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? "request failed"}`} (${attempts ?? 0} attempt(s))`);
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
@@ -1294,9 +1346,15 @@ ${fence}
       return;
     }
     const reviewedAt = (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const { servedBy, review, reasoningLength, reasoningUnit, degraded, status } = result;
-    const modelLine = degraded ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}` : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}`;
-    const banner = degraded ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${primary.label}\` \u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u672C\u6761 review \u7531\u540C\u901A\u9053\u5907\u7528\u6A21\u578B \`${servedBy.label}\` \u751F\u6210\u3002`, ""] : [];
+    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status } = result;
+    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} quota exhausted)` : "";
+    const modelLine = degraded ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}` : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${viaText}`;
+    const banner = [
+      ...degraded ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${primary.label}\` \u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u672C\u6761 review \u7531\u540C\u901A\u9053\u5907\u7528\u6A21\u578B \`${servedBy.label}\` \u751F\u6210\u3002`] : [],
+      ...servedVia ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${lane.provider}\` \u5957\u9910\u989D\u5EA6\u5DF2\u7528\u5C3D\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF \`${servedVia.provider}\`\uFF08Lane ${servedVia.credentialLane} \u7684\u56FA\u5B9A Secret \u69FD\u4F4D\uFF09\u751F\u6210\u3002`] : []
+    ];
+    if (banner.length) banner.push("");
+    const servedLabel = servedBy && servedVia ? `${servedBy.id} via ${servedVia.provider}` : servedBy?.id;
     const body = [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
@@ -1338,11 +1396,11 @@ ${fence}
       }
       posted++;
       if (status === "valid") validLaneIds.add(lane.id);
-      await statusPublisher.update(lane.id, status === "valid" ? "complete" : status === "partial" ? "partial" : "failed", servedBy?.id);
+      await statusPublisher.update(lane.id, status === "valid" ? "complete" : status === "partial" ? "partial" : "failed", servedLabel);
       console.log(`${currentComment ? "Updated" : "Created"} AI PR Review comment ${publishedComment.id} for Lane ${lane.id} with status=${status}.`);
     } catch (error) {
       console.log(`Failed to post comment for Lane ${lane.id}.`);
-      await statusPublisher.update(lane.id, "publication_failed", servedBy?.id);
+      await statusPublisher.update(lane.id, "publication_failed", servedLabel);
     }
   }
   const settled = await Promise.allSettled(lanesToReview.map(reviewAndPublish));

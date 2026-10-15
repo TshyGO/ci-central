@@ -694,9 +694,9 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:gemini-4-argon-contributor');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:hy3');
 check('healthy path never calls a fallback', r.captured.length === 3
-  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'hy3'].includes(model)));
+  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'glm-5.3'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -705,19 +705,18 @@ check('all active protocols receive the repository review prompt',
   [healthyLaneA, healthyLaneB, healthyLaneC].every((body) => systemText(body)?.includes(reviewPolicyPrefix))
   && !systemText(healthyLaneA).includes('two independent internal review passes')
   && !systemText(healthyLaneB).includes('two independent internal review passes')
-  // Gemini lanes add the deep-review contract to the same repository prompt.
-  && systemText(healthyLaneC).includes('two independent internal review passes'));
+  && !systemText(healthyLaneC).includes('two independent internal review passes'));
 check('no leftover Markdown instruction contradicts the JSON contract, which is restated after the material',
   !centralConfig.review_policy.system_prompt.includes('Markdown review')
   && [healthyLaneA, healthyLaneB, healthyLaneC].every((body) =>
     !systemText(body).includes('Markdown review') && systemText(body).includes('final JSON report')
     && userText(body).trimEnd().endsWith('a Markdown review cannot be accepted.')));
-// Gemini 4 Argon goes through Go's Gemini endpoint with its thinking level and output ceiling.
-check('Lane C uses Gemini with its thinking level and output ceiling',
-  healthyLaneC?.model === 'gemini-4-argon-contributor'
-  && healthyLaneC?.generationConfig?.maxOutputTokens === 65536
-  && healthyLaneC?.generationConfig?.thinkingConfig?.thinkingLevel === 'HIGH'
-  && healthyLaneC?.temperature === undefined && healthyLaneC?.messages === undefined);
+// Hy3 uses Go's Chat Completions endpoint, preserving the Lane C output ceiling.
+check('Lane C uses Hy3 over Chat Completions without Google thinking fields',
+  healthyLaneC?.model === 'hy3'
+  && healthyLaneC?.max_tokens === 65536
+  && healthyLaneC?.temperature === undefined
+  && healthyLaneC?.generationConfig === undefined);
 // Haiku at max effort spent all 65,536 tokens thinking on three large PRs; high finished them.
 check('Lane B uses Claude Haiku with adaptive thinking, high effort and its output ceiling',
   healthyLaneB?.model === 'claude-haiku-5-5'
@@ -808,29 +807,29 @@ const firstCallFails = (lane, model, error) => {
   return (call) => call.lane === lane && call.model === model && calls++ === 0 ? Promise.reject(error) : healthy(call);
 };
 const sessions = (result, model) => result.captured.filter((call) => call.model === model).map((call) => call.headers['x-opencode-session']);
-r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', unserved(429)));
+r = await scenario(firstCallFails('C', 'hy3', unserved(429)));
 check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
-  && sessions(r, 'gemini-4-argon-contributor').length === 2 && sessions(r, 'gemini-4-argon-contributor')[1] === `${sessions(r, 'gemini-4-argon-contributor')[0]}-resend`
-  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'hy3') && r.timeouts.includes(30000)
+  && sessions(r, 'hy3').length === 2 && sessions(r, 'hy3')[1] === `${sessions(r, 'hy3')[0]}-resend`
+  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'glm-5.3') && r.timeouts.includes(30000)
   && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by'))
   && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
-r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', unserved(429, { retryAfterMs: 5000 })));
+r = await scenario(firstCallFails('C', 'hy3', unserved(429, { retryAfterMs: 5000 })));
 check('a provider retry-after paces the single resend', !r.error && r.timeouts.includes(5000) && !r.timeouts.includes(30000));
-r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
+r = await scenario(firstCallFails('C', 'hy3', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })));
 check('a stream queued and closed before any output is resent immediately', !r.error
-  && sessions(r, 'gemini-4-argon-contributor').length === 2 && r.timeouts.includes(0));
-r = await scenario((call) => call.model === 'gemini-4-argon-contributor' ? Promise.reject(unserved(503)) : healthy(call));
+  && sessions(r, 'hy3').length === 2 && r.timeouts.includes(0));
+r = await scenario((call) => call.model === 'hy3' ? Promise.reject(unserved(503)) : healthy(call));
 check('a resend that is also unserved falls back once instead of retrying again', !r.error
-  && sessions(r, 'gemini-4-argon-contributor').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1
-  && r.posted.some((body) => body.includes('served by hy3')));
+  && sessions(r, 'hy3').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'glm-5.3').length === 1
+  && r.posted.some((body) => body.includes('served by glm-5.3')));
 for (const [label, error] of [
   ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
   ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
   ['the local deadline', Object.assign(new Error('AI endpoint request aborted (model deadline reached).'), { name: 'AbortError', unserved: false })],
 ]) {
-  r = await scenario(firstCallFails('C', 'gemini-4-argon-contributor', error));
-  check(`${label} are never resent`, sessions(r, 'gemini-4-argon-contributor').length === 1
-    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1);
+  r = await scenario(firstCallFails('C', 'hy3', error));
+  check(`${label} are never resent`, sessions(r, 'hy3').length === 1
+    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'glm-5.3').length === 1);
 }
 r = await scenario(firstCallFails('B', 'claude-haiku-5-5', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model', !r.error
@@ -962,19 +961,20 @@ check('full-context primaries preserve input while Lane C carries its own output
   r.captured.every(({ body }) => userText(body).includes('Changed files and patches:'))
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 120000
-  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 65536);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
 
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.url.endsWith('/messages')
   && r.captured.find(({ lane }) => lane === 'B')?.headers['x-api-key'] === 'lane-b-key'
-  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/models/gemini-4-argon-contributor:streamGenerateContent')
-  && r.captured.find(({ lane }) => lane === 'C')?.headers['x-goog-api-key'] === 'lane-c-key');
+  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
+  && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
-check('self-hosted Go proxies Muse, Haiku and Gemini, which are not verified for direct egress, with stable sessions',
+check('self-hosted Go proxies Muse and Haiku, which are not verified for direct egress, while verified Hy3 stays direct',
   !r.error
-  && ['A', 'B', 'C'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
+  && ['A', 'B'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
+  && r.captured.find(c => c.lane === 'C')?.proxy === undefined
   && ['A', 'B', 'C'].every((lane) => Boolean(r.captured.find(c => c.lane === lane)?.headers['x-opencode-session']))
   && r.captured.find(c => c.lane === 'A')?.headers['x-opencode-session'] !== r.captured.find(c => c.lane === 'C')?.headers['x-opencode-session']);
 for (const useBundle of [false, true]) {
@@ -984,9 +984,9 @@ for (const useBundle of [false, true]) {
     NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890',
     https_proxy: 'http://177.201.224.95:13128',
   }, { useBundle });
-  check('source/bundle ' + useBundle + ' selects szlab for both Muse models and the unverified B/C primaries',
+  check('source/bundle ' + useBundle + ' selects szlab for both Muse models and the unverified Lane B primary while Hy3 stays direct',
     !r.error && r.captured.filter(c => c.lane === 'A').length === 2
-    && r.captured.every(c => c.proxy === 'http://192.168.122.1:17890'));
+    && r.captured.every(c => c.lane === 'C' ? c.proxy === undefined : c.proxy === 'http://192.168.122.1:17890'));
 }
 for (const invalidProxy of ['', 'http://unapproved.example:17890', 'http://192.168.122.1:17891',
   'http://192.168.122.1:17890/path', 'http://192.168.122.1:17890?x=1',
@@ -1042,7 +1042,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig)
 check('repository configuration supplied through the environment remains authoritative', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 8192
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 120000
-  && r.captured.find(({ lane }) => lane === 'C')?.body.generationConfig.maxOutputTokens === 65536);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
 
 r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
 check('Lane A uses Muse 1.2 only after one failed Muse 1.3 request', r.captured.filter(({ model }) => model === 'muse-spark-1.3-contributor').length === 1 && r.captured.filter(({ model }) => model === 'muse-spark-1.2-contributor').length === 1);
@@ -1059,12 +1059,13 @@ check('Lane B falls back once only to Go Kimi K2.7 Code over chat completions',
   && !r.captured.some(({ model }) => model === 'glm-5.3')
   && r.posted.some((body) => body.includes('claude-haiku-5-5 unavailable -> served by kimi-k2.7-code')));
 
-r = await scenario((call) => call.lane === 'C' && call.model === 'gemini-4-argon-contributor' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to Go Hy3 after one failed Gemini request',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'gemini-4-argon-contributor').length === 1
-  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'gemini-4-argon-contributor,hy3'
-  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'hy3')?.url.endsWith('/chat/completions')
-  && r.posted.some((body) => body.includes('gemini-4-argon-contributor unavailable -> served by hy3')));
+r = await scenario((call) => call.lane === 'C' && call.model === 'hy3' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+check('Lane C falls back only to Go GLM 5.3 after one failed Hy3 request',
+  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'hy3').length === 1
+  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'hy3,glm-5.3'
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'glm-5.3')?.body.max_tokens === 65536
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'glm-5.3')?.body.temperature === 0.2
+  && r.posted.some((body) => body.includes('hy3 unavailable -> served by glm-5.3')));
 
 r = await scenario((call) => call.lane === 'A' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
 check('quota failure tries the fallback once without affecting other lanes', r.captured.filter(({ lane }) => lane === 'A').length === 2
@@ -1191,9 +1192,9 @@ check('reporting calibration follows the model flag across protocols',
   && !byModel(r, 'gemini-4-argon-contributor')[0]?.body.systemInstruction.parts[0].text.includes('Reporting calibration')
   && !byModel(r, 'muse-spark-1.3-contributor')[0]?.body.input[0].content.includes('Reporting calibration'));
 r = await scenario(healthy);
-check('production Muse and Gemini are calibrated while Haiku is not',
+check('production Muse and Hy3 are calibrated while Haiku is not',
   r.captured.find(({ lane }) => lane === 'A')?.body.input[0].content.includes('Reporting calibration: surface every plausible defect you traced')
-  && r.captured.find(({ lane }) => lane === 'C')?.body.systemInstruction.parts[0].text.includes('Reporting calibration: surface every plausible defect you traced')
+  && r.captured.find(({ lane }) => lane === 'C')?.body.messages[0].content.includes('Reporting calibration: surface every plausible defect you traced')
   && !r.captured.find(({ lane }) => lane === 'B')?.body.system.includes('Reporting calibration'));
 const goQuota = Object.assign(new Error('SDK request failed (http=429).'), { name: 'SDKRequestError', status: 429, httpStatus: 429,
   unserved: true, providerType: 'GoUsageLimitError' });

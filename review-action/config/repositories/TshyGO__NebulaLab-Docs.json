@@ -67,27 +67,27 @@
     {
       "id": "C",
       "provider": "opencode-go",
-      "protocol": "google-generate-content",
+      "protocol": "openai-chat-completions",
       "advisory": true,
       "resend_unserved": true,
       "request_timeout_ms": 900000,
-      "model_budget_ms": 900000,
+      "model_budget_ms": 1800000,
       "primary": {
-        "id": "gemini-4-argon-contributor",
-        "label": "Gemini 4 Argon Contributor",
+        "id": "hy3",
+        "label": "Hy3",
         "context_profile": "full",
         "max_output_tokens": 65536,
-        "thinking_level": "high",
-        "diff_char_budget": 1200000,
         "reporting_calibration": true
       },
       "fallbacks": [
         {
-          "id": "hy3",
-          "label": "Hy3",
-          "protocol": "openai-chat-completions",
+          "id": "glm-5.3",
+          "label": "GLM 5.3",
+          "request_timeout_ms": 1800000,
           "context_profile": "full",
-          "max_output_tokens": 65536
+          "max_output_tokens": 65536,
+          "temperature": 0.2,
+          "diff_char_budget": 1200000
         }
       ]
     }

@@ -36,26 +36,24 @@ for (const repository of repositories) {
   assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 1));
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gemini-4-argon-contributor']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'hy3']);
   assert.ok(fromSource.lanes.every(lane => lane.provider === 'opencode-go'), `${repository} every lane must use Go`);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'google-generate-content']);
-  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'hy3');
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
+  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'glm-5.3');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
   assert.equal(fromSource.lanes[2].fallbacks[0].max_output_tokens, 65536);
   assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'kimi-k2.7-code', `${repository} Lane B must fall back to Go-hosted Kimi K2.7 Code`);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'hy3']);
-  // Fallbacks in the B/C lanes speak chat completions while their primaries do not.
-  assert.ok([fromSource.lanes[1].fallbacks[0], fromSource.lanes[2].fallbacks[0]].every((model) => model.protocol === 'openai-chat-completions'),
-    `${repository} Kimi and Hy3 fallbacks must name their own protocol`);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'glm-5.3']);
+  // Lane B's Kimi fallback speaks chat completions while its Haiku primary does not.
+  assert.equal(fromSource.lanes[1].fallbacks[0].protocol, 'openai-chat-completions', `${repository} the Kimi fallback must name its own protocol`);
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
   assert.equal(fromSource.lanes[1].primary.effort, 'high', `${repository} Haiku must stay at high effort`);
-  assert.equal(fromSource.lanes[2].primary.thinking_level, 'high', `${repository} Gemini must think at the high level`);
-  // Calibration doubled Muse and Gemini findings with no clean-change noise; on Haiku it only added noise.
+  // Calibration took Muse and Hy3 from near-silent to 1-5 findings on large NebulaLab PRs with no
+  // high-confidence clean-change noise; on Haiku it only added noise.
   assert.deepEqual(fromSource.lanes.flatMap((lane) => [lane.primary, ...lane.fallbacks]).filter((model) => model.reporting_calibration).map((model) => model.id),
-    ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor', 'gemini-4-argon-contributor'], `${repository} calibration must stay limited to Muse and Gemini`);
-  assert.ok([fromSource.lanes[0], fromSource.lanes[1]].every((lane) => lane.primary.thinking_level === undefined
-    && lane.fallbacks.every((model) => model.thinking_level === undefined))
-    && fromSource.lanes[2].fallbacks[0].thinking_level === undefined, `${repository} only Gemini may configure Google thinking`);
+    ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor', 'hy3'], `${repository} calibration must stay limited to Muse and Hy3`);
+  assert.ok(fromSource.lanes.every((lane) => [lane.primary, ...lane.fallbacks].every((model) => model.thinking_level === undefined)),
+    `${repository} no active lane uses Google thinking`);
   // Every active model must send an explicit output ceiling.
   assert.ok(fromSource.lanes.every((lane) => lane.primary.omit_max_tokens === undefined
     && lane.fallbacks.every((model) => model.omit_max_tokens === undefined)), `${repository} no active lane may silently omit the output ceiling`);
@@ -87,11 +85,13 @@ for (const repository of repositories) {
   );
   assert.equal(config.lanes[1].request_timeout_ms, 1800000, `${repository} Lane B preserves reasoning with a thirty-minute request ceiling`);
   assert.equal(config.lanes[1].model_budget_ms, 1800000, `${repository} Lane B model budget matches its request ceiling`);
-  // Measured 2026-10-14: Gemini 4 Argon finished 52-164K-token NebulaLab PRs in 87-215 s;
-  // Hy3 is cut upstream at about 300 s. C's single-attempt per-model budget stays fifteen minutes.
-  const laneCBudgetMs = 900000;
-  assert.equal(config.lanes[2].request_timeout_ms, laneCBudgetMs, `${repository} Lane C request budget changed without a measurement behind it`);
-  assert.equal(config.lanes[2].model_budget_ms, laneCBudgetMs, `${repository} Lane C model budget changed without a measurement behind it`);
+  // Measured 2026-10-15: calibrated Hy3 finished three large NebulaLab PRs in 115-156 s, so it
+  // keeps the lane's fifteen minutes. GLM 5.3 took 10-20 minutes as Lane B's fallback, so it
+  // carries its own thirty-minute request window and the lane cap rises to match.
+  assert.equal(config.lanes[2].request_timeout_ms, 900000, `${repository} Lane C request budget changed without a measurement behind it`);
+  assert.equal(config.lanes[2].model_budget_ms, 1800000, `${repository} Lane C model cap must leave GLM 5.3 its thirty minutes`);
+  assert.equal(config.lanes[2].primary.request_timeout_ms, undefined, `${repository} Hy3 inherits the lane's fifteen-minute window`);
+  assert.equal(config.lanes[2].fallbacks[0].request_timeout_ms, 1800000, `${repository} the GLM 5.3 fallback keeps its thirty-minute window`);
   // Measured 2026-10-14: Haiku finished 71-226K-token NebulaLab PRs in 146-211 s.
   assert.equal(config.lanes[1].primary.request_timeout_ms, 900000, `${repository} Lane B Haiku primary uses a fifteen-minute window`);
   assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 900000, `${repository} Lane B Kimi fallback keeps its measured fifteen-minute window`);
@@ -128,7 +128,7 @@ const inputTokenRoom = {
   'muse-spark-1.3-contributor': 1048576,
   'muse-spark-1.2-contributor': 1048576,
   'claude-haiku-5-5': 1000000,
-  'gemini-4-argon-contributor': 1048576,
+  'glm-5.3': 1000000,
   'kimi-k2.7-code': 262144,
   hy3: 192000,
 };
@@ -142,7 +142,7 @@ for (const repository of repositories) {
   for (const model of [config.lanes[0].primary, ...config.lanes[0].fallbacks]) {
     assert.equal(model.max_output_tokens, 65536, `${repository} ${model.id} must not truncate its report at the old 16K ceiling`);
   }
-  for (const model of [config.lanes[0].primary, ...config.lanes[0].fallbacks, config.lanes[1].primary, config.lanes[2].primary]) {
+  for (const model of [config.lanes[0].primary, ...config.lanes[0].fallbacks, config.lanes[1].primary, config.lanes[2].fallbacks[0]]) {
     assert.equal(model.diff_char_budget, 1200000, `${repository} ${model.id} must use its 1M-token window for large changes`);
   }
   assert.deepEqual([config.lanes[0].request_timeout_ms, config.lanes[0].model_budget_ms], [600000, 600000],
@@ -162,8 +162,8 @@ const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'opencode-go');
 assert.equal(nebula.lanes[2].provider, 'opencode-go');
-assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'google-generate-content']);
-assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gemini-4-argon-contributor']);
+assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
+assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'hy3']);
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
 for (const loader of [source, bundled]) {

@@ -30,7 +30,7 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | B | OpenCode Go | Anthropic SDK / Messages SSE（备用 OpenAI SDK / Chat Completions SSE） | Claude Haiku 5.5（effort high）→ Kimi K2.7 Code | 计入两路 quorum |
 | C | Command Code | OpenAI SDK / Chat Completions SSE | Hy3（`tencent/hy3-paid`，报告校准）→ GLM 5.3（`zai-org/GLM-5.3`） | advisory；有效时计入 quorum |
 
-三条 Lane 均使用 OpenCode Go，各模型额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。它仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
+Lane A/B 使用 OpenCode Go（整个 workspace 共用一个 5 小时/每周/每月额度池），Lane C 使用 Command Code；额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。Go 用尽时 A/B 同时失效而 C 仍可发布，反之亦然。它仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
 
 ### 统一 SDK 接入
 

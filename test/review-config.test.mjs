@@ -36,14 +36,16 @@ for (const repository of repositories) {
   assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 1));
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'hy3']);
-  assert.ok(fromSource.lanes.every(lane => lane.provider === 'opencode-go'), `${repository} every lane must use Go`);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
+  // Lanes A/B draw on the OpenCode Go plan and Lane C on Command Code, so one exhausted plan
+  // never empties every lane; each lane keeps its fallback with the same provider and key.
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', 'opencode-go', 'command-code'], `${repository} lane providers changed`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
-  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'glm-5.3');
+  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'zai-org/GLM-5.3');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
   assert.equal(fromSource.lanes[2].fallbacks[0].max_output_tokens, 65536);
   assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'kimi-k2.7-code', `${repository} Lane B must fall back to Go-hosted Kimi K2.7 Code`);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'glm-5.3']);
+  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)), ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'zai-org/GLM-5.3']);
   // Lane B's Kimi fallback speaks chat completions while its Haiku primary does not.
   assert.equal(fromSource.lanes[1].fallbacks[0].protocol, 'openai-chat-completions', `${repository} the Kimi fallback must name its own protocol`);
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
@@ -51,7 +53,7 @@ for (const repository of repositories) {
   // Calibration took Muse and Hy3 from near-silent to 1-5 findings on large NebulaLab PRs with no
   // high-confidence clean-change noise; on Haiku it only added noise.
   assert.deepEqual(fromSource.lanes.flatMap((lane) => [lane.primary, ...lane.fallbacks]).filter((model) => model.reporting_calibration).map((model) => model.id),
-    ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor', 'hy3'], `${repository} calibration must stay limited to Muse and Hy3`);
+    ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor', 'tencent/hy3-paid'], `${repository} calibration must stay limited to Muse and Hy3`);
   assert.ok(fromSource.lanes.every((lane) => [lane.primary, ...lane.fallbacks].every((model) => model.thinking_level === undefined)),
     `${repository} no active lane uses Google thinking`);
   // Every active model must send an explicit output ceiling.
@@ -131,8 +133,11 @@ const inputTokenRoom = {
   'glm-5.3': 1000000,
   'kimi-k2.7-code': 262144,
   hy3: 192000,
+  // Command Code lists a 262,144-token window for Hy3 and 1M for GLM 5.3; Hy3's output is counted against it.
+  'tencent/hy3-paid': 262144,
+  'zai-org/GLM-5.3': 1000000,
 };
-const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5']);
+const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'tencent/hy3-paid']);
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
   const policy = config.review_policy;
@@ -161,9 +166,9 @@ for (const repository of repositories) {
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'opencode-go');
-assert.equal(nebula.lanes[2].provider, 'opencode-go');
+assert.equal(nebula.lanes[2].provider, 'command-code');
 assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
-assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'hy3']);
+assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
 assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
 
 for (const loader of [source, bundled]) {

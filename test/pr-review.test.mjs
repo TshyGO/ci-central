@@ -1120,6 +1120,25 @@ check('a failed overflow moves to the lane fallback, which overflows once in tur
   && r.captured.filter(({ model }) => model.includes('muse-spark')).map(({ lane, model }) => `${lane}:${model}`).join(',')
     === 'A:muse-spark-1.3-contributor,C:meta/muse-spark-1.3-contributor,A:muse-spark-1.2-contributor,C:meta/muse-spark-1.2-contributor'
   && r.posted.some((body) => body.includes('Lane A: muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor via command-code meta/muse-spark-1.2-contributor (opencode-go quota exhausted)')));
+// The overflow shares the model window with what the model already spent: a 5 s resend
+// pause leaves at most 595 s of Lane A's 600 s, never a fresh 600 s.
+const resendThenQuotaConfig = structuredClone(centralConfig);
+resendThenQuotaConfig.lanes[0].resend_unserved = true;
+let laneAGoCalls = 0;
+r = await scenario((call) => call.lane === 'A' && call.model === 'muse-spark-1.3-contributor'
+  ? (laneAGoCalls++ === 0 ? Promise.reject(unserved(503, { retryAfterMs: 5000 })) : goQuotaReply()) : healthy(call),
+{ PR_REVIEW_CONFIG: JSON.stringify(resendThenQuotaConfig) });
+check('an overflow after a resend only gets what is left of the model window', !r.error
+  && r.captured.filter(({ model }) => model === 'meta/muse-spark-1.3-contributor').length === 1
+  && r.timeouts.filter((ms) => ms > 590000 && ms <= 595000).length === 2
+  && !r.timeouts.some((ms) => ms > 595000 && ms < 600000));
+const shortWindowConfig = structuredClone(centralConfig);
+shortWindowConfig.lanes[0].primary.request_timeout_ms = 30000;
+r = await scenario((call) => call.lane === 'A' ? goQuotaReply() : healthy(call), { PR_REVIEW_CONFIG: JSON.stringify(shortWindowConfig) });
+check('an overflow is skipped when under a minute of the model window remains', !r.error
+  && !r.captured.some(({ model }) => model === 'meta/muse-spark-1.3-contributor')
+  && r.captured.filter(({ model }) => model === 'meta/muse-spark-1.2-contributor').length === 1
+  && r.logs.some((line) => line.includes('[Lane A/muse-spark-1.3-contributor] quota overflow skipped: only')));
 for (const [label, failure] of [
   ['a provider outage', () => reply(503, '{"error":"upstream unavailable"}')],
   ['a capacity 429 without a plan quota', () => reply(429, '{"error":{"type":"rate_limit_error"}}')],

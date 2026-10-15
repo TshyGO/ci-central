@@ -460,7 +460,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   // send the same request once to the same model through another lane's provider and fixed
   // secret slot. The exhausted request produced no output, so this cannot duplicate a review;
   // every other failure stays with the lane's own provider.
-  function quotaOverflow(lane, model, outcome) {
+  // The overflow shares the model's window with everything already spent on it, and like the
+  // unserved resend it is skipped when too little of that window is left to finish a review.
+  function quotaOverflow(lane, model, outcome, remainingMs) {
     const overflow = model.quota_overflow;
     if (!overflow || outcome.failureKind !== 'quota-exhausted') return null;
     const target = lanes.find((candidate) => candidate.id === overflow.credential_lane);
@@ -469,7 +471,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       console.log(`[Lane ${lane.id}/${model.id}] quota overflow is configured, but the Lane ${overflow.credential_lane} secret slot is not provisioned.`);
       return null;
     }
-    return { provider: target.provider, credentialLane: target.id, modelId: overflow.id };
+    if (remainingMs < UNSERVED_RESEND_MIN_WINDOW_MS) {
+      console.log(`[Lane ${lane.id}/${model.id}] quota overflow skipped: only ${remainingMs} ms of the model window remain.`);
+      return null;
+    }
+    return { provider: target.provider, credentialLane: target.id, modelId: overflow.id, windowMs: remainingMs };
   }
 
   function validateAndRender(text, model, complete, finishReason) {
@@ -580,19 +586,21 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         continue;
       }
       let outcome = await callModel(lane, model);
+      let spentMs = outcome.elapsedMs;
       const resend = unservedResend(lane, model, outcome);
       if (resend) {
         console.log(`[Lane ${lane.id}/${model.id}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
         await statusPublisher.update(lane.id, 'resending', model.id);
         await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
         outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: '-resend', attempt: 2 });
+        spentMs += resend.delayMs + outcome.elapsedMs;
       }
-      const via = quotaOverflow(lane, model, outcome);
+      const via = quotaOverflow(lane, model, outcome, modelWindowMs(lane, model) - spentMs);
       if (via) {
         tried.push(`${model.id} -> ${lane.provider} plan quota exhausted (${outcome.attempts} attempt(s))`);
         console.log(`[Lane ${lane.id}/${model.id}] ${lane.provider} plan quota is exhausted; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
         await statusPublisher.update(lane.id, 'overflow', `${via.modelId} @ ${via.provider}`);
-        outcome = await callModel(lane, model, { route: via, windowMs: Math.max(1, modelWindowMs(lane, model) - outcome.elapsedMs) });
+        outcome = await callModel(lane, model, { route: via, windowMs: via.windowMs });
       }
       const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
       const { response, responseText, requestError, attempts, failureKind } = outcome;

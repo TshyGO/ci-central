@@ -94,6 +94,21 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       reusableLaneIds.add(lane.id);
     }
   }
+  // A lane with a first_pass model reviews the PR's first commit with it. When the primary
+  // reviews later commits, that review stays folded in the lane comment; its marker there is
+  // also the record that the first pass is done, so a PR gets it once.
+  const FIRST_PASS_END = '<!-- /ai-pr-review-first-pass:v1 -->';
+  const firstPassPattern = /<!-- ai-pr-review-first-pass:v1 lane=([A-C]) head=([0-9a-f]{40}) model=([A-Za-z0-9._/-]{1,120}) -->\n([\s\S]*?)\n<!-- \/ai-pr-review-first-pass:v1 -->/;
+  const firstPassBegin = (laneId, head, modelId) => `<!-- ai-pr-review-first-pass:v1 lane=${laneId} head=${head} model=${modelId} -->`;
+  const withoutFirstPassMarkers = (text) => String(text).replace(/<!-- \/?ai-pr-review-first-pass:v1[^>]*-->/g, '');
+  function priorFirstPass(lane) {
+    if (!lane.first_pass) return null;
+    const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
+    const comment = existingComments.filter((item) =>
+      item.user?.login === 'github-actions[bot]' && item.body?.startsWith(marker + '\n')).at(-1);
+    const match = comment && firstPassPattern.exec(comment.body || '');
+    return match && match[1] === lane.id ? { head: match[2], model: match[3], review: match[4] } : null;
+  }
   const isManualReview = context.eventName === 'issue_comment';
   const lanesToReview = isManualReview
     ? lanes
@@ -303,18 +318,23 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return basePayload(scoped);
   }
 
-  function classifyFailure(response, responseText, requestError) {
+  function classifyFailure(response, responseText, requestError, provider) {
     const status = response?.status;
     const rawText = `${responseText || ''}\n${requestError || ''}`;
     const text = rawText.toLowerCase();
-    const quotaExhausted = status === 429 && (
+    const quotaExhausted = (status === 429 && (
       text.includes('insufficient_quota')
       // OpenCode Go plan limits surface as GoUsageLimitError (or Free/Black variants).
       || text.includes('usagelimiterror')
       || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /quota[^\n]*reset at/i.test(text)
-    );
+    ))
+      // An exhausted Anthropic credit balance: 402 billing_error, or the SDK client's boolean
+      // for a 400 "credit balance is too low". It covers every model on the account. Only the
+      // Anthropic route reads it this way; the cross-provider exception stays that narrow.
+      || (provider === 'anthropic'
+        && (status === 402 || text.includes('billing_error') || text.includes('"credit":"exhausted"')));
     const authenticationFailed = status === 401 || (
       status === 403
       && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text)
@@ -385,6 +405,20 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       if (goRoute) {
         console.log(`[Lane ${lane.id}/${route.modelId}] egress=${proxyUrl ? 'approved-proxy' : 'direct'}`);
       }
+      if (route.provider === 'anthropic') {
+        // The owner allows Anthropic traffic only through their dedicated Taiwan node. On the
+        // review runners that is the szlab mihomo, whose anthropic.com rule has no other path;
+        // a GitHub-hosted runner, the VPS proxy or a direct connection is refused.
+        let proxy;
+        try { proxy = new URL(process.env.NEBULA_REVIEW_PROXY_URL); } catch { /* Refused below. */ }
+        if (process.env.RUNNER_ENVIRONMENT !== 'self-hosted' || !proxy || proxy.protocol !== 'http:'
+            || proxy.hostname !== '192.168.122.1' || proxy.port !== '17890' || proxy.username || proxy.password
+            || proxy.search || proxy.hash || !['', '/'].includes(proxy.pathname)) {
+          throw new Error(`Lane ${lane.id} sends Anthropic requests only through the szlab Taiwan egress on a self-hosted review runner; refusing any other route.`);
+        }
+        proxyUrl = process.env.NEBULA_REVIEW_PROXY_URL;
+        console.log(`[Lane ${lane.id}/${route.modelId}] egress=tw-proxy`);
+      }
       const protocol = protocolOf(lane, model);
       response = legacyGoogle(lane, model) ? await fetch(`${credentials.baseUrl}/models/${encodeURIComponent(model.id)}:generateContent`, {
         method: 'POST',
@@ -413,7 +447,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     } catch (error) {
       if (Number.isInteger(error?.status)) {
         response = { status: error.status, ok: false };
-        responseText = JSON.stringify({ error: { code: error.providerCode, type: error.providerType } });
+        responseText = JSON.stringify({ error: { code: error.providerCode, type: error.providerType,
+          ...(error.creditExhausted === true ? { credit: 'exhausted' } : {}) } });
       }
       const code = error?.cause?.code || error?.code;
       errorCode = typeof code === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : '';
@@ -427,7 +462,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     } finally {
       clearTimeout(timeout);
     }
-    const failure = classifyFailure(response, responseText, requestError);
+    const failure = classifyFailure(response, responseText, requestError, route.provider);
     const usable = response?.ok && !requestError && failure.kind !== 'gateway-blocked';
     const elapsedMs = Date.now() - startedAt;
     console.log(`[Lane ${lane.id}/${route.modelId}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
@@ -544,7 +579,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   // model whose provider quota is exhausted may first overflow once (quotaOverflow).
   async function requestReview(lane) {
     const primary = lane.primary;
-    const chain = [primary, ...lane.fallbacks];
+    const firstPass = lane.first_pass && !priorFirstPass(lane) ? lane.first_pass : null;
+    if (firstPass) {
+      console.log(`[Lane ${lane.id}] this PR has no first-pass review yet; ${firstPass.id} leads, and later commits go to ${primary.id}.`);
+    }
+    const chain = [...(firstPass ? [firstPass] : []), primary, ...lane.fallbacks];
     const credentials = laneCredentials[lane.id];
     if (!chain.some((model) => hasMaterial(contextFor(model).pack))) {
       return { lane, primary, servedBy: null, reasoningLength: 0, degraded: false, status: 'diagnostic',
@@ -578,7 +617,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let bestPartial = null;
 
     for (const model of chain) {
-      if (model !== primary) await statusPublisher.update(lane.id, 'fallback', model.id);
+      // After a first pass that could not serve, the primary is the lane's normal path, not a fallback.
+      if (model !== chain[0]) await statusPublisher.update(lane.id, model === primary ? 'running' : 'fallback', model.id);
       const supplied = contextFor(model).pack;
       if (!supplied.coverage.some(file => file.patch_available && file.supplied_hunks)) {
         lastOutcome = 'no inspectable material for the configured context profile';
@@ -621,7 +661,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               review,
               reasoningLength,
               reasoningUnit,
-              degraded: model !== primary,
+              // The primary after a first pass that could not serve is the lane's normal path.
+              degraded: model !== primary && model !== firstPass,
+              firstPass: model === firstPass,
               status: 'valid',
             };
           }
@@ -637,7 +679,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
               review,
               reasoningLength,
               reasoningUnit,
-              degraded: model !== primary,
+              degraded: model !== primary && model !== firstPass,
               status: 'partial',
             };
             console.log(`[Lane ${lane.id}/${model.id}] response was incomplete; trying the next model in the lane.`);
@@ -682,7 +724,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       gatewayBlocked
         ? 'Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner.'
         : lastFailureKind === 'quota-exhausted'
-          ? 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.'
+          ? (lane.provider === 'anthropic'
+            ? 'Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review.'
+            : 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.')
           : lastFailureKind === 'authentication-failed'
             ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.`
             : lastFailureKind === 'endpoint-unavailable'
@@ -731,29 +775,52 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       return;
     }
     const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status } = result;
+    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status, firstPass } = result;
     const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} quota exhausted)` : '';
+    // Only a valid first-pass review is marked; later reviews carry it, folded and unchanged.
+    const isFirstPass = firstPass === true && status === 'valid';
+    const prior = isFirstPass ? null : priorFirstPass(lane);
     const modelLine = degraded
       ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}`
-      : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${viaText}`;
+      : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${isFirstPass ? ' (first pass)' : ''}${viaText}`;
     const banner = [
       ...(degraded ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 未产生可用审核，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`] : []),
       ...(servedVia ? [`> ℹ️ Lane ${lane.id} 的 \`${lane.provider}\` 套餐额度已用尽，本条 review 由同一模型经 \`${servedVia.provider}\`（Lane ${servedVia.credentialLane} 的固定 Secret 槽位）生成。`] : []),
     ];
+    if (isFirstPass) {
+      banner.push(`> ℹ️ 这是本 PR 的首次审核，由 \`${servedBy.label}\` 完成；后续提交由 \`${primary.label}\` 审核，本条首审会折叠保留在评论底部。`);
+    }
     if (banner.length) banner.push('');
     const servedLabel = servedBy && servedVia ? `${servedBy.id} via ${servedVia.provider}` : servedBy?.id;
-    const body = [
+    const priorLabel = prior && (prior.model === lane.first_pass?.id ? lane.first_pass.label : prior.model);
+    const carried = (content) => prior ? ['',
+      `<details><summary>首审 · ${priorLabel} · 提交 ${prior.head.slice(0, 7)}</summary>`, '',
+      firstPassBegin(lane.id, prior.head, prior.model), content, FIRST_PASS_END, '', '</details>'] : [];
+    // Model output is untrusted: no review may carry a first-pass mark the runner did not write.
+    const mainReview = withoutFirstPassMarkers(review);
+    const compose = (main, carriedContent) => [
       `<!-- ai-pr-review-bot:lane-${lane.id} -->`,
       `<!-- ai-pr-review-evidence:v2 lane=${lane.id} head=${reviewHeadSha} workflow=${workflowSha} status=${status} -->`,
-      `## AI PR Review · Lane ${lane.id} · ${servedBy?.label ?? primary.label}`,
+      `## AI PR Review · Lane ${lane.id} · ${servedBy?.label ?? primary.label}${isFirstPass ? ' · 首审' : ''}`,
       '',
       `> 审核提交：\`${reviewedHeadShortSha}\` · 更新时间：\`${reviewedAt}\` · 此评论会随 PR 新提交原地更新 · [Run](${runUrl})`,
       '',
       ...banner,
-      review,
+      ...(isFirstPass ? [firstPassBegin(lane.id, reviewHeadSha, servedBy.id), main, FIRST_PASS_END] : [main]),
       '',
       `<sub>${modelLine} · Thinking: ${reasoningUnit ? `${reasoningLength} ${reasoningUnit}` : 'not reported'} · Commit: ${reviewedHeadShortSha} · [Run](${runUrl})</sub>`,
+      ...carried(carriedContent),
     ].join('\n');
+    // GitHub rejects comments over 65536 characters. The marker must survive so the PR never
+    // gets a second first pass: the folded text yields to the edit history first, then the
+    // review itself is trimmed rather than losing the whole comment.
+    const foldedNote = '> 首审内容过长，本次更新未展开；可在本评论的编辑历史中查看。';
+    let body = compose(mainReview, prior?.review);
+    if (prior && body.length > 65000) body = compose(mainReview, foldedNote);
+    if (body.length > 65000) {
+      const keep = Math.max(0, mainReview.length - (body.length - 64000));
+      body = compose(`${mainReview.slice(0, keep)}\n\n> 审核内容超过 GitHub 评论长度上限，已截断。`, prior ? foldedNote : undefined);
+    }
     try {
       const marker = `<!-- ai-pr-review-bot:lane-${lane.id} -->`;
       const priorLaneComments = existingComments.filter((comment) =>

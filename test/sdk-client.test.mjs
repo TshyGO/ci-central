@@ -554,6 +554,22 @@ for (const [name, implementation] of [
         && !error.message.includes('PRIVATE'));
     assert.equal(f.calls.length, 1);
   });
+  for (const [label, status, error, exhausted] of [
+    ['a 402 billing_error', 402, { type: 'billing_error', message: 'PRIVATE BILLING DETAIL' }, true],
+    ['a 400 low credit balance', 400, { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. PRIVATE' }, true],
+    ['an ordinary 400', 400, { type: 'invalid_request_error', message: 'PRIVATE max_tokens: too large' }, false],
+  ]) {
+    test(`${name}: Anthropic Messages ${label} ${exhausted ? 'is' : 'is not'} reported as an exhausted credit, without its text`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error }));
+      });
+      await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: anthropicPayload }),
+        (rejected) => rejected.status === status && rejected.creditExhausted === exhausted && rejected.providerType === error.type
+          && !rejected.message.includes('PRIVATE') && !rejected.message.includes('credit balance'));
+      assert.equal(f.calls.length, 1);
+    });
+  }
   test(`${name}: Anthropic Messages keeps the message_start input count when message_delta reports zero`, async (t) => {
     const f = await fixture(t, implementation, async (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });

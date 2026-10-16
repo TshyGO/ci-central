@@ -136,8 +136,19 @@ function validateConfig(config, repository) {
     if (!Array.isArray(lane.fallbacks)) throw new Error(`${location}.fallbacks must be an array.`);
     if (lane.fallbacks.length > 1) throw new Error(`${location} supports at most one fallback.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
-    for (const [modelIndex, model] of [lane.primary, ...lane.fallbacks].entries()) {
-      const modelLocation = modelIndex === 0 ? `${location}.primary` : `${location}.fallbacks[${modelIndex - 1}]`;
+    // An optional first pass reviews a PR's first commit ahead of the primary, on the lane's own
+    // provider and key. Later commits go straight to the primary, so it has no overflow of its own:
+    // when it cannot serve, the lane's normal chain does.
+    const modelEntries = [[lane.primary, `${location}.primary`],
+      ...lane.fallbacks.map((model, modelIndex) => [model, `${location}.fallbacks[${modelIndex}]`])];
+    if (lane.first_pass !== undefined) {
+      validateModel(lane.first_pass, `${location}.first_pass`);
+      if (lane.first_pass.quota_overflow !== undefined) {
+        throw new Error(`${location}.first_pass cannot configure quota_overflow; the lane's own chain serves when it cannot.`);
+      }
+      modelEntries.unshift([lane.first_pass, `${location}.first_pass`]);
+    }
+    for (const [model, modelLocation] of modelEntries) {
       const protocol = model.protocol ?? lane.protocol;
       if (model.omit_max_tokens && protocol !== 'openai-chat-completions') {
         throw new Error(`${modelLocation}.omit_max_tokens is only supported by openai-chat-completions.`);
@@ -159,9 +170,9 @@ function validateConfig(config, repository) {
         throw new Error(`${modelLocation}.thinking_level is not supported.`);
       }
     }
-    const ids = [lane.primary.id, ...lane.fallbacks.map((model) => model.id)];
+    const ids = modelEntries.map(([model]) => model.id);
     if (new Set(ids).size !== ids.length) {
-      throw new Error(`Lane ${lane.id} contains a duplicate primary/fallback model id.`);
+      throw new Error(`Lane ${lane.id} contains a duplicate first-pass/primary/fallback model id.`);
     }
   }
   // Advisory lanes never gate a review, so a config where every lane is advisory has no

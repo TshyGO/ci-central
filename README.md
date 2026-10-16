@@ -27,10 +27,12 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | Lane | 当前供应商 | 协议 | 模型链 | 是否阻塞 |
 |---|---|---|---|---|
 | A | OpenCode Go | OpenAI SDK / Responses SSE | Muse Spark 1.3 Contributor → 1.2 Contributor | 计入两路 quorum |
-| B | OpenCode Go | Anthropic SDK / Messages SSE（备用 OpenAI SDK / Chat Completions SSE） | Claude Haiku 5.5（effort high）→ Kimi K2.7 Code | 计入两路 quorum |
+| B | Anthropic 官方 API（只经 szlab 台湾专用节点出口） | Anthropic SDK / Messages SSE | 每个 PR 的首次审核：Claude Sonnet 5.5（`first_pass`，effort high）；之后的提交：Claude Haiku 5.5（effort high）；无备用模型 | 计入两路 quorum |
 | C | Command Code | OpenAI SDK / Chat Completions SSE | Hy3（`tencent/hy3-paid`，报告校准）→ GLM 5.3（`zai-org/GLM-5.3`） | advisory；有效时计入 quorum |
 
-Lane A/B 使用 OpenCode Go（整个 workspace 共用一个 5 小时/每周/每月额度池），Lane C 使用 Command Code；额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。Go 优先用满：Go 返回套餐额度耗尽（`GoUsageLimitError`）时，A/B 的每个模型把同一请求经 Lane C 的固定槽位改发 Command Code 上的同一模型一次（额度溢出，见“配置契约”的 `quota_overflow`），因此 Go 用尽时三路仍可发布；Command Code 用尽时 C 失效而 A/B 不受影响。失败的 Lane 仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
+NebulaLab 的 Lane B 使用 Anthropic 官方 API（每月赠送额度）：首审由 Sonnet 5.5 完成，之后的提交由 Haiku 5.5 审核，首审结果折叠保留在同一条 Lane B 评论底部；2026-10-15 在 #1133/#1237/#1241 上实测，Sonnet 被核实的发现全部成立，Haiku 独有的发现（含两条 P1）全部是误报。首审时的 diff 中位数已是最终 diff 的 97%，因此每个 PR 只做一次首审。Anthropic 额度耗尽（402 `billing_error`，或 400 “credit balance is too low”）按套餐额度耗尽处理：首审不溢出，Haiku 经 Lane C 槽位改发 Command Code 上的同一模型一次。其余六个仓库的 Lane B 仍是 OpenCode Go 上的 Claude Haiku 5.5 → Kimi K2.7 Code。
+
+Lane A/B 使用 OpenCode Go（整个 workspace 共用一个 5 小时/每周/每月额度池；NebulaLab 的 Lane B 除外），Lane C 使用 Command Code；额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。Go 优先用满：Go 返回套餐额度耗尽（`GoUsageLimitError`）时，A/B 的每个模型把同一请求经 Lane C 的固定槽位改发 Command Code 上的同一模型一次（额度溢出，见“配置契约”的 `quota_overflow`），因此 Go 用尽时三路仍可发布；Command Code 用尽时 C 失效而 A/B 不受影响。失败的 Lane 仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
 
 ### 统一 SDK 接入
 
@@ -61,7 +63,7 @@ review-action/config/repositories/
 └─ TshyGO__NebulaGraph-License-Service.json
 ```
 
-七个仓库都使用相同的三 Lane 拓扑。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
+七个仓库都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置同时关闭自动审核、跳过提示评论和状态检查；Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 
@@ -134,9 +136,11 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 - `omit_max_tokens`：仅用于明确要求省略 OpenAI `max_tokens` 的兼容端点。2026-09-16 起没有任何活动 Lane 使用它，字段保留给将来需要该请求形状的兼容端点；`openai-responses` 或 `google-generate-content` 协议下配置该字段会失败关闭。
 - `thinking_level` 只允许配置在实际协议为 `google-generate-content` 的模型上，`effort`（`low`/`medium`/`high`/`xhigh`/`max`）只允许配置在 `anthropic-messages` 模型上，`anthropic-messages` 模型不接受 `temperature`；违反时失败关闭。
 - Gemini 经 Go 时由 SDK 客户端走 `streamGenerateContent?alt=sse`：Go 只在 `https://opencode.ai/inference/go/v1` 提供 Gemini，因此 Lane 的 `/zen/go/v1` base 会映射过去，并带 `x-opencode-session` 与该 Lane 的出口策略。直接接 Google API 的 Lane（provider 不是 `opencode-go`）保留原来的单次 `generateContent` 请求。
-- 模型的 `reporting_calibration`（布尔）：在系统提示末尾追加“报告校准”，要求把有代码证据的可疑问题以 medium/low 置信度报告，而不是自行否决或放进 limitations。当前 Muse 1.3/1.2 与 Hy3 开启：上周生产中 Muse/Kimi/Hy3 有 76–87% 的有效审查报告 0 个问题；实测校准后 Muse 在 #1237/#1133/#1241 由 2/2/— 增至 5/4/3 条，Hy3 由 0/0/1 变为 1/2/1 条（逐条核对：#1241 批量导入未查看文件按内置默认解析为真实问题，另 1 条成立的边界情况、2 条误报），二者在干净改动上均无高置信度误报、难题仍 5/5。Haiku 不开启：它不校准已在大 PR 上报告 1–6 条，开启后 #1237 增至 8 条但干净改动出现 3 条（含 1 条高置信度误报）；effort xhigh/max 即使输出上限 120000 也会在大 PR 上把输出全部用于思考而无报告。
+- 模型的 `reporting_calibration`（布尔）：在系统提示末尾追加“报告校准”，要求把有代码证据的可疑问题以 medium/low 置信度报告，而不是自行否决或放进 limitations。当前 Muse 1.3/1.2 与 Hy3 开启：上周生产中 Muse/Kimi/Hy3 有 76–87% 的有效审查报告 0 个问题；实测校准后 Muse 在 #1237/#1133/#1241 由 2/2/— 增至 5/4/3 条，Hy3 由 0/0/1 变为 1/2/1 条（逐条核对：1 条成立的边界情况、2 条误报；#1241 “批量导入未查看文件按内置默认解析”一条在 2026-10-16 复核时确认引擎会补出相同的默认参数，实际无影响），二者在干净改动上均无高置信度误报、难题仍 5/5。Haiku 不开启：它不校准已在大 PR 上报告 1–6 条，开启后 #1237 增至 8 条但干净改动出现 3 条（含 1 条高置信度误报）；effort xhigh/max 即使输出上限 120000 也会在大 PR 上把输出全部用于思考而无报告。
 - Gemini 已知行为：Gemini 偶尔完全不思考（usage 不含 `thoughtsTokenCount`，约 15–30 秒返回）。目前只在 ci-central #63（diff 大量涉及模型思考内容的处理代码）上观察到：同一请求 6 次中 3 次不思考、3 次思考 1.2–3.1 万 tokens，固定或新 session 结果相同；同仓库 #61/#62 的 4 次与 NebulaLab PR 的二十多次均正常思考。评论脚注此时显示 `Thinking: 0 tokens`，便于在生产中统计频率。
 - Claude 经 Go 的 `/messages`（Anthropic 协议）调用，使用官方 `@anthropic-ai/sdk`，以 `x-api-key` 认证；Lane base 必须以 `/v1` 结尾。请求固定开启 adaptive thinking，深度只由 `effort` 控制。
+- Lane 可选 `first_pass`（与其他模型同样校验，不能配置 `quota_overflow`，id 不得与主备重复）：PR 还没有首审时，它排在主模型前面先审，用同一 Lane 的供应商和密钥；成功后 Lane 评论写入 `ai-pr-review-first-pass:v1` 标记块，之后的提交只走主模型，并把这段首审原样折叠在评论底部（评论超过 GitHub 长度上限时保留标记、正文改为提示查看编辑历史）。首审失败时同一轮由主模型审核且不写标记，下一个提交会再试首审。
+- `provider: anthropic` 的请求只允许在 `RUNNER_ENVIRONMENT=self-hosted` 且 `NEBULA_REVIEW_PROXY_URL=http://192.168.122.1:17890` 时发出：szlab Mihomo 对 `anthropic.com` 只路由到用户的台湾专用节点，没有其他出口。GitHub-hosted、VPS 代理或直连一律拒绝并发布诊断。
 - 模型的 `quota_overflow`（`{ "credential_lane": "C", "id": "<目标供应商的模型 ID>" }`）：本 Lane 供应商返回套餐额度耗尽（`quota-exhausted`，如 Go 的 `GoUsageLimitError`、`insufficient_quota`）时，把同一请求（同一 prompt、协议、输出上限和 effort）改发 `credential_lane` 那条 Lane 的供应商和固定 Secret 槽位一次，模型 ID 换成 `id`，时限为该模型窗口扣除已用时间（含未受理重发及其等待）后的剩余部分，剩余不足 60 秒时不溢出、直接进入 fallback；溢出失败后照常进入本 Lane 的 fallback，fallback 遇到额度耗尽时同样溢出一次。目标必须是另一条已配置、供应商不同、自身没有溢出的 Lane；Google 协议不支持；只允许这两个字段。目标槽位未配置时不溢出，照常发布额度诊断。评论脚注写成 `Lane A: <模型> via <供应商> <目标模型 ID> (<本 Lane 供应商> quota exhausted)` 并加横幅说明，状态表显示“供应商额度已用尽，同模型经溢出供应商运行中”。当前七个仓库的 A/B 全部配置溢出到 Lane C（Command Code）：Muse 1.3/1.2 Contributor → `meta/muse-spark-1.3-contributor` / `meta/muse-spark-1.2-contributor`（Responses），Haiku 5.5 → `claude-haiku-5-5`（Messages），Kimi K2.7 Code → `moonshotai/Kimi-K2.7-Code`（Chat Completions）；2026-10-15 已从 szlab 用生产请求形状（流式、`store:false`、`x-api-key`、adaptive thinking + effort high）验证四者均正常完成。
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。

@@ -1574,7 +1574,8 @@ r = await scenario((call) => call.model === 'claude-sonnet-5-5' ? reply(503, '{"
 const unmarkedBody = laneBBody(r);
 check('NebulaLab: when the first pass cannot serve, Haiku reviews without a first-pass mark or a degraded banner', !r.error
   && laneBCalls(r) === 'claude-sonnet-5-5,claude-haiku-5-5' && unmarkedBody.includes('status=valid')
-  && !unmarkedBody.includes('ai-pr-review-first-pass') && !unmarkedBody.includes('未产生可用审核'));
+  && !unmarkedBody.includes('ai-pr-review-first-pass') && !unmarkedBody.includes('未产生可用审核')
+  && !r.statusUpdates.some((body) => body.includes('| B | claude-haiku-5-5 | 备用模型运行中')));
 r = await scenario(healthy, twEgress, { comments: [{ body: unmarkedBody }], ...commit(nextHead) });
 check('NebulaLab: so the next commit tries the first pass again', !r.error && laneBCalls(r) === 'claude-sonnet-5-5'
   && laneBBody(r).includes(firstPassMark(nextHead)));
@@ -1625,6 +1626,11 @@ r = await scenario((call) => call.lane === 'B' ? Promise.reject(unserved(400, { 
 check('NebulaLab: an ordinary 400 never leaves Anthropic', !r.error
   && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5')
   && laneBBody(r).includes('status=diagnostic') && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
+// The credit reading belongs to the Anthropic route alone: a 402 from Go stays in its lane.
+r = await scenario((call) => call.lane === 'A' ? reply(402, '{"error":{"type":"billing_error"}}') : healthy(call));
+check('a 402 billing_error from a non-Anthropic provider never crosses providers', !r.error
+  && r.captured.filter(({ lane }) => lane === 'A').map(({ model }) => model).join(',') === 'muse-spark-1.3-contributor,muse-spark-1.2-contributor'
+  && !r.captured.some(({ model }) => model.startsWith('meta/')));
 r = await scenario((call) => call.lane === 'B' ? reply(402, '{"type":"error","error":{"type":"billing_error"}}') : healthy(call),
   { ...twEgress, LANE_C_KEY: '', LANE_C_API_BASE: '' });
 check('NebulaLab: without the Lane C slot an exhausted credit says so', laneBBody(r).includes('Anthropic API credit balance is exhausted'));

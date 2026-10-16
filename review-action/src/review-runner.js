@@ -318,7 +318,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return basePayload(scoped);
   }
 
-  function classifyFailure(response, responseText, requestError) {
+  function classifyFailure(response, responseText, requestError, provider) {
     const status = response?.status;
     const rawText = `${responseText || ''}\n${requestError || ''}`;
     const text = rawText.toLowerCase();
@@ -330,9 +330,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /quota[^\n]*reset at/i.test(text)
     ))
-      // An exhausted Anthropic credit balance: 402 billing_error, or the SDK client's
-      // boolean for a 400 "credit balance is too low". It covers every model on the account.
-      || status === 402 || text.includes('billing_error') || text.includes('"credit":"exhausted"');
+      // An exhausted Anthropic credit balance: 402 billing_error, or the SDK client's boolean
+      // for a 400 "credit balance is too low". It covers every model on the account. Only the
+      // Anthropic route reads it this way; the cross-provider exception stays that narrow.
+      || (provider === 'anthropic'
+        && (status === 402 || text.includes('billing_error') || text.includes('"credit":"exhausted"')));
     const authenticationFailed = status === 401 || (
       status === 403
       && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text)
@@ -460,7 +462,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     } finally {
       clearTimeout(timeout);
     }
-    const failure = classifyFailure(response, responseText, requestError);
+    const failure = classifyFailure(response, responseText, requestError, route.provider);
     const usable = response?.ok && !requestError && failure.kind !== 'gateway-blocked';
     const elapsedMs = Date.now() - startedAt;
     console.log(`[Lane ${lane.id}/${route.modelId}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? 'request failed'} error_code=${errorCode || 'none'}${usable ? '' : ` unserved=${unserved}`}`);
@@ -615,7 +617,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let bestPartial = null;
 
     for (const model of chain) {
-      if (model !== chain[0]) await statusPublisher.update(lane.id, 'fallback', model.id);
+      // After a first pass that could not serve, the primary is the lane's normal path, not a fallback.
+      if (model !== chain[0]) await statusPublisher.update(lane.id, model === primary ? 'running' : 'fallback', model.id);
       const supplied = contextFor(model).pack;
       if (!supplied.coverage.some(file => file.patch_available && file.supplied_hunks)) {
         lastOutcome = 'no inspectable material for the configured context profile';

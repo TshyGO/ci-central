@@ -1000,12 +1000,12 @@ ${googleDeepReviewContract}`), model.review_lane_id);
     if (protocol === "google-generate-content") return { model: model.id, ...googlePayload(scoped) };
     return basePayload(scoped);
   }
-  function classifyFailure(response, responseText, requestError) {
+  function classifyFailure(response, responseText, requestError, provider) {
     const status = response?.status;
     const rawText = `${responseText || ""}
 ${requestError || ""}`;
     const text = rawText.toLowerCase();
-    const quotaExhausted = status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"');
+    const quotaExhausted = status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || provider === "anthropic" && (status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"'));
     const authenticationFailed = status === 401 || status === 403 && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text);
     const gatewayBlocked = /^\s*(<!doctype html|<html\b)/i.test(responseText || "") || !response?.ok && text.includes("\u9A8C\u8BC1\u5931\u8D25");
     const endpointUnavailable = !response && /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text);
@@ -1114,7 +1114,7 @@ ${requestError || ""}`;
     } finally {
       clearTimeout(timeout);
     }
-    const failure = classifyFailure(response, responseText, requestError);
+    const failure = classifyFailure(response, responseText, requestError, route.provider);
     const usable = response?.ok && !requestError && failure.kind !== "gateway-blocked";
     const elapsedMs = Date.now() - startedAt;
     console.log(`[Lane ${lane.id}/${route.modelId}] attempt ${attempt} elapsed_ms=${elapsedMs} status=${response?.status ?? httpStatus ?? "request failed"} error_code=${errorCode || "none"}${usable ? "" : ` unserved=${unserved}`}`);
@@ -1269,7 +1269,7 @@ ${requestError || ""}`;
     let lastOutcome = "";
     let bestPartial = null;
     for (const model of chain) {
-      if (model !== chain[0]) await statusPublisher.update(lane.id, "fallback", model.id);
+      if (model !== chain[0]) await statusPublisher.update(lane.id, model === primary ? "running" : "fallback", model.id);
       const supplied = contextFor(model).pack;
       if (!supplied.coverage.some((file) => file.patch_available && file.supplied_hunks)) {
         lastOutcome = "no inspectable material for the configured context profile";

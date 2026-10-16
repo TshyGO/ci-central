@@ -54,11 +54,11 @@ for (const repository of repositories) {
     [null, null],
   ], `${repository} quota overflow must map each model to the same model on Command Code`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
-  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'zai-org/GLM-5.3');
+  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'z-ai/glm-5.3-flash');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
   assert.equal(fromSource.lanes[2].fallbacks[0].max_output_tokens, 65536);
   assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)),
-    onAnthropic ? ['muse-spark-1.2-contributor', 'zai-org/GLM-5.3'] : ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'zai-org/GLM-5.3']);
+    onAnthropic ? ['muse-spark-1.2-contributor', 'z-ai/glm-5.3-flash'] : ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'z-ai/glm-5.3-flash']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.first_pass?.id ?? null), [null, onAnthropic ? 'claude-sonnet-5-5' : null, null],
     `${repository} only NebulaLab's Lane B has a first pass`);
   if (!onAnthropic) {
@@ -106,12 +106,13 @@ for (const repository of repositories) {
   assert.equal(config.lanes[1].request_timeout_ms, 1800000, `${repository} Lane B preserves reasoning with a thirty-minute request ceiling`);
   assert.equal(config.lanes[1].model_budget_ms, 1800000, `${repository} Lane B model budget matches its request ceiling`);
   // Measured 2026-10-15: calibrated Hy3 finished three large NebulaLab PRs in 115-156 s, so it
-  // keeps the lane's fifteen minutes. GLM 5.3 took 10-20 minutes as Lane B's fallback, so it
-  // carries its own thirty-minute request window and the lane cap rises to match.
+  // keeps the lane's fifteen minutes. Measured 2026-10-16: GLM 5.3 Flash finished the same PRs in
+  // 6-8 minutes at 65-69 tok/s; a full 65,536-token report at that rate needs about 17, so it
+  // carries its own twenty-minute request window and the lane cap matches it.
   assert.equal(config.lanes[2].request_timeout_ms, 900000, `${repository} Lane C request budget changed without a measurement behind it`);
-  assert.equal(config.lanes[2].model_budget_ms, 1800000, `${repository} Lane C model cap must leave GLM 5.3 its thirty minutes`);
+  assert.equal(config.lanes[2].model_budget_ms, 1200000, `${repository} Lane C model cap must leave GLM 5.3 Flash its twenty minutes`);
   assert.equal(config.lanes[2].primary.request_timeout_ms, undefined, `${repository} Hy3 inherits the lane's fifteen-minute window`);
-  assert.equal(config.lanes[2].fallbacks[0].request_timeout_ms, 1800000, `${repository} the GLM 5.3 fallback keeps its thirty-minute window`);
+  assert.equal(config.lanes[2].fallbacks[0].request_timeout_ms, 1200000, `${repository} the GLM 5.3 Flash fallback keeps its twenty-minute window`);
   // Measured 2026-10-14: Haiku finished 71-226K-token NebulaLab PRs in 146-211 s.
   assert.equal(config.lanes[1].primary.request_timeout_ms, 900000, `${repository} Lane B Haiku primary uses a fifteen-minute window`);
   if (anthropicLaneB.has(repository)) {
@@ -158,15 +159,15 @@ const inputTokenRoom = {
   'glm-5.3': 1000000,
   'kimi-k2.7-code': 262144,
   hy3: 192000,
-  // Command Code lists a 262,144-token window for Hy3 and 1M for GLM 5.3; Hy3's output is counted against it.
+  // Command Code lists a 262,144-token window for Hy3 and 1M for GLM 5.3 Flash; both count output against it.
   'tencent/hy3-paid': 262144,
-  'zai-org/GLM-5.3': 1000000,
+  'z-ai/glm-5.3-flash': 1000000,
   // Quota overflow targets, from Command Code's /models context_length.
   'meta/muse-spark-1.3-contributor': 1048576,
   'meta/muse-spark-1.2-contributor': 1048576,
   'moonshotai/Kimi-K2.7-Code': 256000,
 };
-const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'moonshotai/Kimi-K2.7-Code']);
+const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'z-ai/glm-5.3-flash', 'moonshotai/Kimi-K2.7-Code']);
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
   const policy = config.review_policy;

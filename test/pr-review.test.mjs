@@ -702,7 +702,7 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
 let r = await scenario(healthy);
 check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:tencent/hy3-paid');
 check('healthy path never calls a fallback', r.captured.length === 3
-  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'zai-org/GLM-5.3'].includes(model)));
+  && !r.captured.some(({ model }) => ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'z-ai/glm-5.3-flash'].includes(model)));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -816,7 +816,7 @@ const sessions = (result, model) => result.captured.filter((call) => call.model 
 r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(429)));
 check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
   && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2
-  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3') && r.timeouts.includes(30000)
+  && !r.captured.some(({ lane, model }) => lane === 'C' && model === 'z-ai/glm-5.3-flash') && r.timeouts.includes(30000)
   && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by'))
   && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
 r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(429, { retryAfterMs: 5000 })));
@@ -826,8 +826,8 @@ check('a stream queued and closed before any output is resent immediately', !r.e
   && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.timeouts.includes(0));
 r = await scenario((call) => call.model === 'tencent/hy3-paid' ? Promise.reject(unserved(503)) : healthy(call));
 check('a resend that is also unserved falls back once instead of retrying again', !r.error
-  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3').length === 1
-  && r.posted.some((body) => body.includes('served by zai-org/GLM-5.3')));
+  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'z-ai/glm-5.3-flash').length === 1
+  && r.posted.some((body) => body.includes('served by z-ai/glm-5.3-flash')));
 for (const [label, error] of [
   ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
   ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
@@ -835,7 +835,7 @@ for (const [label, error] of [
 ]) {
   r = await scenario(firstCallFails('C', 'tencent/hy3-paid', error));
   check(`${label} are never resent`, r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 1
-    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3').length === 1);
+    && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'z-ai/glm-5.3-flash').length === 1);
 }
 r = await scenario(firstCallFails('B', 'claude-haiku-5-5', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model', !r.error
@@ -1070,12 +1070,12 @@ check('Lane B falls back once only to Go Kimi K2.7 Code over chat completions',
   && r.posted.some((body) => body.includes('claude-haiku-5-5 unavailable -> served by kimi-k2.7-code')));
 
 r = await scenario((call) => call.lane === 'C' && call.model === 'tencent/hy3-paid' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-check('Lane C falls back only to Command Code GLM 5.3 after one failed Hy3 request',
+check('Lane C falls back only to Command Code GLM 5.3 Flash after one failed Hy3 request',
   r.captured.filter(({ lane, model }) => lane === 'C' && model === 'tencent/hy3-paid').length === 1
-  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'tencent/hy3-paid,zai-org/GLM-5.3'
-  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3')?.body.max_tokens === 65536
-  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'zai-org/GLM-5.3')?.body.temperature === 0.2
-  && r.posted.some((body) => body.includes('tencent/hy3-paid unavailable -> served by zai-org/GLM-5.3')));
+  && r.captured.filter(({ lane }) => lane === 'C').map(({ model }) => model).join(',') === 'tencent/hy3-paid,z-ai/glm-5.3-flash'
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'z-ai/glm-5.3-flash')?.body.max_tokens === 65536
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'z-ai/glm-5.3-flash')?.body.temperature === undefined
+  && r.posted.some((body) => body.includes('tencent/hy3-paid unavailable -> served by z-ai/glm-5.3-flash')));
 
 // Without a configured overflow, a plan quota keeps the lane on its own provider: the
 // fallback is tried once and the lane publishes a quota diagnostic.

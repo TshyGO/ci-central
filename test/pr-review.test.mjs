@@ -1118,7 +1118,7 @@ check('quota failure without a cross route stays on its provider without affecti
 // reset - while two other lanes had published complete reviews the whole time.
 check('a quota failure on one lane publishes its diagnostic without failing the quorum', !r.error
   && r.posted.length === 3
-  && r.posted.some((body) => body.includes('shared Token Plan quota is exhausted') && body.includes('status=diagnostic'))
+  && r.posted.some((body) => body.includes('the opencode-go plan quota is exhausted') && body.includes('status=diagnostic'))
   && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
 
 // Go's quota is one pool for the whole workspace. Once it is exhausted, Lanes A and B send
@@ -1156,6 +1156,12 @@ check('a failed cross-provider request ends the lane without trying another mode
   && r.posted.some((body) => body.includes('lane=A') && body.includes('status=diagnostic')
     && body.includes('muse-spark-1.3-contributor via command-code meta/muse-spark-1.3-contributor'))
   && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
+// When both plans are exhausted, the diagnostic names the provider that answered last.
+r = await scenario((call) => call.lane === 'A' ? goQuotaReply()
+  : call.model === 'meta/muse-spark-1.3-contributor' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
+check('a quota on the cross-provider route is reported as that provider\'s plan', !r.error
+  && r.posted.some((body) => body.includes('lane=A') && body.includes('status=diagnostic')
+    && body.includes('the command-code plan quota is exhausted') && !body.includes('opencode-go plan quota')));
 // A config may still name a different-model fallback; each model then gets its own cross route,
 // in order: the primary here, the primary there, the fallback here, the fallback there.
 const withFallbackConfig = structuredClone(centralConfig);
@@ -1193,7 +1199,7 @@ for (const [label, failure] of [
 r = await scenario(goExhausted, { LANE_C_KEY: '', LANE_C_API_BASE: '' });
 check('without a provisioned Lane C slot a Go quota stays a quota diagnostic', r.captured.length === 2
   && r.captured.every(({ lane }) => ['A', 'B'].includes(lane)) && /0 of 3 lanes/.test(r.error?.message || '')
-  && r.posted.some((body) => body.includes('lane=A') && body.includes('shared Token Plan quota is exhausted'))
+  && r.posted.some((body) => body.includes('lane=A') && body.includes('the opencode-go plan quota is exhausted'))
   && r.logs.some((line) => line.includes('the Lane C secret slot is not provisioned')));
 r = await scenario(goExhausted, { RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
 check('on self-hosted runners the cross route leaves the Go proxy for the direct Command Code route', !r.error

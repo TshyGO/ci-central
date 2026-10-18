@@ -722,7 +722,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         : lastFailureKind === 'quota-exhausted'
           ? (lastProvider === 'anthropic'
             ? 'Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review.'
-            : 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.')
+            // After a cross-provider attempt the exhausted plan is that provider's, so name it.
+            : `Action needed: the ${lastProvider} plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.`)
           : lastFailureKind === 'authentication-failed'
             ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.`
             : lastFailureKind === 'endpoint-unavailable'

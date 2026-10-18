@@ -32,7 +32,7 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 
 NebulaLab 的 Lane B 使用 Anthropic 官方 API（每月赠送额度）：首审由 Sonnet 5.5 完成，之后的提交由 Haiku 5.5 审核，首审结果折叠保留在同一条 Lane B 评论底部；2026-10-15 在 #1133/#1237/#1241 上实测，Sonnet 被核实的发现全部成立，Haiku 独有的发现（含两条 P1）全部是误报。首审时的 diff 中位数已是最终 diff 的 97%，因此每个 PR 只做一次首审。Haiku 在 Anthropic 上失败（额度耗尽、出口被拒或其他任何原因）时，经 Lane C 槽位改问 Command Code 上的同一模型一次；首审不跨供应商。其余六个仓库的 Lane B 是 OpenCode Go 上的 Claude Haiku 5.5，失败时同样改问 Command Code 上的 Haiku。
 
-Lane A/B 使用 OpenCode Go（整个 workspace 共用一个 5 小时/每周/每月额度池；NebulaLab 的 Lane B 除外），Lane C 使用 Command Code；额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。每条 Lane 只有一个兜底，而且不换模型：主模型在本供应商没有产生可用审核时（任何原因，包括额度耗尽、超时、5xx、限流、认证、网络和不完整输出），把同一请求经另一条 Lane 的固定槽位改发另一供应商上的同一模型一次（见“配置契约”的 `cross_provider`）：A/B 改走 Command Code（Lane C 槽位），C 改走 Go（Lane A 槽位）。因此任一供应商用尽或故障时三路仍可发布；两家同时不可用时 Lane 失效。失败的 Lane 仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
+Lane A/B 使用 OpenCode Go（整个 workspace 共用一个 5 小时/每周/每月额度池；NebulaLab 的 Lane B 除外），Lane C 使用 Command Code；额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。每条 Lane 只有一个兜底，而且不换模型：主模型在本供应商没有产生可用审核时（任何原因，包括额度耗尽、超时、5xx、限流、认证、网络和不完整输出），把同一请求经另一条 Lane 的固定槽位改发另一供应商上的同一模型一次（见“配置契约”的 `cross_provider`）：A/B 改走 Command Code（Lane C 槽位），C 改走 Go（Lane A 槽位）。因此任一供应商用尽或故障时三路仍可发布；但三路的主模型和兜底都在 Go 与 Command Code 这两家上（只有 NebulaLab 的 Lane B 主模型在 Anthropic），两家同时不可用时这些 Lane 会一起失败，达不到两路 quorum，检查变红。失败的 Lane 仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
 
 ### 统一 SDK 接入
 
@@ -71,7 +71,7 @@ CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央�
 
 ## Lane A 数据政策与专用出口
 
-Muse Contributor 会允许供应商将提示词及回答用于训练，非 ZDR；仅在用户明确选择并在 Go 后台 opt-in 后启用。发送 `store:false` 不会撤销 Contributor 的训练许可。跨供应商兜底时同一 Contributor 模型经 Command Code 发送，同样非 ZDR（Command Code 对 Muse 的 `x-cmd-zdr: 1` 返回 422 `cmd_zdr_no_providers`；Hy3、GLM 5.3、Kimi、Haiku 支持 ZDR，当前未强制开启）。地区与数据政策拒绝保持诊断，不降级为批准。
+Muse Contributor 会允许供应商将提示词及回答用于训练，非 ZDR；仅在用户明确选择并在 Go 后台 opt-in 后启用。发送 `store:false` 不会撤销 Contributor 的训练许可。跨供应商兜底时同一 Contributor 模型经 Command Code 发送，同样非 ZDR（Command Code 对 Muse 的 `x-cmd-zdr: 1` 返回 422 `cmd_zdr_no_providers`；Hy3、GLM 5.3、Kimi、Haiku 支持 ZDR，当前未强制开启）。地区与数据政策拒绝不会被当成批准：本供应商拒绝后改问另一供应商上的同一模型，另一供应商也拒绝时发布诊断。
 
 Go 请求带 `NebulaLab-CI-Review/1.0` User-Agent 与每仓库/PR/Lane 稳定的 `x-opencode-session`。A/B 的固定 base 为 `https://opencode.ai/zen/go/v1`；C 使用 Command Code Provider API，Lane C 槽位的 base 为 `https://api.commandcode.ai/provider/v1`（Bearer 认证，不带 `x-opencode-session`，不走 Go 的代理规则，self-hosted 直连；2026-10-15 已从 szlab 出口验证可达）。跨供应商兜底的请求按目标供应商处理：A/B 改发 Command Code 时同样直连、不带 `x-opencode-session`，日志中模型名为 Command Code 的模型 ID；C 改发 Go 上的 `hy3` 时带本 Lane 的 `x-opencode-session`，按下述 Go 直连规则直连。`RUNNER_ENVIRONMENT=github-hosted` 时直接连接并忽略 ambient proxy。明确的 `self-hosted` 环境中，Chat Completions 模型 `kimi-k2.7-code`、`glm-5.3`、`hy3` 使用独立直连 Agent；2026-10-10 已从 ci-review 的中国出口验证三者均返回非空最终内容及 `finish_reason=stop`。Muse Spark 1.3/1.2 直连返回 `403 RegionError`，使用已批准的模型代理：自托管 runner 可通过 `NEBULA_REVIEW_PROXY_URL=http://192.168.122.1:17890` 选择 szlab 内网 Mihomo；未设置该变量时，继续读取原有 `https_proxy` / `HTTPS_PROXY`，兼容 VPS `177.201.224.95:13128`。显式空值或不在白名单内的地址会拒绝请求，不会回退到 VPS 或直连。该变量只影响需要代理的模型，不修改 GitHub 的 runner 全局代理，也不改变 Kimi/GLM/Hy3 的直连。内网入口只允许明确的 self-hosted 环境，固定端口、不接受 URL 凭据、路径、查询或片段。未验证模型、其他协议和未知运行环境仍保留原代理要求，代理缺失或地址不匹配时拒绝直连。Claude Haiku 5.5（Messages）尚未从 ci-review 出口验证直连，因此在 self-hosted 上与 Muse 一样走已批准代理；代理失效时 Go 请求在本地被拒绝、不会发出，A/B 随即改问 Command Code 上的同一模型（直连），C 的 Command Code Hy3 也直连，两路 quorum 不受代理单点影响。SDK 的代理认证只发往代理，不会在请求失败后切换出口重试。日志仅输出模型和 `direct` / `approved-proxy` 路由，不输出代理凭据。两路有效审查的 quorum 不变；Muse 出口失效时，B/C 的有效审查仍可满足门槛。
 
@@ -169,7 +169,7 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - B 的选型（2026-10-06）：GLM 5.3 审核最严谨，但在业务 PR 上每次 6–15 分钟、约 $0.20–0.26；按每月约 850 次审核会单独吃掉约 $170，接近 Go Plus 月额度（约 $180 模型用量），而额度耗尽会同时阻断共用同一账户的 A/B/C。B 因此改为 Kimi K2.7 Code（真实 PR 4–6 分钟、约 $0.10–0.14，曾命中其他模型才发现的关键问题），GLM 5.3 只在 Kimi 失败时兜底；预计每月约 $130–135。Muse Spark 1.3 在同一套实测中难题 5/5、零误报、真实 PR 1–1.5 分钟，继续作为 A。
 - 每个模型在每个供应商上最多一次产生输出的请求，单次窗口是截止上限（A 的 Muse 10 分钟，B 的 Haiku 与 C 的 Hy3 15 分钟），提前失败立即改问另一供应商，无重试、退避或参数修复重发。唯一例外是“未受理重发”（当前没有 Lane 开启）：开启 `resend_unserved` 的 Lane，若请求在产生任何正文、推理或结束原因之前就被上游以 429/5xx 拒绝，或 200 后排队到关流都没有一个数据事件，则换一个 `x-opencode-session`（后缀 `-resend`，避免粘住同一上游）重发同一请求一次：429/5xx 按 `retry-after`（上限 120 秒）或 30 秒后重发，排队关流立即重发；重发只用该请求剩余的窗口（不足 60 秒则不重发），再失败才改问另一供应商。计划额度（`*UsageLimitError`、`insufficient_quota`）、认证、端点不可达、本地截止和已产生输出的失败一律不在原供应商重发。这类请求没有生成内容，重发不会产生重复审核或重复推理费用。主模型在本供应商成功绝不跨供应商；实际经另一供应商生成时评论明确标记。模型是否可用以 exact-head Lane 评论和日志验收，不能用短探针或 wrapper 绿色检查代替。
 - Lane A 只用用户指定的 Muse Spark 1.3 Contributor：Go 上失败时改问 Command Code 上的同一模型，不再用 Muse Spark 1.2 Contributor 兜底（2026-10-18 起）。完整上下文、65536 输出上限，Responses 不添加额外思考或采样参数。
-- reusable job 兜底 70 分钟，覆盖 B、C 最多 30 分钟（本供应商与另一供应商各 15 分钟，三路并行）及准备/发布。正常 `stop` 即结束，不强迫模型消耗全部预算；30 分钟是保护上限，不保证每次都能生成。
+- reusable job 兜底 70 分钟，覆盖 B、C 最多 30 分钟（本供应商与另一供应商各 15 分钟，三路并行）及准备/发布。NebulaLab 的 Lane B 在 PR 首个提交上先跑 Sonnet 首审，首审失败后才由 Haiku 本家、对家各跑一次，最坏 45 分钟，仍在 70 分钟内。正常 `stop` 即结束，不强迫模型消耗全部预算；30 分钟是保护上限，不保证每次都能生成。
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；有效 Lane 数不足 quorum（或未配置 quorum 时缺少必需 Lane）才在发布其他健康 Lane 后明确失败。
 

@@ -332,7 +332,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     ))
       // An exhausted Anthropic credit balance: 402 billing_error, or the SDK client's boolean
       // for a 400 "credit balance is too low". It covers every model on the account. Only the
-      // Anthropic route reads it this way; the cross-provider exception stays that narrow.
+      // Anthropic route reads it this way.
       || (provider === 'anthropic'
         && (status === 402 || text.includes('billing_error') || text.includes('"credit":"exhausted"')));
     const authenticationFailed = status === 401 || (
@@ -359,13 +359,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   }
 
   // Where one request goes: the lane's own provider and fixed secret slot, or the model's
-  // quota overflow (the same model through another lane's provider and slot).
+  // cross-provider fallback (the same model through another lane's provider and slot).
   const ownRoute = (lane, model) => ({ provider: lane.provider, credentialLane: lane.id, modelId: model.id });
 
-  // One served request per model. No retry, backoff, optional-field repair, or
-  // redirect can silently send the same review again; the only resends are the opt-in
-  // unserved case and the quota overflow in requestReview, where no model output was
-  // produced at all.
+  // One served request per model and route. No retry, backoff, optional-field repair, or
+  // redirect can silently send the same review again; the only resend is the opt-in
+  // unserved case in requestReview, where no model output was produced at all.
   async function callModel(lane, model, { windowMs = modelWindowMs(lane, model), sessionSuffix = '', attempt = 1,
     route = ownRoute(lane, model) } = {}) {
     const controller = new AbortController();
@@ -490,27 +489,21 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
   }
 
-  // A plan quota (Go's 5-hour/weekly/monthly pool) covers every model on the provider, so no
-  // model there can serve until it resets. Only then does a model with a configured overflow
-  // send the same request once to the same model through another lane's provider and fixed
-  // secret slot. The exhausted request produced no output, so this cannot duplicate a review;
-  // every other failure stays with the lane's own provider.
-  // The overflow shares the model's window with everything already spent on it, and like the
-  // unserved resend it is skipped when too little of that window is left to finish a review.
-  function quotaOverflow(lane, model, outcome, remainingMs) {
-    const overflow = model.quota_overflow;
-    if (!overflow || outcome.failureKind !== 'quota-exhausted') return null;
-    const target = lanes.find((candidate) => candidate.id === overflow.credential_lane);
-    const credentials = laneCredentials[overflow.credential_lane];
+  // A fallback on the same provider cannot help once that provider's quota is gone or the
+  // provider is down. So when a model's own request yields no usable review, for any reason,
+  // a model with a cross_provider route sends the same request once to the same model through
+  // another lane's provider and fixed secret slot, with a full model window of its own. Only
+  // that one request crosses; the other lane's own models are never entered.
+  function crossRoute(lane, model) {
+    const cross = model.cross_provider;
+    if (!cross) return null;
+    const target = lanes.find((candidate) => candidate.id === cross.credential_lane);
+    const credentials = laneCredentials[cross.credential_lane];
     if (!target || !credentials?.apiKey || !credentials?.baseUrl) {
-      console.log(`[Lane ${lane.id}/${model.id}] quota overflow is configured, but the Lane ${overflow.credential_lane} secret slot is not provisioned.`);
+      console.log(`[Lane ${lane.id}/${model.id}] a cross-provider fallback is configured, but the Lane ${cross.credential_lane} secret slot is not provisioned.`);
       return null;
     }
-    if (remainingMs < UNSERVED_RESEND_MIN_WINDOW_MS) {
-      console.log(`[Lane ${lane.id}/${model.id}] quota overflow skipped: only ${remainingMs} ms of the model window remain.`);
-      return null;
-    }
-    return { provider: target.provider, credentialLane: target.id, modelId: overflow.id, windowMs: remainingMs };
+    return { provider: target.provider, credentialLane: target.id, modelId: cross.id };
   }
 
   function validateAndRender(text, model, complete, finishReason) {
@@ -575,8 +568,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       reasoningUnit: reasoningLength ? 'chars' : null, complete, finishReason: normalizedFinishReason || 'missing' };
   }
 
-  // Primary once, then the same-lane fallback once on failure; never retry either. A
-  // model whose provider quota is exhausted may first overflow once (quotaOverflow).
+  // Each model once on the lane's own provider. When that yields no usable review, for any
+  // reason, a model with a cross_provider route is asked once more there (crossRoute), and only
+  // then does the lane move to its next model. Nothing is retried on the same route.
   async function requestReview(lane) {
     const primary = lane.primary;
     const firstPass = lane.first_pass && !priorFirstPass(lane) ? lane.first_pass : null;
@@ -614,6 +608,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let lastFailureKind = '';
     let lastReportError = '';
     let lastOutcome = '';
+    let lastProvider = lane.provider;
     let bestPartial = null;
 
     for (const model of chain) {
@@ -625,74 +620,75 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);
         continue;
       }
-      let outcome = await callModel(lane, model);
-      let spentMs = outcome.elapsedMs;
-      const resend = unservedResend(lane, model, outcome);
-      if (resend) {
-        console.log(`[Lane ${lane.id}/${model.id}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
-        await statusPublisher.update(lane.id, 'resending', model.id);
-        await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
-        outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: '-resend', attempt: 2 });
-        spentMs += resend.delayMs + outcome.elapsedMs;
-      }
-      const via = quotaOverflow(lane, model, outcome, modelWindowMs(lane, model) - spentMs);
-      if (via) {
-        tried.push(`${model.id} -> ${lane.provider} plan quota exhausted (${outcome.attempts} attempt(s))`);
-        console.log(`[Lane ${lane.id}/${model.id}] ${lane.provider} plan quota is exhausted; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
-        await statusPublisher.update(lane.id, 'overflow', `${via.modelId} @ ${via.provider}`);
-        outcome = await callModel(lane, model, { route: via, windowMs: via.windowMs });
-      }
-      const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
-      const { response, responseText, requestError, attempts, failureKind } = outcome;
-      lastResponse = response;
-      lastResponseText = responseText;
-      lastRequestError = requestError;
-      lastFailureKind = failureKind;
-      lastOutcome = '';
-      if (response?.ok && !requestError && failureKind !== 'gateway-blocked') {
-        try {
-          const { review, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
-          if (review && complete) {
-            return {
-              lane,
-              primary,
-              servedBy: model,
-              servedVia: via,
-              review,
-              reasoningLength,
-              reasoningUnit,
-              // The primary after a first pass that could not serve is the lane's normal path.
-              degraded: model !== primary && model !== firstPass,
-              firstPass: model === firstPass,
-              status: 'valid',
-            };
-          }
-          lastOutcome = !complete
-            ? (finishReason === 'length' ? 'output truncated (finish_reason=length)' : 'output did not complete')
-            : 'empty final response';
-          if (review) {
-            bestPartial ??= {
-              lane,
-              primary,
-              servedBy: model,
-              servedVia: via,
-              review,
-              reasoningLength,
-              reasoningUnit,
-              degraded: model !== primary && model !== firstPass,
-              status: 'partial',
-            };
-            console.log(`[Lane ${lane.id}/${model.id}] response was incomplete; trying the next model in the lane.`);
-          } else {
-            console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
-          }
-        } catch (error) {
-          lastFailureKind = 'report-invalid';
-          lastReportError = error?.message?.startsWith('Review contract:') ? error.message.slice(0, 240) : 'Invalid report envelope.';
-          console.log(`[Lane ${lane.id}/${model.id}] report rejected: ${error?.message?.startsWith('Review contract:') ? error.message : 'invalid report envelope'}`);
+      for (const crossing of [false, true]) {
+        const via = crossing ? crossRoute(lane, model) : null;
+        if (crossing && !via) break;
+        if (via) {
+          console.log(`[Lane ${lane.id}/${model.id}] no usable review from ${lane.provider}; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
+          await statusPublisher.update(lane.id, 'cross', `${via.modelId} @ ${via.provider}`);
         }
+        const route = via ?? ownRoute(lane, model);
+        let outcome = await callModel(lane, model, { route });
+        const resend = unservedResend(lane, model, outcome);
+        if (resend) {
+          console.log(`[Lane ${lane.id}/${route.modelId}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
+          await statusPublisher.update(lane.id, 'resending', route.modelId);
+          await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
+          outcome = await callModel(lane, model, { route, windowMs: resend.windowMs, sessionSuffix: '-resend', attempt: 2 });
+        }
+        const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
+        const { response, responseText, requestError, attempts, failureKind } = outcome;
+        lastProvider = route.provider;
+        lastResponse = response;
+        lastResponseText = responseText;
+        lastRequestError = requestError;
+        lastFailureKind = failureKind;
+        lastOutcome = '';
+        if (response?.ok && !requestError && failureKind !== 'gateway-blocked') {
+          try {
+            const { review, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
+            if (review && complete) {
+              return {
+                lane,
+                primary,
+                servedBy: model,
+                servedVia: via,
+                review,
+                reasoningLength,
+                reasoningUnit,
+                // The primary after a first pass that could not serve is the lane's normal path.
+                degraded: model !== primary && model !== firstPass,
+                firstPass: model === firstPass,
+                status: 'valid',
+              };
+            }
+            lastOutcome = !complete
+              ? (finishReason === 'length' ? 'output truncated (finish_reason=length)' : 'output did not complete')
+              : 'empty final response';
+            if (review) {
+              bestPartial ??= {
+                lane,
+                primary,
+                servedBy: model,
+                servedVia: via,
+                review,
+                reasoningLength,
+                reasoningUnit,
+                degraded: model !== primary && model !== firstPass,
+                status: 'partial',
+              };
+              console.log(`[Lane ${lane.id}/${route.modelId}] response was incomplete; trying the next route or model in the lane.`);
+            } else {
+              console.log(`[Lane ${lane.id}/${route.modelId}] response parsed but contained no review text.`);
+            }
+          } catch (error) {
+            lastFailureKind = 'report-invalid';
+            lastReportError = error?.message?.startsWith('Review contract:') ? error.message.slice(0, 240) : 'Invalid report envelope.';
+            console.log(`[Lane ${lane.id}/${route.modelId}] report rejected: ${error?.message?.startsWith('Review contract:') ? error.message : 'invalid report envelope'}`);
+          }
+        }
+        tried.push(`${attemptLabel} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
       }
-      tried.push(`${attemptLabel} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
@@ -724,15 +720,16 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       gatewayBlocked
         ? 'Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner.'
         : lastFailureKind === 'quota-exhausted'
-          ? (lane.provider === 'anthropic'
+          ? (lastProvider === 'anthropic'
             ? 'Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review.'
-            : 'Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.')
+            // After a cross-provider attempt the exhausted plan is that provider's, so name it.
+            : `Action needed: the ${lastProvider} plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.`)
           : lastFailureKind === 'authentication-failed'
             ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.`
             : lastFailureKind === 'endpoint-unavailable'
-              ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.`
+              ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model and route.`
         : upstreamExhausted
-          ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.`
+          ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health.`
           : lastOutcome
           ? 'Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit.'
         : lastFailureKind === 'report-invalid'
@@ -776,7 +773,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     }
     const reviewedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status, firstPass } = result;
-    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} quota exhausted)` : '';
+    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} unavailable)` : '';
     // Only a valid first-pass review is marked; later reviews carry it, folded and unchanged.
     const isFirstPass = firstPass === true && status === 'valid';
     const prior = isFirstPass ? null : priorFirstPass(lane);
@@ -785,7 +782,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${isFirstPass ? ' (first pass)' : ''}${viaText}`;
     const banner = [
       ...(degraded ? [`> ℹ️ Lane ${lane.id} 的 \`${primary.label}\` 未产生可用审核，本条 review 由同通道备用模型 \`${servedBy.label}\` 生成。`] : []),
-      ...(servedVia ? [`> ℹ️ Lane ${lane.id} 的 \`${lane.provider}\` 套餐额度已用尽，本条 review 由同一模型经 \`${servedVia.provider}\`（Lane ${servedVia.credentialLane} 的固定 Secret 槽位）生成。`] : []),
+      ...(servedVia ? [`> ℹ️ Lane ${lane.id} 的 \`${servedBy.label}\` 在 \`${lane.provider}\` 上未产生可用审核，本条 review 由同一模型经 \`${servedVia.provider}\`（Lane ${servedVia.credentialLane} 的固定 Secret 槽位）生成。`] : []),
     ];
     if (isFirstPass) {
       banner.push(`> ℹ️ 这是本 PR 的首次审核，由 \`${servedBy.label}\` 完成；后续提交由 \`${primary.label}\` 审核，本条首审会折叠保留在评论底部。`);

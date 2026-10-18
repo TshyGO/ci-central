@@ -37,41 +37,35 @@ for (const repository of repositories) {
   const fromBundle = bundled.loadConfig(repository, actionPath);
   const onAnthropic = anthropicLaneB.has(repository);
   assert.equal(fromSource.review_policy.max_attempts, 1);
-  assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === (onAnthropic && lane.id === 'B' ? 0 : 1)));
+  // No lane falls back to a different model; its only fallback is the same model elsewhere.
+  assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 0), `${repository} lanes must not fall back to another model`);
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
-  // Lanes A/B draw on the OpenCode Go plan and Lane C on Command Code, so one exhausted plan
-  // never empties every lane; each lane keeps its fallback with the same provider and key.
+  // Lanes A/B draw on the OpenCode Go plan (NebulaLab's B on Anthropic) and Lane C on Command Code.
   assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', onAnthropic ? 'anthropic' : 'opencode-go', 'command-code'], `${repository} lane providers changed`);
-  // Go's quota is one pool, so when it runs out Lanes A/B overflow to the same models on
-  // Command Code through the Lane C slot. Command Code GOAT served all four on 2026-10-15.
-  // An exhausted Anthropic credit sends NebulaLab's Haiku the same way.
-  assert.deepEqual(fromSource.lanes.map((lane) => [lane.primary, ...lane.fallbacks].map((model) => model.quota_overflow ?? null)), [
-    [{ credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' }, { credential_lane: 'C', id: 'meta/muse-spark-1.2-contributor' }],
-    onAnthropic ? [{ credential_lane: 'C', id: 'claude-haiku-5-5' }]
-      : [{ credential_lane: 'C', id: 'claude-haiku-5-5' }, { credential_lane: 'C', id: 'moonshotai/Kimi-K2.7-Code' }],
-    [null, null],
-  ], `${repository} quota overflow must map each model to the same model on Command Code`);
+  // A fallback on the same provider cannot help once that provider's quota is gone or it is down.
+  // So a primary that yields no usable review, for any reason, is asked once more as the same
+  // model on the other provider: Lanes A/B on Command Code through the Lane C slot, Lane C on Go
+  // through the Lane A slot. Command Code served Muse 1.3 and Haiku on 2026-10-15, and Go
+  // recognised hy3 on 2026-10-18.
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.cross_provider), [
+    { credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' },
+    { credential_lane: 'C', id: 'claude-haiku-5-5' },
+    { credential_lane: 'A', id: 'hy3' },
+  ], `${repository} each primary must name the same model on the other provider`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
-  assert.equal(fromSource.lanes[2].fallbacks[0].id, 'z-ai/glm-5.3-flash');
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
-  assert.equal(fromSource.lanes[2].fallbacks[0].max_output_tokens, 65536);
-  assert.deepEqual(fromSource.lanes.flatMap((lane) => lane.fallbacks.map((model) => model.id)),
-    onAnthropic ? ['muse-spark-1.2-contributor', 'z-ai/glm-5.3-flash'] : ['muse-spark-1.2-contributor', 'kimi-k2.7-code', 'z-ai/glm-5.3-flash']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.first_pass?.id ?? null), [null, onAnthropic ? 'claude-sonnet-5-5' : null, null],
     `${repository} only NebulaLab's Lane B has a first pass`);
-  if (!onAnthropic) {
-    assert.equal(fromSource.lanes[1].fallbacks[0]?.id, 'kimi-k2.7-code', `${repository} Lane B must fall back to Go-hosted Kimi K2.7 Code`);
-    // Lane B's Kimi fallback speaks chat completions while its Haiku primary does not.
-    assert.equal(fromSource.lanes[1].fallbacks[0].protocol, 'openai-chat-completions', `${repository} the Kimi fallback must name its own protocol`);
-  }
+  // Lane C's unserved resend was dropped: each lane is one request on its own provider, then one on the other.
+  assert.ok(fromSource.lanes.every((lane) => lane.resend_unserved === undefined), `${repository} no lane resends on the same provider`);
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
   assert.equal(fromSource.lanes[1].primary.effort, 'high', `${repository} Haiku must stay at high effort`);
   // Calibration took Muse and Hy3 from near-silent to 1-5 findings on large NebulaLab PRs with no
   // high-confidence clean-change noise; on Haiku it only added noise.
   assert.deepEqual(fromSource.lanes.flatMap((lane) => [lane.primary, ...lane.fallbacks]).filter((model) => model.reporting_calibration).map((model) => model.id),
-    ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor', 'tencent/hy3-paid'], `${repository} calibration must stay limited to Muse and Hy3`);
+    ['muse-spark-1.3-contributor', 'tencent/hy3-paid'], `${repository} calibration must stay limited to Muse and Hy3`);
   assert.ok(fromSource.lanes.every((lane) => [lane.primary, ...lane.fallbacks].every((model) => model.thinking_level === undefined)),
     `${repository} no active lane uses Google thinking`);
   // Every active model must send an explicit output ceiling.
@@ -83,11 +77,7 @@ const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
 assert.equal(ciCentral.review_policy.request_timeout_ms, 600000);
 assert.equal(ciCentral.lanes[2].advisory, true, 'ci-central Lane C shares a provider quota and must not gate its own PRs');
 assert.equal(ciCentral.review_policy.model_budget_ms, 720000);
-assert.deepEqual(
-  [ciCentral.lanes[1].primary, ...ciCentral.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-  [120000, 65536],
-  'ci-central Lane B must preserve the Haiku output ceiling and the Kimi fallback space',
-);
+assert.equal(ciCentral.lanes[1].primary.max_output_tokens, 120000, 'ci-central Lane B must preserve the Haiku output ceiling');
 
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
@@ -98,29 +88,20 @@ for (const repository of repositories) {
   assert.ok(config.lanes.slice(0, 2).every((lane) => lane.advisory === undefined), `${repository} Lane A/B must keep gating the job`);
   // Haiku at high effort used up to 47,348 output tokens on a 226K-token PR; 120,000 keeps
   // room for larger changes under its 128K ceiling.
-  assert.deepEqual(
-    [config.lanes[1].primary, ...config.lanes[1].fallbacks].map((model) => model.max_output_tokens),
-    anthropicLaneB.has(repository) ? [120000] : [120000, 65536],
-    `${repository} Lane B must preserve the Haiku output ceiling and the Kimi fallback ceiling`,
-  );
+  assert.equal(config.lanes[1].primary.max_output_tokens, 120000, `${repository} Lane B must preserve the Haiku output ceiling`);
   assert.equal(config.lanes[1].request_timeout_ms, 1800000, `${repository} Lane B preserves reasoning with a thirty-minute request ceiling`);
   assert.equal(config.lanes[1].model_budget_ms, 1800000, `${repository} Lane B model budget matches its request ceiling`);
   // Measured 2026-10-15: calibrated Hy3 finished three large NebulaLab PRs in 115-156 s, so it
-  // keeps the lane's fifteen minutes. Measured 2026-10-16: GLM 5.3 Flash finished the same PRs in
-  // 6-8 minutes at 65-69 tok/s; a full 65,536-token report at that rate needs about 17, so it
-  // carries its own twenty-minute request window and the lane cap matches it.
+  // keeps the lane's fifteen minutes, on Command Code and again on Go.
   assert.equal(config.lanes[2].request_timeout_ms, 900000, `${repository} Lane C request budget changed without a measurement behind it`);
-  assert.equal(config.lanes[2].model_budget_ms, 1200000, `${repository} Lane C model cap must leave GLM 5.3 Flash its twenty minutes`);
+  assert.equal(config.lanes[2].model_budget_ms, 900000, `${repository} Lane C model cap matches Hy3's fifteen minutes`);
   assert.equal(config.lanes[2].primary.request_timeout_ms, undefined, `${repository} Hy3 inherits the lane's fifteen-minute window`);
-  assert.equal(config.lanes[2].fallbacks[0].request_timeout_ms, 1200000, `${repository} the GLM 5.3 Flash fallback keeps its twenty-minute window`);
   // Measured 2026-10-14: Haiku finished 71-226K-token NebulaLab PRs in 146-211 s.
   assert.equal(config.lanes[1].primary.request_timeout_ms, 900000, `${repository} Lane B Haiku primary uses a fifteen-minute window`);
   if (anthropicLaneB.has(repository)) {
     // Measured 2026-10-15 through the TW egress: Sonnet 5.5 finished 71-226K-token NebulaLab PRs
     // in 54-174 s. Its fifteen minutes and Haiku's fit the lane's thirty together.
     assert.equal(config.lanes[1].first_pass.request_timeout_ms, 900000, `${repository} the Sonnet first pass uses a fifteen-minute window`);
-  } else {
-    assert.equal(config.lanes[1].fallbacks[0].request_timeout_ms, 900000, `${repository} Lane B Kimi fallback keeps its measured fifteen-minute window`);
   }
   // A/C budgets are deliberately unchanged even where advisory C can outlast B.
 }
@@ -162,7 +143,7 @@ const inputTokenRoom = {
   // Command Code lists a 262,144-token window for Hy3 and 1M for GLM 5.3 Flash; both count output against it.
   'tencent/hy3-paid': 262144,
   'z-ai/glm-5.3-flash': 1000000,
-  // Quota overflow targets, from Command Code's /models context_length.
+  // Cross-provider targets, from Command Code's /models context_length.
   'meta/muse-spark-1.3-contributor': 1048576,
   'meta/muse-spark-1.2-contributor': 1048576,
   'moonshotai/Kimi-K2.7-Code': 256000,
@@ -177,7 +158,7 @@ for (const repository of repositories) {
   for (const model of [config.lanes[0].primary, ...config.lanes[0].fallbacks]) {
     assert.equal(model.max_output_tokens, 65536, `${repository} ${model.id} must not truncate its report at the old 16K ceiling`);
   }
-  for (const model of [config.lanes[0].primary, ...config.lanes[0].fallbacks, config.lanes[1].primary, config.lanes[2].fallbacks[0]]) {
+  for (const model of [config.lanes[0].primary, config.lanes[1].primary]) {
     assert.equal(model.diff_char_budget, 1200000, `${repository} ${model.id} must use its 1M-token window for large changes`);
   }
   assert.deepEqual([config.lanes[0].request_timeout_ms, config.lanes[0].model_budget_ms], [600000, 600000],
@@ -189,12 +170,12 @@ for (const repository of repositories) {
       const sharedOutput = sharesWindowWithOutput.has(model.id) ? model.max_output_tokens : 0;
       assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + sharedOutput <= inputTokenRoom[model.id],
         `${repository} Lane ${lane.id} ${model.id} context budget can exceed its model window`);
-      // The overflow resends the same prompt, so it must fit the target model's window too.
-      const overflowId = model.quota_overflow?.id;
-      if (overflowId) {
-        const overflowOutput = sharesWindowWithOutput.has(overflowId) ? model.max_output_tokens : 0;
-        assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + overflowOutput <= inputTokenRoom[overflowId],
-          `${repository} Lane ${lane.id} ${model.id} overflow ${overflowId} context budget can exceed its model window`);
+      // The cross-provider fallback resends the same prompt, so it must fit the target model's window too.
+      const crossId = model.cross_provider?.id;
+      if (crossId) {
+        const crossOutput = sharesWindowWithOutput.has(crossId) ? model.max_output_tokens : 0;
+        assert.ok((diffChars + promptChars) / WORST_CHARS_PER_TOKEN + crossOutput <= inputTokenRoom[crossId],
+          `${repository} Lane ${lane.id} ${model.id} cross-provider ${crossId} context budget can exceed its model window`);
       }
     }
   }
@@ -206,7 +187,7 @@ assert.equal(nebula.lanes[1].provider, 'anthropic');
 assert.equal(nebula.lanes[2].provider, 'command-code');
 assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
 assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
-assert.equal(nebula.lanes[0].fallbacks[0].context_profile, 'full');
+assert.equal(nebula.lanes[0].primary.context_profile, 'full');
 // Sonnet 5.5 found real defects Haiku missed and none of Haiku's false P1s on NebulaLab
 // #1133/#1237/#1241 (2026-10-15), at 0.4x Haiku's output. A first review sees a median 97% of
 // the final diff, so it runs once per PR and Haiku reviews the later commits.
@@ -220,7 +201,7 @@ assert.equal(nebula.lanes[1].primary.reporting_calibration, undefined, 'Haiku st
 // share an id with the models that follow it.
 for (const loader of [source, bundled]) {
   for (const [mutate, message] of [
-    [(config) => { config.lanes[1].first_pass.quota_overflow = { credential_lane: 'C', id: 'claude-sonnet-5-5' }; }, /first_pass cannot configure quota_overflow/],
+    [(config) => { config.lanes[1].first_pass.cross_provider = { credential_lane: 'C', id: 'claude-sonnet-5-5' }; }, /first_pass cannot configure cross_provider/],
     [(config) => { config.lanes[1].first_pass.id = config.lanes[1].primary.id; }, /duplicate first-pass\/primary\/fallback/],
     [(config) => { config.lanes[1].first_pass.effort = 'extreme'; }, /first_pass\.effort is not supported/],
     [(config) => { config.lanes[1].first_pass.temperature = 0.2; }, /first_pass\.temperature is not supported by anthropic-messages/],
@@ -237,14 +218,16 @@ for (const loader of [source, bundled]) {
   const badAttempts = structuredClone(nebula);
   badAttempts.review_policy.max_attempts = 3;
   assert.throws(() => loader.validateConfig(badAttempts, 'TshyGO/NebulaLab'), /max_attempts must be 1/);
+  // The engine still accepts one different-model fallback per lane, but never a second.
   const extraFallback = structuredClone(nebula);
-  extraFallback.lanes[0].fallbacks.push({ ...extraFallback.lanes[0].fallbacks[0], id: 'third-model' });
+  const { cross_provider: _, ...sameLaneModel } = extraFallback.lanes[0].primary;
+  extraFallback.lanes[0].fallbacks.push({ ...sameLaneModel, id: 'second-model' }, { ...sameLaneModel, id: 'third-model' });
   assert.throws(() => loader.validateConfig(extraFallback, 'TshyGO/NebulaLab'), /at most one fallback/);
 }
 for (const loader of [source, bundled]) {
   for (const invalid of [0, -1, 1.5, '300000', null]) {
     const config = structuredClone(nebula);
-    config.lanes[2].fallbacks[0].request_timeout_ms = invalid;
+    config.lanes[2].primary.request_timeout_ms = invalid;
     assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), /request_timeout_ms must be a positive integer/);
   }
 }
@@ -253,11 +236,12 @@ duplicateAcrossLanes.lanes[1].primary.id = duplicateAcrossLanes.lanes[0].primary
 assert.doesNotThrow(() => source.validateConfig(duplicateAcrossLanes, 'TshyGO/NebulaLab'), 'routing must be lane-scoped, not keyed globally by model id');
 
 const duplicateInsideLane = structuredClone(nebula);
-duplicateInsideLane.lanes[0].fallbacks[0].id = duplicateInsideLane.lanes[0].primary.id;
+duplicateInsideLane.lanes[0].fallbacks.push({ ...duplicateInsideLane.lanes[0].primary, cross_provider: undefined });
 assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab'), /duplicate first-pass\/primary\/fallback/);
 
 const invalidThinkingLevel = structuredClone(nebula);
 invalidThinkingLevel.lanes[2].protocol = 'google-generate-content';
+delete invalidThinkingLevel.lanes[2].primary.cross_provider;
 invalidThinkingLevel.lanes[2].primary.thinking_level = 'maximum';
 assert.throws(() => source.validateConfig(invalidThinkingLevel, 'TshyGO/NebulaLab'), /thinking_level is not supported/);
 
@@ -271,6 +255,7 @@ assert.throws(() => source.validateConfig(invalidOmitMaxTokens, 'TshyGO/NebulaLa
 
 const googleOmitMaxTokens = structuredClone(nebula);
 googleOmitMaxTokens.lanes[2].protocol = 'google-generate-content';
+delete googleOmitMaxTokens.lanes[2].primary.cross_provider;
 googleOmitMaxTokens.lanes[2].primary.omit_max_tokens = true;
 assert.throws(() => source.validateConfig(googleOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens is only supported by openai-chat-completions/);
 
@@ -292,24 +277,28 @@ const everyLaneAdvisory = structuredClone(nebula);
 for (const lane of everyLaneAdvisory.lanes) lane.advisory = true;
 assert.throws(() => source.validateConfig(everyLaneAdvisory, 'TshyGO/NebulaLab'), /At least one lane must be required/);
 
-// Quota overflow is the only cross-provider path, so its shape is strict.
+// The cross-provider fallback sends a review to another lane's provider, so its shape is strict.
 for (const loader of [source, bundled]) {
   for (const [mutate, message] of [
-    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'A'; }, /must name another configured lane/],
-    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'D'; }, /must name another configured lane/],
-    // NebulaLab's Lane B is on Anthropic, and its Haiku overflows itself.
-    [(config) => { config.lanes[0].primary.quota_overflow.credential_lane = 'B'; }, /cannot target a lane that overflows itself/],
-    [(config) => { config.lanes[1].provider = 'opencode-go'; config.lanes[1].primary.quota_overflow.credential_lane = 'A'; }, /provider other than the lane's own/],
-    [(config) => { config.lanes[0].primary.quota_overflow.id = ' '; }, /quota_overflow\.id must be a non-empty string/],
-    [(config) => { config.lanes[0].primary.quota_overflow.provider = 'other'; }, /only credential_lane and id/],
-    [(config) => { config.lanes[0].primary.quota_overflow = 'C'; }, /only credential_lane and id/],
-    [(config) => { config.lanes[2].primary.quota_overflow = { credential_lane: 'A', id: 'muse-spark-1.3-contributor' }; }, /cannot target a lane that overflows itself/],
+    [(config) => { config.lanes[0].primary.cross_provider.credential_lane = 'A'; }, /must name another configured lane/],
+    [(config) => { config.lanes[0].primary.cross_provider.credential_lane = 'D'; }, /must name another configured lane/],
+    [(config) => { config.lanes[1].provider = 'opencode-go'; config.lanes[1].primary.cross_provider.credential_lane = 'A'; }, /provider other than the lane's own/],
+    [(config) => { config.lanes[0].primary.cross_provider.id = ' '; }, /cross_provider\.id must be a non-empty string/],
+    [(config) => { config.lanes[0].primary.cross_provider.provider = 'other'; }, /only credential_lane and id/],
+    [(config) => { config.lanes[0].primary.cross_provider = 'C'; }, /only credential_lane and id/],
     [(config) => { config.lanes[0].protocol = 'google-generate-content'; }, /not supported by google-generate-content/],
+    // The quota-only overflow it replaced must not be ignored silently in a stale config.
+    [(config) => { config.lanes[0].primary.quota_overflow = { credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' }; }, /quota_overflow was replaced by cross_provider/],
   ]) {
     const config = structuredClone(nebula);
     mutate(config);
     assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), message);
   }
+  // Only the one request crosses, never the target lane's own chain, so lanes may name each
+  // other (A and C already do) and may target a lane that crosses too.
+  const towardAnthropic = structuredClone(nebula);
+  towardAnthropic.lanes[0].primary.cross_provider.credential_lane = 'B';
+  assert.doesNotThrow(() => loader.validateConfig(towardAnthropic, 'TshyGO/NebulaLab'));
 }
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-config-'));

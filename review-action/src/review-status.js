@@ -4,7 +4,7 @@ const MARKER = '<!-- ai-pr-review-status:v1 -->';
 const labels = { running: '主模型运行中', fallback: '备用模型运行中', complete: '已生成，证据格式已校验',
   reused: '复用当前提交的有效证据', failed: '审核未生成', partial: '输出不完整，不计入 quorum',
   publication_failed: '结果发布失败，不计入 quorum', resending: '模型未受理，换会话重发一次中',
-  overflow: '供应商额度已用尽，同模型经溢出供应商运行中',
+  cross: '本供应商未产生可用审核，同模型经另一供应商运行中',
   skipped: '无可审查的文本补丁，未请求模型' };
 const cell = (text) => String(text ?? '').replace(/[|`<>\r\n]/g, ' ');
 

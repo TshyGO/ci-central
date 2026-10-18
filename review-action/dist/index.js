@@ -52,30 +52,28 @@ function validateModel(model, location) {
   }
 }
 
-// The one cross-provider path: a plan quota covers the whole provider account, so when it is
-// exhausted the same model may be asked once through the provider behind another lane's fixed
-// secret slot. It stays this lane's review, by the same model; nothing else crosses providers.
-function validateQuotaOverflow(config, lane, model, protocol, location) {
-  const overflow = model.quota_overflow;
-  if (!overflow || typeof overflow !== 'object' || Array.isArray(overflow)
-    || Object.keys(overflow).some((key) => !['credential_lane', 'id'].includes(key))) {
-    throw new Error(`${location}.quota_overflow must be an object with only credential_lane and id.`);
+// A model's cross-provider fallback: when its own request fails for any reason, the same model
+// is asked once through the provider behind another lane's fixed secret slot. It stays this
+// lane's review, by the same model; the other lane's own models are never entered, so two lanes
+// may name each other.
+function validateCrossProvider(config, lane, model, protocol, location) {
+  const cross = model.cross_provider;
+  if (!cross || typeof cross !== 'object' || Array.isArray(cross)
+    || Object.keys(cross).some((key) => !['credential_lane', 'id'].includes(key))) {
+    throw new Error(`${location}.cross_provider must be an object with only credential_lane and id.`);
   }
-  if (typeof overflow.id !== 'string' || !overflow.id.trim()) {
-    throw new Error(`${location}.quota_overflow.id must be a non-empty string.`);
+  if (typeof cross.id !== 'string' || !cross.id.trim()) {
+    throw new Error(`${location}.cross_provider.id must be a non-empty string.`);
   }
-  const target = config.lanes.find((candidate) => candidate?.id === overflow.credential_lane);
-  if (!target || overflow.credential_lane === lane.id) {
-    throw new Error(`${location}.quota_overflow.credential_lane must name another configured lane.`);
+  const target = config.lanes.find((candidate) => candidate?.id === cross.credential_lane);
+  if (!target || cross.credential_lane === lane.id) {
+    throw new Error(`${location}.cross_provider.credential_lane must name another configured lane.`);
   }
   if (typeof target.provider !== 'string' || target.provider === lane.provider) {
-    throw new Error(`${location}.quota_overflow must use a provider other than the lane's own; a quota covers the whole provider.`);
+    throw new Error(`${location}.cross_provider must use a provider other than the lane's own.`);
   }
   if (protocol === 'google-generate-content') {
-    throw new Error(`${location}.quota_overflow is not supported by google-generate-content.`);
-  }
-  if ([target.primary, ...(Array.isArray(target.fallbacks) ? target.fallbacks : [])].some((candidate) => candidate?.quota_overflow !== undefined)) {
-    throw new Error(`${location}.quota_overflow cannot target a lane that overflows itself.`);
+    throw new Error(`${location}.cross_provider is not supported by google-generate-content.`);
   }
 }
 
@@ -137,14 +135,14 @@ function validateConfig(config, repository) {
     if (lane.fallbacks.length > 1) throw new Error(`${location} supports at most one fallback.`);
     lane.fallbacks.forEach((model, modelIndex) => validateModel(model, `${location}.fallbacks[${modelIndex}]`));
     // An optional first pass reviews a PR's first commit ahead of the primary, on the lane's own
-    // provider and key. Later commits go straight to the primary, so it has no overflow of its own:
-    // when it cannot serve, the lane's normal chain does.
+    // provider and key. Later commits go straight to the primary, so it has no cross-provider
+    // fallback of its own: when it cannot serve, the lane's normal chain does.
     const modelEntries = [[lane.primary, `${location}.primary`],
       ...lane.fallbacks.map((model, modelIndex) => [model, `${location}.fallbacks[${modelIndex}]`])];
     if (lane.first_pass !== undefined) {
       validateModel(lane.first_pass, `${location}.first_pass`);
-      if (lane.first_pass.quota_overflow !== undefined) {
-        throw new Error(`${location}.first_pass cannot configure quota_overflow; the lane's own chain serves when it cannot.`);
+      if (lane.first_pass.cross_provider !== undefined) {
+        throw new Error(`${location}.first_pass cannot configure cross_provider; the lane's own chain serves when it cannot.`);
       }
       modelEntries.unshift([lane.first_pass, `${location}.first_pass`]);
     }
@@ -161,7 +159,11 @@ function validateConfig(config, repository) {
       if (model.temperature !== undefined && protocol === 'anthropic-messages') {
         throw new Error(`${modelLocation}.temperature is not supported by anthropic-messages.`);
       }
-      if (model.quota_overflow !== undefined) validateQuotaOverflow(config, lane, model, protocol, modelLocation);
+      // The quota-only overflow became cross_provider; a stale config must not lose it silently.
+      if (model.quota_overflow !== undefined) {
+        throw new Error(`${modelLocation}.quota_overflow was replaced by cross_provider.`);
+      }
+      if (model.cross_provider !== undefined) validateCrossProvider(config, lane, model, protocol, modelLocation);
       if (model.thinking_level === undefined) continue;
       if (protocol !== 'google-generate-content') {
         throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);

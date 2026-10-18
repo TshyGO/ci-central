@@ -56,26 +56,23 @@ var require_index = __commonJS({
         throw new Error(`${location}.protocol is not supported.`);
       }
     }
-    function validateQuotaOverflow(config, lane, model, protocol, location) {
-      const overflow = model.quota_overflow;
-      if (!overflow || typeof overflow !== "object" || Array.isArray(overflow) || Object.keys(overflow).some((key) => !["credential_lane", "id"].includes(key))) {
-        throw new Error(`${location}.quota_overflow must be an object with only credential_lane and id.`);
+    function validateCrossProvider(config, lane, model, protocol, location) {
+      const cross = model.cross_provider;
+      if (!cross || typeof cross !== "object" || Array.isArray(cross) || Object.keys(cross).some((key) => !["credential_lane", "id"].includes(key))) {
+        throw new Error(`${location}.cross_provider must be an object with only credential_lane and id.`);
       }
-      if (typeof overflow.id !== "string" || !overflow.id.trim()) {
-        throw new Error(`${location}.quota_overflow.id must be a non-empty string.`);
+      if (typeof cross.id !== "string" || !cross.id.trim()) {
+        throw new Error(`${location}.cross_provider.id must be a non-empty string.`);
       }
-      const target = config.lanes.find((candidate) => candidate?.id === overflow.credential_lane);
-      if (!target || overflow.credential_lane === lane.id) {
-        throw new Error(`${location}.quota_overflow.credential_lane must name another configured lane.`);
+      const target = config.lanes.find((candidate) => candidate?.id === cross.credential_lane);
+      if (!target || cross.credential_lane === lane.id) {
+        throw new Error(`${location}.cross_provider.credential_lane must name another configured lane.`);
       }
       if (typeof target.provider !== "string" || target.provider === lane.provider) {
-        throw new Error(`${location}.quota_overflow must use a provider other than the lane's own; a quota covers the whole provider.`);
+        throw new Error(`${location}.cross_provider must use a provider other than the lane's own.`);
       }
       if (protocol === "google-generate-content") {
-        throw new Error(`${location}.quota_overflow is not supported by google-generate-content.`);
-      }
-      if ([target.primary, ...Array.isArray(target.fallbacks) ? target.fallbacks : []].some((candidate) => candidate?.quota_overflow !== void 0)) {
-        throw new Error(`${location}.quota_overflow cannot target a lane that overflows itself.`);
+        throw new Error(`${location}.cross_provider is not supported by google-generate-content.`);
       }
     }
     function validateConfig2(config, repository) {
@@ -139,8 +136,8 @@ var require_index = __commonJS({
         ];
         if (lane.first_pass !== void 0) {
           validateModel(lane.first_pass, `${location}.first_pass`);
-          if (lane.first_pass.quota_overflow !== void 0) {
-            throw new Error(`${location}.first_pass cannot configure quota_overflow; the lane's own chain serves when it cannot.`);
+          if (lane.first_pass.cross_provider !== void 0) {
+            throw new Error(`${location}.first_pass cannot configure cross_provider; the lane's own chain serves when it cannot.`);
           }
           modelEntries.unshift([lane.first_pass, `${location}.first_pass`]);
         }
@@ -156,7 +153,10 @@ var require_index = __commonJS({
           if (model.temperature !== void 0 && protocol === "anthropic-messages") {
             throw new Error(`${modelLocation}.temperature is not supported by anthropic-messages.`);
           }
-          if (model.quota_overflow !== void 0) validateQuotaOverflow(config, lane, model, protocol, modelLocation);
+          if (model.quota_overflow !== void 0) {
+            throw new Error(`${modelLocation}.quota_overflow was replaced by cross_provider.`);
+          }
+          if (model.cross_provider !== void 0) validateCrossProvider(config, lane, model, protocol, modelLocation);
           if (model.thinking_level === void 0) continue;
           if (protocol !== "google-generate-content") {
             throw new Error(`${modelLocation}.thinking_level is only supported by google-generate-content.`);
@@ -620,7 +620,7 @@ var require_review_status = __commonJS({
       partial: "\u8F93\u51FA\u4E0D\u5B8C\u6574\uFF0C\u4E0D\u8BA1\u5165 quorum",
       publication_failed: "\u7ED3\u679C\u53D1\u5E03\u5931\u8D25\uFF0C\u4E0D\u8BA1\u5165 quorum",
       resending: "\u6A21\u578B\u672A\u53D7\u7406\uFF0C\u6362\u4F1A\u8BDD\u91CD\u53D1\u4E00\u6B21\u4E2D",
-      overflow: "\u4F9B\u5E94\u5546\u989D\u5EA6\u5DF2\u7528\u5C3D\uFF0C\u540C\u6A21\u578B\u7ECF\u6EA2\u51FA\u4F9B\u5E94\u5546\u8FD0\u884C\u4E2D",
+      cross: "\u672C\u4F9B\u5E94\u5546\u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u540C\u6A21\u578B\u7ECF\u53E6\u4E00\u4F9B\u5E94\u5546\u8FD0\u884C\u4E2D",
       skipped: "\u65E0\u53EF\u5BA1\u67E5\u7684\u6587\u672C\u8865\u4E01\uFF0C\u672A\u8BF7\u6C42\u6A21\u578B"
     };
     var cell = (text) => String(text ?? "").replace(/[|`<>\r\n]/g, " ");
@@ -1145,20 +1145,16 @@ ${requestError || ""}`;
     const windowMs = modelWindowMs(lane, model) - outcome.elapsedMs - delayMs;
     return windowMs >= UNSERVED_RESEND_MIN_WINDOW_MS ? { delayMs, windowMs } : null;
   }
-  function quotaOverflow(lane, model, outcome, remainingMs) {
-    const overflow = model.quota_overflow;
-    if (!overflow || outcome.failureKind !== "quota-exhausted") return null;
-    const target = lanes.find((candidate) => candidate.id === overflow.credential_lane);
-    const credentials = laneCredentials[overflow.credential_lane];
+  function crossRoute(lane, model) {
+    const cross = model.cross_provider;
+    if (!cross) return null;
+    const target = lanes.find((candidate) => candidate.id === cross.credential_lane);
+    const credentials = laneCredentials[cross.credential_lane];
     if (!target || !credentials?.apiKey || !credentials?.baseUrl) {
-      console.log(`[Lane ${lane.id}/${model.id}] quota overflow is configured, but the Lane ${overflow.credential_lane} secret slot is not provisioned.`);
+      console.log(`[Lane ${lane.id}/${model.id}] a cross-provider fallback is configured, but the Lane ${cross.credential_lane} secret slot is not provisioned.`);
       return null;
     }
-    if (remainingMs < UNSERVED_RESEND_MIN_WINDOW_MS) {
-      console.log(`[Lane ${lane.id}/${model.id}] quota overflow skipped: only ${remainingMs} ms of the model window remain.`);
-      return null;
-    }
-    return { provider: target.provider, credentialLane: target.id, modelId: overflow.id, windowMs: remainingMs };
+    return { provider: target.provider, credentialLane: target.id, modelId: cross.id };
   }
   function validateAndRender(text, model, complete, finishReason) {
     const supplied = contextFor(model).pack;
@@ -1267,6 +1263,7 @@ ${requestError || ""}`;
     let lastFailureKind = "";
     let lastReportError = "";
     let lastOutcome = "";
+    let lastProvider = lane.provider;
     let bestPartial = null;
     for (const model of chain) {
       if (model !== chain[0]) await statusPublisher.update(lane.id, model === primary ? "running" : "fallback", model.id);
@@ -1276,72 +1273,73 @@ ${requestError || ""}`;
         tried.push(`${model.id} -> ${lastOutcome} (0 attempt(s))`);
         continue;
       }
-      let outcome = await callModel(lane, model);
-      let spentMs = outcome.elapsedMs;
-      const resend = unservedResend(lane, model, outcome);
-      if (resend) {
-        console.log(`[Lane ${lane.id}/${model.id}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
-        await statusPublisher.update(lane.id, "resending", model.id);
-        await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
-        outcome = await callModel(lane, model, { windowMs: resend.windowMs, sessionSuffix: "-resend", attempt: 2 });
-        spentMs += resend.delayMs + outcome.elapsedMs;
-      }
-      const via = quotaOverflow(lane, model, outcome, modelWindowMs(lane, model) - spentMs);
-      if (via) {
-        tried.push(`${model.id} -> ${lane.provider} plan quota exhausted (${outcome.attempts} attempt(s))`);
-        console.log(`[Lane ${lane.id}/${model.id}] ${lane.provider} plan quota is exhausted; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
-        await statusPublisher.update(lane.id, "overflow", `${via.modelId} @ ${via.provider}`);
-        outcome = await callModel(lane, model, { route: via, windowMs: via.windowMs });
-      }
-      const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
-      const { response, responseText, requestError, attempts, failureKind } = outcome;
-      lastResponse = response;
-      lastResponseText = responseText;
-      lastRequestError = requestError;
-      lastFailureKind = failureKind;
-      lastOutcome = "";
-      if (response?.ok && !requestError && failureKind !== "gateway-blocked") {
-        try {
-          const { review: review2, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
-          if (review2 && complete) {
-            return {
-              lane,
-              primary,
-              servedBy: model,
-              servedVia: via,
-              review: review2,
-              reasoningLength,
-              reasoningUnit,
-              // The primary after a first pass that could not serve is the lane's normal path.
-              degraded: model !== primary && model !== firstPass,
-              firstPass: model === firstPass,
-              status: "valid"
-            };
-          }
-          lastOutcome = !complete ? finishReason === "length" ? "output truncated (finish_reason=length)" : "output did not complete" : "empty final response";
-          if (review2) {
-            bestPartial ??= {
-              lane,
-              primary,
-              servedBy: model,
-              servedVia: via,
-              review: review2,
-              reasoningLength,
-              reasoningUnit,
-              degraded: model !== primary && model !== firstPass,
-              status: "partial"
-            };
-            console.log(`[Lane ${lane.id}/${model.id}] response was incomplete; trying the next model in the lane.`);
-          } else {
-            console.log(`[Lane ${lane.id}/${model.id}] response parsed but contained no review text.`);
-          }
-        } catch (error) {
-          lastFailureKind = "report-invalid";
-          lastReportError = error?.message?.startsWith("Review contract:") ? error.message.slice(0, 240) : "Invalid report envelope.";
-          console.log(`[Lane ${lane.id}/${model.id}] report rejected: ${error?.message?.startsWith("Review contract:") ? error.message : "invalid report envelope"}`);
+      for (const crossing of [false, true]) {
+        const via = crossing ? crossRoute(lane, model) : null;
+        if (crossing && !via) break;
+        if (via) {
+          console.log(`[Lane ${lane.id}/${model.id}] no usable review from ${lane.provider}; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
+          await statusPublisher.update(lane.id, "cross", `${via.modelId} @ ${via.provider}`);
         }
+        const route = via ?? ownRoute(lane, model);
+        let outcome = await callModel(lane, model, { route });
+        const resend = unservedResend(lane, model, outcome);
+        if (resend) {
+          console.log(`[Lane ${lane.id}/${route.modelId}] no model output was produced (HTTP ${outcome.httpStatus}); resending once with a fresh session after ${resend.delayMs} ms.`);
+          await statusPublisher.update(lane.id, "resending", route.modelId);
+          await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
+          outcome = await callModel(lane, model, { route, windowMs: resend.windowMs, sessionSuffix: "-resend", attempt: 2 });
+        }
+        const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
+        const { response, responseText, requestError, attempts, failureKind } = outcome;
+        lastProvider = route.provider;
+        lastResponse = response;
+        lastResponseText = responseText;
+        lastRequestError = requestError;
+        lastFailureKind = failureKind;
+        lastOutcome = "";
+        if (response?.ok && !requestError && failureKind !== "gateway-blocked") {
+          try {
+            const { review: review2, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
+            if (review2 && complete) {
+              return {
+                lane,
+                primary,
+                servedBy: model,
+                servedVia: via,
+                review: review2,
+                reasoningLength,
+                reasoningUnit,
+                // The primary after a first pass that could not serve is the lane's normal path.
+                degraded: model !== primary && model !== firstPass,
+                firstPass: model === firstPass,
+                status: "valid"
+              };
+            }
+            lastOutcome = !complete ? finishReason === "length" ? "output truncated (finish_reason=length)" : "output did not complete" : "empty final response";
+            if (review2) {
+              bestPartial ??= {
+                lane,
+                primary,
+                servedBy: model,
+                servedVia: via,
+                review: review2,
+                reasoningLength,
+                reasoningUnit,
+                degraded: model !== primary && model !== firstPass,
+                status: "partial"
+              };
+              console.log(`[Lane ${lane.id}/${route.modelId}] response was incomplete; trying the next route or model in the lane.`);
+            } else {
+              console.log(`[Lane ${lane.id}/${route.modelId}] response parsed but contained no review text.`);
+            }
+          } catch (error) {
+            lastFailureKind = "report-invalid";
+            lastReportError = error?.message?.startsWith("Review contract:") ? error.message.slice(0, 240) : "Invalid report envelope.";
+            console.log(`[Lane ${lane.id}/${route.modelId}] report rejected: ${error?.message?.startsWith("Review contract:") ? error.message : "invalid report envelope"}`);
+          }
+        }
+        tried.push(`${attemptLabel} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? "request failed"}`} (${attempts ?? 0} attempt(s))`);
       }
-      tried.push(`${attemptLabel} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? "request failed"}`} (${attempts ?? 0} attempt(s))`);
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
       }
@@ -1367,7 +1365,7 @@ ${snippet}
 ${fence}
 </details>` : "",
       "",
-      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lane.provider === "anthropic" ? "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : "Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review." : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model. Models sharing that Lane cannot bypass its network failure.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health; do not add a cross-lane fallback.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
+      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lastProvider === "anthropic" ? "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : "Action needed: the shared Token Plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review." : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model and route.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
     ].join("\n");
     return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false, status: "diagnostic" };
   }
@@ -1396,13 +1394,13 @@ ${fence}
     }
     const reviewedAt = (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
     const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status, firstPass } = result;
-    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} quota exhausted)` : "";
+    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} unavailable)` : "";
     const isFirstPass = firstPass === true && status === "valid";
     const prior = isFirstPass ? null : priorFirstPass(lane);
     const modelLine = degraded ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}` : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${isFirstPass ? " (first pass)" : ""}${viaText}`;
     const banner = [
       ...degraded ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${primary.label}\` \u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u672C\u6761 review \u7531\u540C\u901A\u9053\u5907\u7528\u6A21\u578B \`${servedBy.label}\` \u751F\u6210\u3002`] : [],
-      ...servedVia ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${lane.provider}\` \u5957\u9910\u989D\u5EA6\u5DF2\u7528\u5C3D\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF \`${servedVia.provider}\`\uFF08Lane ${servedVia.credentialLane} \u7684\u56FA\u5B9A Secret \u69FD\u4F4D\uFF09\u751F\u6210\u3002`] : []
+      ...servedVia ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${servedBy.label}\` \u5728 \`${lane.provider}\` \u4E0A\u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF \`${servedVia.provider}\`\uFF08Lane ${servedVia.credentialLane} \u7684\u56FA\u5B9A Secret \u69FD\u4F4D\uFF09\u751F\u6210\u3002`] : []
     ];
     if (isFirstPass) {
       banner.push(`> \u2139\uFE0F \u8FD9\u662F\u672C PR \u7684\u9996\u6B21\u5BA1\u6838\uFF0C\u7531 \`${servedBy.label}\` \u5B8C\u6210\uFF1B\u540E\u7EED\u63D0\u4EA4\u7531 \`${primary.label}\` \u5BA1\u6838\uFF0C\u672C\u6761\u9996\u5BA1\u4F1A\u6298\u53E0\u4FDD\u7559\u5728\u8BC4\u8BBA\u5E95\u90E8\u3002`);

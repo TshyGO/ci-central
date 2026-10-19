@@ -4,8 +4,8 @@ const { validateConfig } = require('./index.js');
 const { packDiff, packIncremental, collectIssues, enrichWorkflows } = require('./review-context.js');
 const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
-const { diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies, planLane, chooseIncremental,
-  nextFindings, sinceLines, INCREMENTAL_SHARE_LIMIT } = require('./review-incremental.js');
+const { diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies, trustedState, planLane,
+  chooseIncremental, nextFindings, sinceLines, INCREMENTAL_SHARE_LIMIT } = require('./review-incremental.js');
 
 // Verified with final model output from the self-hosted CN runner. Keep unknown
 // models (including Muse) on the approved proxy; never retry across egress paths.
@@ -591,8 +591,6 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       text.includes('insufficient_quota')
       // OpenCode Go plan limits surface as GoUsageLimitError (or Free/Black variants).
       || text.includes('usagelimiterror')
-      // A per-minute or per-second limit stays a rate limit, as in the SDK client's check.
-      || (text.includes('usage limit') && !/\bper[- ]?(?:minute|min|second|sec)\b|\b[rt]p[ms]\b/i.test(text))
       || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /quota[^\n]*reset at/i.test(text)
@@ -787,8 +785,13 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     if (!complete) return { text: renderPartialReview(text, { ...supplied, issues: issues.manifest, finishReason }) };
     const incremental = incrementalContexts.get(lane.id);
     const report = parseReview(text, supplied, incremental ? { previous: incremental.state.findings } : {});
-    const record = nextFindings({ previous: incremental?.state.findings ?? [], statuses: report.previous ?? [], fresh: report.findings,
-      laneId: lane.id, next: laneRecords.get(lane.id)?.state?.next ?? 1, head: reviewHeadSha });
+    // A full review re-checks nothing, but keeps the findings authors answered in a record the lane
+    // can trust, so the next incremental round still knows them.
+    const state = laneRecords.get(lane.id)?.state;
+    const previous = incremental ? incremental.state.findings
+      : trustedState(lane, state, PROMPT_VERSION) ? state.findings.filter((finding) => finding.status === 'answered') : [];
+    const record = nextFindings({ previous, statuses: report.previous ?? [], fresh: report.findings,
+      laneId: lane.id, next: state?.next ?? 1, head: reviewHeadSha });
     return { record, text: renderReview(report, { ...supplied, issues: issues.manifest, ...(incremental ? { incremental: {
       since: incremental.state.head, previous: incremental.state.findings, changedFiles: incremental.since.changes.length,
       unchangedFiles: incremental.since.unchanged.length } } : {}) }) };

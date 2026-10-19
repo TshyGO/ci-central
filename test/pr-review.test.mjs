@@ -1317,6 +1317,11 @@ r = await scenario((call) => lunaOnCommandCode(call) ? reply(429, '{"error":{"co
 check('a per-minute limit worded as a usage limit is not relabelled as an exhausted quota', !r.error
   && laneComment(r, 'C').includes('gpt-6-luna -> HTTP 429 (1 attempt(s))') && !laneComment(r, 'C').includes('额度用尽')
   && r.statusUpdates.at(-1).includes('| C | gpt-6-luna | 审核未生成 |'));
+// ci-central#72 review (B6, C5): the runner reads no plan into generic raw text; the SDK client decides that.
+r = await scenario((call) => lunaOnCommandCode(call) ? reply(429, '{"error":{"code":"rate_limit_exceeded","message":"Usage limit reached, retry later"}}')
+  : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('a generic usage-limit message is not relabelled as an exhausted quota by the runner', !r.error
+  && laneComment(r, 'C').includes('gpt-6-luna -> HTTP 429 (1 attempt(s))') && !laneComment(r, 'C').includes('额度用尽'));
 
 // A config may still name a different-model fallback; each model then gets its own cross route,
 // in order: the primary here, the primary there, the fallback here, the fallback there.
@@ -2121,6 +2126,23 @@ check('a lane whose record could not keep every open finding reviews the changed
   && !isIncremental(r.captured.find(({ lane }) => lane === 'A')) && isIncremental(r.captured.find(({ lane }) => lane === 'B'))
   && r.logs.some((line) => line.includes('[Lane A] plan=full reason=record-incomplete'))
   && r.statusUpdates.some((body) => body.includes('上一轮审核记录没能装下全部未决发现')));
+// ci-central#72 review (B5): a full review re-checks nothing, but keeps the findings authors answered,
+// so the next incremental round still knows them. A record the lane cannot trust carries nothing.
+const answerA = (call) => call.lane === 'A' && isIncremental(call)
+  ? report({ summary: '复核完成', reviewed_files: ['src/a.ts'], findings: [], limitations: [],
+    previous_findings: [{ id: 'A1', status: 'answered', reason: '作者说明调用方已传入租户' }] }) : healthy(call);
+r = await scenario(answerA, {}, linearRound());
+const answeredA = laneComment(r, 'A');
+const manualRound = (laneA) => ({ files: [srcFile('run(user, tenant)'), testFile(), otherFile()], commits: linearTo(H2),
+  comments: [laneA, roundOne[1], roundOne[2]], ...manualAt(H2) });
+r = await scenario(healthy, {}, manualRound({ body: answeredA }));
+check('an answered finding is kept through a full review for the next incremental round', !r.error && !r.captured.some(isIncremental)
+  && readState(answeredA, 'A')?.findings.map(({ id, status }) => `${id}:${status}`).join() === 'A1:answered'
+  && readState(laneComment(r, 'A'), 'A')?.findings.map(({ id, status }) => `${id}:${status}`).join() === 'A1:answered'
+  && readState(laneComment(r, 'A'), 'A')?.mode === 'full');
+r = await scenario(healthy, {}, manualRound(withRecord(answeredA, 'A', (record) => { record.model = 'hy3'; })));
+check('a record the lane cannot trust carries no answered finding into a full review', !r.error
+  && readState(laneComment(r, 'A'), 'A')?.findings.length === 0);
 // Only a binary file changed since the review: there is nothing to review incrementally.
 const icon = (sha) => ({ filename: 'img/icon.png', status: 'modified', additions: 0, deletions: 0, sha });
 r = await scenario(healthy, {}, atHead(H1, { files: [srcFile(), testFile(), otherFile(), icon('1'.repeat(40))] }));

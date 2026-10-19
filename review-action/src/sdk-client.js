@@ -117,7 +117,8 @@ function planQuota(error, providerError, body, peekedLimitName) {
   // Per-minute wording makes it a rate limit, unless the provider named a plan window for the limit.
   const exhausted = planCode || ((quotaCode || (quotaWorded && planWorded)) && (Boolean(namedWindow) || !RATE_WINDOW.test(words)));
   if (!exhausted) return { exhausted: false };
-  const window = namedWindow ?? windowOf(words);
+  // How soon the limit resets ("resets in 5 hours") does not name its window.
+  const window = namedWindow ?? windowOf(words.replace(/\breset[s]?\b[^.\n]*/gi, ''));
   const stated = /\breset[s]?\b[^\n]{0,40}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:?\d{2}))/i.exec(words)?.[1];
   const retryAfter = String(error?.headers?.get?.('retry-after') ?? '').trim();
   const reset = stated ? Date.parse(stated)

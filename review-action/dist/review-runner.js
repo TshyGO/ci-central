@@ -521,7 +521,8 @@ var require_review_report = __commonJS({
       for (const item of Array.isArray(report.previous_findings) ? report.previous_findings.slice(0, 200) : []) {
         if (!item || typeof item !== "object" || typeof item.id !== "string" || given.has(item.id)) continue;
         if (!previous.some((finding) => finding.id === item.id)) continue;
-        const status = VERDICTS[typeof item.status === "string" ? item.status.trim().toLowerCase() : ""];
+        const key = typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+        const status = Object.hasOwn(VERDICTS, key) ? VERDICTS[key] : void 0;
         if (!status) continue;
         const reason = typeof item.reason === "string" ? item.reason.trim().slice(0, 600) : "";
         given.set(item.id, { id: item.id, status: ["fixed", "answered"].includes(status) && !reason ? "unclear" : status, reason });
@@ -1049,12 +1050,15 @@ var require_review_incremental = __commonJS({
       }
       return { items, omitted: candidates.length - items.length };
     }
+    function trustedState2(lane, state, promptVersion) {
+      const models = [lane.first_pass, lane.primary, ...lane.fallbacks || []].filter(Boolean).map((model) => model.id);
+      return Boolean(state) && state.prompt === promptVersion && models.includes(state.model);
+    }
     function planLane2({ lane, state, evidence, base, fingerprint, promptVersion, manual, firstPassDue }) {
       if (manual) return { mode: "full", reason: "manual" };
       if (firstPassDue) return { mode: "full", reason: "first-pass-due" };
       if (!state) return { mode: "full", reason: "no-previous-review" };
-      const models = [lane.first_pass, lane.primary, ...lane.fallbacks || []].filter(Boolean).map((model) => model.id);
-      if (state.prompt !== promptVersion || !models.includes(state.model)) return { mode: "full", reason: "untrusted-state" };
+      if (!trustedState2(lane, state, promptVersion)) return { mode: "full", reason: "untrusted-state" };
       if (state.base !== base) return { mode: "full", reason: "base-changed" };
       if (state.fp === fingerprint) {
         if (evidence?.status !== "valid" || evidence.head !== state.head) return { mode: "full", reason: "unchanged-not-shown" };
@@ -1143,6 +1147,7 @@ var require_review_incremental = __commonJS({
       encodeState: encodeState2,
       readState: readState2,
       collectReplies: collectReplies2,
+      trustedState: trustedState2,
       planLane: planLane2,
       chooseIncremental: chooseIncremental2,
       nextFindings: nextFindings2,
@@ -1164,6 +1169,7 @@ var {
   encodeState,
   readState,
   collectReplies,
+  trustedState,
   planLane,
   chooseIncremental,
   nextFindings,
@@ -1725,7 +1731,7 @@ ${googleDeepReviewContract}`), model.review_lane_id, laneMode(model));
     const rawText = `${responseText || ""}
 ${requestError || ""}`;
     const text = rawText.toLowerCase();
-    const quotaExhausted = Boolean(quota) || status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || text.includes("usage limit") && !/\bper[- ]?(?:minute|min|second|sec)\b|\b[rt]p[ms]\b/i.test(text) || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || provider === "anthropic" && (status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"'));
+    const quotaExhausted = Boolean(quota) || status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || provider === "anthropic" && (status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"'));
     const authenticationFailed = status === 401 || status === 403 && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text);
     const gatewayBlocked = /^\s*(<!doctype html|<html\b)/i.test(responseText || "") || !response?.ok && text.includes("\u9A8C\u8BC1\u5931\u8D25");
     const endpointUnavailable = !response && /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text);
@@ -1888,12 +1894,14 @@ ${requestError || ""}`;
     if (!complete) return { text: renderPartialReview(text, { ...supplied, issues: issues.manifest, finishReason }) };
     const incremental = incrementalContexts.get(lane.id);
     const report = parseReview(text, supplied, incremental ? { previous: incremental.state.findings } : {});
+    const state = laneRecords.get(lane.id)?.state;
+    const previous = incremental ? incremental.state.findings : trustedState(lane, state, PROMPT_VERSION) ? state.findings.filter((finding) => finding.status === "answered") : [];
     const record = nextFindings({
-      previous: incremental?.state.findings ?? [],
+      previous,
       statuses: report.previous ?? [],
       fresh: report.findings,
       laneId: lane.id,
-      next: laneRecords.get(lane.id)?.state?.next ?? 1,
+      next: state?.next ?? 1,
       head: reviewHeadSha
     });
     return { record, text: renderReview(report, { ...supplied, issues: issues.manifest, ...incremental ? { incremental: {

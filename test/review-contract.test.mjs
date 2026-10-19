@@ -309,6 +309,10 @@ test('previous-finding verdicts are read for known ids only, and a missing verdi
   const bare = parseReview(JSON.stringify({ ...incrementalReport, previous_findings: [{ id: 'A1', status: 'answered' }, { id: 'A2', status: 'answered', reason: '  ' },
     { id: 'A3', status: 'fixed' }] }), context, { previous });
   assert.deepEqual(bare.previous.map(({ status }) => status), ['unclear', 'unclear', 'unclear']);
+  // ci-central#72 review (B8): a status named after an inherited property is no verdict at all.
+  const inherited = parseReview(JSON.stringify({ ...incrementalReport, previous_findings: [{ id: 'A1', status: 'constructor', reason: 'x' },
+    { id: 'A2', status: '__proto__', reason: 'y' }, { id: 'A3', status: 'toString', reason: 'z' }] }), context, { previous });
+  assert.deepEqual(inherited.previous, previous.map(({ id }) => ({ id, status: 'unclear', reason: '' })));
   assert.equal(parseReview(JSON.stringify(incrementalReport), context).previous, undefined, 'a full review ignores the field');
 });
 test('an incremental review renders new findings with ids and the re-check of every previous finding', () => {

@@ -56,7 +56,9 @@ function readVerdicts(report, previous) {
   for (const item of Array.isArray(report.previous_findings) ? report.previous_findings.slice(0, 200) : []) {
     if (!item || typeof item !== 'object' || typeof item.id !== 'string' || given.has(item.id)) continue;
     if (!previous.some((finding) => finding.id === item.id)) continue;
-    const status = VERDICTS[typeof item.status === 'string' ? item.status.trim().toLowerCase() : ''];
+    const key = typeof item.status === 'string' ? item.status.trim().toLowerCase() : '';
+    // Own keys only: a status named after an inherited property ("constructor") is no verdict.
+    const status = Object.hasOwn(VERDICTS, key) ? VERDICTS[key] : undefined;
     if (!status) continue;
     const reason = typeof item.reason === 'string' ? item.reason.trim().slice(0, 600) : '';
     // A fix or an answer the model cannot explain does not close a finding; it stays open as unclear.

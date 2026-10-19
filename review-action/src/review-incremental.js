@@ -212,13 +212,18 @@ function collectReplies({ pull, since, comments = [], reviews = [], reviewCommen
 // review on the current version. Reusing the visible review needs it to be the recorded one;
 // reviewing incrementally needs a record this version can read, made under the same report
 // contract, by a model the lane still runs.
+// A record the lane can build on: written under the same report contract by a model the lane still runs.
+function trustedState(lane, state, promptVersion) {
+  const models = [lane.first_pass, lane.primary, ...(lane.fallbacks || [])].filter(Boolean).map((model) => model.id);
+  return Boolean(state) && state.prompt === promptVersion && models.includes(state.model);
+}
+
 function planLane({ lane, state, evidence, base, fingerprint, promptVersion, manual, firstPassDue }) {
   if (manual) return { mode: 'full', reason: 'manual' };
   // A first pass that is still due runs on the next commit, whether or not its diff changed.
   if (firstPassDue) return { mode: 'full', reason: 'first-pass-due' };
   if (!state) return { mode: 'full', reason: 'no-previous-review' };
-  const models = [lane.first_pass, lane.primary, ...(lane.fallbacks || [])].filter(Boolean).map((model) => model.id);
-  if (state.prompt !== promptVersion || !models.includes(state.model)) return { mode: 'full', reason: 'untrusted-state' };
+  if (!trustedState(lane, state, promptVersion)) return { mode: 'full', reason: 'untrusted-state' };
   // Retargeting a PR changes its whole diff, while its commits since the review may look linear.
   if (state.base !== base) return { mode: 'full', reason: 'base-changed' };
   if (state.fp === fingerprint) {
@@ -318,4 +323,4 @@ function sinceLines(patch) {
 }
 
 module.exports = { STATE_VERSION, diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies,
-  planLane, chooseIncremental, nextFindings, sinceLines, INCREMENTAL_SHARE_LIMIT };
+  trustedState, planLane, chooseIncremental, nextFindings, sinceLines, INCREMENTAL_SHARE_LIMIT };

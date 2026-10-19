@@ -257,6 +257,13 @@ for (const [name, implementation] of [
     ['a weekly limit that also mentions RPM', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
       message: `You've reached your weekly usage limit. Resets at ${inThreeDays}. Upgrade for higher RPM. PRIVATE` } },
     { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    // ci-central#72 review (B7): how soon a limit resets does not name its window; a window named elsewhere does.
+    ['a reset delay that is not the plan window', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: 'You have exceeded your usage limit for your plan. Your limit resets in 5 hours. PRIVATE' } },
+    { exhausted: true, window: undefined, resetAt: undefined }],
+    ['a window named outside the usage-limit phrase', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `Weekly quota exhausted for this plan; it resets at ${inThreeDays}. PRIVATE` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
     ['a plan error code with per-minute wording', 429, { 'retry-after': '600' }, { type: 'error',
       error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded (60 requests per minute). PRIVATE' }, metadata: { limitName: 'weekly' } },
     { exhausted: true, window: 'weekly', resetInSeconds: 600 }],

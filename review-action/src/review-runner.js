@@ -469,7 +469,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       console.log(`[Lane ${lane.id}/${route.modelId}] provider=${route.provider} protocol=${protocolOf(lane, model)} failed: ${(responseText || requestError || '').slice(0, 1000)}`);
     }
     return { response, responseText, requestError, attempts: attempt, failureKind: usable ? '' : failure.kind,
-      unserved: !usable && unserved, httpStatus: response?.status ?? httpStatus, retryAfterMs, localDeadline, elapsedMs };
+      unserved: !usable && unserved, httpStatus: response?.status ?? httpStatus, retryAfterMs, localDeadline, elapsedMs, errorCode };
   }
 
   // A request that produced no model output at all (provider capacity 429/5xx, or a
@@ -609,6 +609,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let lastReportError = '';
     let lastOutcome = '';
     let lastProvider = lane.provider;
+    let lastClosedStream = null;
     let bestPartial = null;
 
     for (const model of chain) {
@@ -638,6 +639,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         }
         const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
         const { response, responseText, requestError, attempts, failureKind } = outcome;
+        // A stream the provider accepted and then closed before a finish reason has no response
+        // object. Name it with how long it ran, so it is not read as a rate limit or auth failure.
+        lastClosedStream = outcome.errorCode === 'REVIEW_INCOMPLETE_STREAM'
+          ? { httpStatus: outcome.httpStatus ?? 200, seconds: Math.round(outcome.elapsedMs / 1000) } : null;
         lastProvider = route.provider;
         lastResponse = response;
         lastResponseText = responseText;
@@ -687,7 +692,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
             console.log(`[Lane ${lane.id}/${route.modelId}] report rejected: ${error?.message?.startsWith('Review contract:') ? error.message : 'invalid report envelope'}`);
           }
         }
-        tried.push(`${attemptLabel} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? 'request failed'}`} (${attempts ?? 0} attempt(s))`);
+        const failed = lastClosedStream
+          ? `HTTP ${lastClosedStream.httpStatus}, stream closed before the model finished after ${lastClosedStream.seconds} s`
+          : `HTTP ${response?.status ?? 'request failed'}`;
+        tried.push(`${attemptLabel} -> ${lastFailureKind === 'report-invalid' ? `evidence contract rejected: ${lastReportError}` : lastOutcome || failed} (${attempts ?? 0} attempt(s))`);
       }
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
@@ -734,6 +742,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
           ? 'Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit.'
         : lastFailureKind === 'report-invalid'
           ? 'Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made.'
+        : lastClosedStream
+          ? `Action needed: this is not a rate limit, quota or authentication failure. ${lastProvider} accepted the request (HTTP ${lastClosedStream.httpStatus}) and streamed for ${lastClosedStream.seconds} s, then closed the stream before the model finished. Rerun with /review; a close at about the same time again points to a stream-length limit on that provider.`
         : isServerSide
             ? 'Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above — most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage.'
             : 'Action needed: inspect the upstream response above to identify the request or auth problem.',

@@ -1131,7 +1131,8 @@ ${requestError || ""}`;
       httpStatus: response?.status ?? httpStatus,
       retryAfterMs,
       localDeadline,
-      elapsedMs
+      elapsedMs,
+      errorCode
     };
   }
   const UNSERVED_RESEND_DELAY_MS = 3e4;
@@ -1264,6 +1265,7 @@ ${requestError || ""}`;
     let lastReportError = "";
     let lastOutcome = "";
     let lastProvider = lane.provider;
+    let lastClosedStream = null;
     let bestPartial = null;
     for (const model of chain) {
       if (model !== chain[0]) await statusPublisher.update(lane.id, model === primary ? "running" : "fallback", model.id);
@@ -1291,6 +1293,7 @@ ${requestError || ""}`;
         }
         const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
         const { response, responseText, requestError, attempts, failureKind } = outcome;
+        lastClosedStream = outcome.errorCode === "REVIEW_INCOMPLETE_STREAM" ? { httpStatus: outcome.httpStatus ?? 200, seconds: Math.round(outcome.elapsedMs / 1e3) } : null;
         lastProvider = route.provider;
         lastResponse = response;
         lastResponseText = responseText;
@@ -1338,7 +1341,8 @@ ${requestError || ""}`;
             console.log(`[Lane ${lane.id}/${route.modelId}] report rejected: ${error?.message?.startsWith("Review contract:") ? error.message : "invalid report envelope"}`);
           }
         }
-        tried.push(`${attemptLabel} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || `HTTP ${response?.status ?? "request failed"}`} (${attempts ?? 0} attempt(s))`);
+        const failed = lastClosedStream ? `HTTP ${lastClosedStream.httpStatus}, stream closed before the model finished after ${lastClosedStream.seconds} s` : `HTTP ${response?.status ?? "request failed"}`;
+        tried.push(`${attemptLabel} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || failed} (${attempts ?? 0} attempt(s))`);
       }
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
@@ -1365,7 +1369,7 @@ ${snippet}
 ${fence}
 </details>` : "",
       "",
-      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lastProvider === "anthropic" ? "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : `Action needed: the ${lastProvider} plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.` : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model and route.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
+      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lastProvider === "anthropic" ? "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : `Action needed: the ${lastProvider} plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.` : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model and route.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : lastClosedStream ? `Action needed: this is not a rate limit, quota or authentication failure. ${lastProvider} accepted the request (HTTP ${lastClosedStream.httpStatus}) and streamed for ${lastClosedStream.seconds} s, then closed the stream before the model finished. Rerun with /review; a close at about the same time again points to a stream-length limit on that provider.` : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
     ].join("\n");
     return { lane, primary, servedBy: null, review, reasoningLength: 0, degraded: false, status: "diagnostic" };
   }

@@ -403,7 +403,7 @@ const stubSdkRequest = (fetch) => async ({ apiKey, baseURL, payload, signal, pro
 };
 
 async function scenario(route, overrides = {}, options = {}) {
-  const posted = [], statusUpdates = [], captured = [], logs = [], timeouts = [];
+  const posted = [], statusUpdates = [], captured = [], logs = [], timeouts = [], apiCalls = [];
   const comments = (options.comments || []).map((comment, index) => ({
     id: index + 1,
     user: { login: 'github-actions[bot]' },
@@ -413,7 +413,22 @@ async function scenario(route, overrides = {}, options = {}) {
   let pullGets = 0;
   const github = {
     rest: {
-      pulls: { get: async () => ({ data: pulls[Math.min(pullGets++, pulls.length - 1)] }), listFiles: 'files', listCommits: 'commits' },
+      pulls: { get: async () => ({ data: pulls[Math.min(pullGets++, pulls.length - 1)] }), listFiles: 'files', listCommits: 'commits',
+        listReviews: 'reviews', listReviewComments: 'review-comments' },
+      repos: {
+        compareCommitsWithBasehead: async ({ basehead }) => {
+          apiCalls.push(`compare ${basehead}`);
+          const data = options.compare?.[basehead];
+          if (!data) throw new Error('compare not available');
+          return { data };
+        },
+        getContent: async ({ path: filePath, ref }) => {
+          apiCalls.push(`content ${filePath}@${ref}`);
+          const text = options.contents?.[filePath];
+          if (typeof text !== 'string') throw new Error('not found');
+          return { data: { type: 'file', encoding: 'base64', size: Buffer.byteLength(text), content: Buffer.from(text).toString('base64') } };
+        },
+      },
       issues: {
         get: async ({ issue_number }) => {
           const issue = options.issues?.[issue_number];
@@ -442,7 +457,12 @@ async function scenario(route, overrides = {}, options = {}) {
         },
       },
     },
-    paginate: async (which) => which === 'files' ? (options.files || files) : which === 'comments' ? comments : [{ commit: { message: 'test' } }],
+    paginate: async (which) => {
+      apiCalls.push(`list ${which}`);
+      return which === 'files' ? (options.files || files) : which === 'comments' ? comments
+        : which === 'reviews' ? (options.reviews || []) : which === 'review-comments' ? (options.reviewComments || [])
+          : (options.commits || [{ commit: { message: 'test' } }]);
+    },
   };
   const fetch = async (url, request) => {
     const body = JSON.parse(request.body);
@@ -465,7 +485,7 @@ async function scenario(route, overrides = {}, options = {}) {
   } catch (caught) {
     error = caught;
   }
-  return { posted, statusUpdates, captured, comments, logs, error, pullGets, timeouts };
+  return { posted, statusUpdates, captured, comments, logs, error, pullGets, timeouts, apiCalls };
 }
 
 // System and user text of a captured request, whatever its protocol.
@@ -1229,12 +1249,64 @@ check('a failed cross-provider request ends the lane without trying another mode
   && r.posted.some((body) => body.includes('lane=A') && body.includes('status=diagnostic')
     && body.includes('muse-spark-1.3-contributor via command-code meta/muse-spark-1.3-contributor'))
   && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
-// When both plans are exhausted, the diagnostic names the provider that answered last.
+// When both plans are exhausted, the diagnostic names each provider, in the order they were asked.
 r = await scenario((call) => call.lane === 'A' ? goQuotaReply()
   : call.model === 'meta/muse-spark-1.3-contributor' ? reply(429, '{"error":{"code":"insufficient_quota","message":"weekly quota exhausted"}}') : healthy(call));
-check('a quota on the cross-provider route is reported as that provider\'s plan', !r.error
+check('a quota on the cross-provider route is reported as that provider\'s plan, and the first plan too', !r.error
   && r.posted.some((body) => body.includes('lane=A') && body.includes('status=diagnostic')
-    && body.includes('the command-code plan quota is exhausted') && !body.includes('opencode-go plan quota')));
+    && body.includes('the opencode-go plan quota is exhausted (plan usage limit); the command-code plan quota is exhausted (plan usage limit)')
+    && body.includes('额度用尽，不是限流：`opencode-go` 的套餐用量上限已用完（供应商未给出重置时间）；`command-code` 的套餐用量上限已用完（供应商未给出重置时间）')));
+// Command Code answers an exhausted weekly plan with 429 RATE_LIMITED; only its message says so,
+// and the SDK client hands over just the verdict, the window and the reset time (2026-10-19).
+// The lane must read as quota exhausted with its reset time, never as a rate limit.
+const quotaError = ({ status = 429, code = 'RATE_LIMITED', type = 'rate_limit_error', window, resetAt } = {}) => Object.assign(
+  new Error(`SDK request failed (http=${status}).`), { name: 'SDKRequestError', status, httpStatus: status, unserved: true,
+    providerCode: code, providerType: type, quotaExhausted: true, quotaWindow: window, quotaResetAt: resetAt });
+const commandCodeWeekly = quotaError({ window: 'weekly', resetAt: '2026-10-22T08:56:41.040Z' });
+const goWeekly = quotaError({ code: undefined, type: 'GoUsageLimitError', window: 'weekly', resetAt: '2026-10-20T03:30:00.000Z' });
+const laneComment = (result, lane) => result.posted.filter((body) => body.includes(`lane=${lane}`)).at(-1) || '';
+for (const useBundle of [false, true]) {
+  r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(commandCodeWeekly)
+    : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call), {}, { useBundle });
+  const quotaC = laneComment(r, 'C');
+  check(`source/bundle ${useBundle} an exhausted Command Code week is labelled quota exhausted with its reset time, not a rate limit`, !r.error
+    && quotaC.includes('status=diagnostic')
+    && quotaC.includes('额度用尽，不是限流：`command-code` 的周用量上限已用完，2026-10-22T08:56:41Z（北京时间 2026-10-22 16:56）重置')
+    && quotaC.includes('gpt-6-luna -> HTTP 429, command-code weekly usage limit exhausted, resets 2026-10-22T08:56:41Z (1 attempt(s))')
+    && quotaC.includes('gpt-6-luna via opencode-go gpt-6-luna -> HTTP 503 (1 attempt(s))')
+    && r.statusUpdates.at(-1).includes('| C | gpt-6-luna | 审核未生成（command-code 周上限已用完，北京时间 2026-10-22 16:56 重置） |'));
+}
+// Both plans spent: each provider is named with its own window and reset, and the lane reads as a
+// quota failure in the status table.
+r = await scenario((call) => call.lane === 'A' ? Promise.reject(goWeekly)
+  : call.model === 'meta/muse-spark-1.3-contributor' ? Promise.reject(commandCodeWeekly) : healthy(call));
+const bothQuota = laneComment(r, 'A');
+check('when both plans are exhausted the diagnostic names each provider with its reset time', !r.error
+  && bothQuota.includes('`opencode-go` 的周用量上限已用完，2026-10-20T03:30:00Z（北京时间 2026-10-20 11:30）重置')
+  && bothQuota.includes('`command-code` 的周用量上限已用完，2026-10-22T08:56:41Z（北京时间 2026-10-22 16:56）重置')
+  && bothQuota.includes('the command-code plan quota is exhausted') && bothQuota.includes('the opencode-go plan quota is exhausted')
+  && !bothQuota.includes('request or auth problem')
+  && r.statusUpdates.at(-1).includes('| A | muse-spark-1.3-contributor | 供应商额度用尽，审核未生成（opencode-go 周上限已用完，北京时间 2026-10-20 11:30 重置；command-code 周上限已用完，北京时间 2026-10-22 16:56 重置） |'));
+// The same model on the other provider served: the comment and the running status say why it crossed.
+r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(commandCodeWeekly) : healthy(call));
+check('a review served across providers after a spent plan says which quota was exhausted and when it resets', !r.error
+  && laneComment(r, 'C').includes('status=valid')
+  && laneComment(r, 'C').includes('在 `command-code` 上未产生可用审核（周用量上限已用完，北京时间 2026-10-22 16:56 重置）')
+  && r.statusUpdates.some((body) => body.includes('| C | gpt-6-luna | 本供应商未产生可用审核，同模型经另一供应商运行中（command-code 周上限已用完，北京时间 2026-10-22 16:56 重置） |')));
+// Only checked fields reach a comment: a window or reset time that is not the known shape is dropped.
+r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(quotaError({ window: 'weekly<img src=x>', resetAt: 'soon <img src=x>' }))
+  : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('an unrecognised quota window or reset time is never echoed', !r.error
+  && laneComment(r, 'C').includes('额度用尽，不是限流：`command-code` 的套餐用量上限已用完（供应商未给出重置时间）')
+  && !r.posted.some((body) => body.includes('<img') || body.includes('soon'))
+  && !r.statusUpdates.some((body) => body.includes('<img') || body.includes('soon')));
+// A capacity 429 that is not a plan limit keeps its old wording.
+r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(unserved(429, { providerType: 'rate_limit_error', providerCode: 'RATE_LIMITED' }))
+  : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('a plain rate limit is not relabelled as an exhausted quota', !r.error
+  && laneComment(r, 'C').includes('gpt-6-luna -> HTTP 429 (1 attempt(s))') && !laneComment(r, 'C').includes('额度用尽')
+  && r.statusUpdates.at(-1).includes('| C | gpt-6-luna | 审核未生成 |'));
+
 // A config may still name a different-model fallback; each model then gets its own cross route,
 // in order: the primary here, the primary there, the fallback here, the fallback there.
 const withFallbackConfig = structuredClone(centralConfig);
@@ -1647,7 +1719,9 @@ const twEgress = { PR_REVIEW_CONFIG: JSON.stringify(nebulaConfig), RUNNER_ENVIRO
 const laneBCalls = (result) => result.captured.filter(({ lane }) => lane === 'B').map(({ model }) => model).join(',');
 const laneBBody = (result) => result.posted.filter((body) => body.includes('lane=B')).at(-1) || '';
 const firstPassMark = (head) => `<!-- ai-pr-review-first-pass:v1 lane=B head=${head} model=claude-sonnet-5-5 -->`;
-const commit = (sha) => ({ pulls: [{ ...pull, head: { ...pull.head, sha } }],
+// A later commit that rewrites most of the PR, so it gets a full review rather than being skipped as
+// unchanged or reviewed incrementally; those two paths have their own checks further down.
+const commit = (sha, size = 200) => ({ pulls: [{ ...pull, head: { ...pull.head, sha } }], files: [patch('src/a.ts', size), patch('tests/a.test.ts', 100)],
   context: { ...context, payload: { pull_request: { number: 42, head: { sha } } } } });
 r = await scenario(healthy, twEgress);
 const firstPassBody = laneBBody(r);
@@ -1680,7 +1754,7 @@ const bundledFirstPass = laneBBody(r);
 r = await scenario(healthy, twEgress, { useBundle: true, comments: [{ body: bundledFirstPass }], ...commit(nextHead) });
 check('NebulaLab: the bundled runner marks the first pass and carries it to later commits', !r.error
   && bundledFirstPass.includes(firstPassMark(headSha)) && laneBCalls(r) === 'claude-haiku-5-5' && laneBBody(r).includes(firstPassMark(headSha)));
-r = await scenario(healthy, twEgress, { comments: [{ body: followUpBody }], ...commit('abad1dea'.repeat(5)) });
+r = await scenario(healthy, twEgress, { comments: [{ body: followUpBody }], ...commit('abad1dea'.repeat(5), 400) });
 check('NebulaLab: the folded first review survives every later commit unchanged', !r.error && laneBCalls(r) === 'claude-haiku-5-5'
   && laneBBody(r).includes(firstPassMark(headSha)) && (laneBBody(r).match(/ai-pr-review-first-pass:v1 lane=/g) || []).length === 1);
 r = await scenario(healthy, twEgress, { comments: [{ body: firstPassBody.replace('review claude-sonnet-5-5', 'x'.repeat(70000)) }], ...commit(nextHead) });
@@ -1758,4 +1832,207 @@ check('a 402 billing_error from Go crosses once to the same model on Command Cod
 r = await scenario((call) => call.lane === 'B' ? reply(402, '{"type":"error","error":{"type":"billing_error"}}') : healthy(call),
   { ...twEgress, LANE_C_KEY: '', LANE_C_API_BASE: '' });
 check('NebulaLab: without the Lane C slot an exhausted credit says so', laneBBody(r).includes('Anthropic API credit balance is exhausted'));
+// ---------------------------------------------------------------------------------------------
+// Incremental re-review and repeat-review skipping (2026-10-19). On NebulaLab 68% of the runs that
+// reached a model re-reviewed a PR that already had a review, each sending the whole PR again.
+const { readState } = localRequire('../review-action/src/review-incremental.js');
+const H1 = 'a1'.repeat(20), H2 = 'b2'.repeat(20), H3 = 'c3'.repeat(20);
+const atHead = (sha, extra = {}) => ({ pulls: [{ ...pull, head: { ...pull.head, sha } }],
+  context: { ...context, payload: { pull_request: { number: 42, head: { sha } } } }, ...extra });
+const manualAt = (sha, body = '/review') => ({ pulls: [{ ...pull, head: { ...pull.head, sha } }],
+  context: { ...context, eventName: 'issue_comment', payload: { issue: { number: 42 }, comment: { body } } } });
+const srcPatch = (call, header = '@@ -1,3 +1,4 @@') => `${header}\n import x;\n-old();\n+guard();\n+${call};\n end();`;
+const srcFile = (call = 'run(user)', header) => ({ filename: 'src/a.ts', status: 'modified', additions: 2, deletions: 1, patch: srcPatch(call, header) });
+const testFile = (header = '@@ -1,1 +1,2 @@') => ({ filename: 'tests/a.test.ts', status: 'modified', additions: 1, deletions: 0, patch: `${header}\n test();\n+test2();` });
+// The rest of the PR, unchanged between rounds: real PRs are much larger than one small fix.
+const otherFile = (header = '@@ -0,0 +1,120 @@') => ({ filename: 'src/other.ts', status: 'added', additions: 120, deletions: 0,
+  patch: [header, ...Array.from({ length: 120 }, (_, i) => `+export const value${i} = compute(${i});`)].join('\n') });
+const one = (sha, parents) => ({ sha, parents: parents.map((parent) => ({ sha: parent })), commit: { message: 'change' } });
+const root = '0'.repeat(40);
+const linearTo = (sha) => [one(H1, [root]), one(sha, [H1])];
+const mergedTo = (sha) => [one(H1, [root]), one(sha, [H1, 'f'.repeat(40)])];
+const report = (content) => reply(200, JSON.stringify({ model: 'provider/x', usage: { prompt_tokens: 1 },
+  choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(content) } }] }));
+const isIncremental = (call) => userText(call.body).includes('Review mode: incremental');
+// Round one: Lane A raises one finding on src/a.ts; Lanes B and C raise none.
+const runFinding = { priority: 'P1', file: 'src/a.ts', side: 'new', line: 3, title: '运行时缺少租户', confidence: 'high',
+  trigger: '多租户调用', impact: '跨租户', evidence: 'run(user);', suggestion: '传入租户' };
+const roundOneRoute = (call) => call.lane === 'A' && call.model === 'muse-spark-1.3-contributor'
+  ? report({ summary: '一处问题', reviewed_files: ['src/a.ts', 'tests/a.test.ts'], findings: [runFinding], limitations: [] }) : healthy(call);
+r = await scenario(roundOneRoute, {}, atHead(H1, { files: [srcFile(), testFile(), otherFile()] }));
+const roundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+check('a full review records the reviewed head, its PR-own diff identity and its findings in a hidden header line', !r.error
+  && roundOne.every(({ body }) => /^<!-- ai-pr-review-bot:lane-[ABC] -->\n<!-- ai-pr-review-evidence:v2 [^\n]+ -->\n<!-- ai-pr-review-state:v1 \{[^\n]*\} -->\n## AI PR Review · /.test(body))
+  && laneComment(r, 'A').includes('#### P1 · A1 · 运行时缺少租户')
+  && readState(laneComment(r, 'A'), 'A')?.head === H1 && readState(laneComment(r, 'A'), 'A')?.findings.map(({ id }) => id).join() === 'A1'
+  && readState(laneComment(r, 'A'), 'A')?.mode === 'full' && readState(laneComment(r, 'B'), 'B')?.findings.length === 0);
+
+// Change 2: the PR's own diff is unchanged, so no lane calls a model.
+const mergedMainFiles = [srcFile('run(user)', '@@ -40,3 +41,4 @@ class Moved'), testFile('@@ -7,1 +9,2 @@'), otherFile()];
+for (const useBundle of [false, true]) {
+  r = await scenario(() => { throw new Error('model should not run'); }, {}, atHead(H2, { files: mergedMainFiles, commits: mergedTo(H2), comments: roundOne, useBundle }));
+  check(`source/bundle ${useBundle} merging main without touching the PR's own lines skips every lane without a model call`, !r.error
+    && r.captured.length === 0 && r.posted.length === 0
+    && r.statusUpdates.at(-1).includes(`| A | muse-spark-1.3-contributor | 复用此前提交的有效证据，未请求模型（提交 ${H1.slice(0, 7)} 的审核；PR 自身改动未变，期间合并了其他分支，如 main） | muse-spark-1.3-contributor |`)
+    && r.statusUpdates.at(-1).includes('有效发布：3/3') && r.logs.some((line) => line.includes('[Lane A] plan=skip')));
+}
+r = await scenario(() => { throw new Error('model should not run'); }, {}, atHead(H2, { files: mergedMainFiles, commits: [one(H2, [root])], comments: roundOne }));
+check('a rebase that re-pushes the same PR-own change is skipped and says the history was rewritten', !r.error && r.captured.length === 0
+  && r.statusUpdates.at(-1).includes('PR 自身改动未变，提交历史被改写（变基或重推）'));
+r = await scenario(healthy, {}, { files: mergedMainFiles, commits: mergedTo(H2), comments: roundOne, ...manualAt(H2) });
+check('a manual /review still forces a fresh full review of an unchanged diff', !r.error && r.captured.length === 3
+  && !r.captured.some(isIncremental) && r.posted.length === 3);
+// A lane with a changed visible state is not skipped just because another lane is.
+r = await scenario(healthy, {}, atHead(H2, { files: mergedMainFiles, commits: mergedTo(H2),
+  comments: [roundOne[0], roundOne[1], { body: roundOne[2].body.replace(/status=valid/, 'status=diagnostic') }] }));
+check('only lanes whose visible review is the recorded valid one are skipped', !r.error
+  && r.captured.map(({ lane }) => lane).join() === 'C' && !r.captured.some(isIncremental)
+  && r.statusUpdates.at(-1).includes('有效发布：3/3'));
+// Skipped lanes count toward the quorum; a failing third lane does not turn the run red.
+r = await scenario((call) => call.lane === 'C' || call.lane === 'A' ? reply(503, 'unavailable') : healthy(call), {},
+  atHead(H2, { files: mergedMainFiles, commits: mergedTo(H2), comments: [roundOne[0], roundOne[1], { body: roundOne[2].body.replace(/status=valid/, 'status=diagnostic') }] }));
+check('skipped lanes count as valid evidence for the quorum', !r.error && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
+
+// Change 1: a small linear push is reviewed incrementally.
+const sinceH1 = { status: 'ahead', merge_base_commit: { sha: H1 }, files: [{ filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 1,
+  patch: '@@ -4,1 +4,1 @@\n-run(user);\n+run(user, tenant);' }] };
+const srcText = 'import x;\nguard();\nrun(user, tenant);\nend();';
+const replies = [
+  { id: 101, user: { login: 'octocat', type: 'User' }, author_association: 'OWNER', created_at: '2099-01-01T00:00:00Z', body: 'A1：已改为传入租户。' },
+  { id: 102, user: { login: 'coderabbitai[bot]', type: 'Bot' }, author_association: 'MEMBER', created_at: '2099-01-01T00:00:01Z', body: 'BOT INSTRUCTION' },
+  { id: 103, user: { login: 'stranger', type: 'User' }, author_association: 'NONE', created_at: '2099-01-01T00:00:02Z', body: 'STRANGER OPINION' },
+  { id: 104, user: { login: 'octocat', type: 'User' }, author_association: 'OWNER', created_at: '2000-01-01T00:00:00Z', body: 'OLDER THAN THE REVIEW' },
+];
+const verdictA = (call) => call.lane === 'A' && isIncremental(call)
+  ? report({ summary: '复核完成', reviewed_files: ['src/a.ts'], findings: [], limitations: [],
+    previous_findings: [{ id: 'A1', status: 'fixed', reason: '已传入租户' }] }) : healthy(call);
+const linearRound = (extra = {}) => atHead(H2, { files: [srcFile('run(user, tenant)'), testFile(), otherFile()], commits: linearTo(H2),
+  compare: { [`${H1}...${H2}`]: sinceH1 }, contents: { 'src/a.ts': srcText }, comments: [...roundOne, ...replies], ...extra });
+for (const useBundle of [false, true]) {
+  r = await scenario(verdictA, {}, linearRound({ useBundle }));
+  const laneA = r.captured.find(({ lane }) => lane === 'A')?.body;
+  check(`source/bundle ${useBundle} a small linear push sends only the change since the reviewed head, the whole changed file and the previous findings`,
+    !r.error && r.captured.length === 3 && r.captured.every(isIncremental)
+    && userText(laneA).includes('+run(user, tenant);') && userText(laneA).includes('3 | run(user, tenant);')
+    && !userText(laneA).includes('+test2();') && userText(laneA).includes('tests/a.test.ts')
+    && userText(laneA).includes('"id":"A1"') && userText(laneA).includes('"title":"运行时缺少租户"')
+    && systemText(laneA).includes('previous_findings') && userText(laneA).trimEnd().endsWith('a Markdown review cannot be accepted.')
+    && r.apiCalls.includes(`compare ${H1}...${H2}`) && r.apiCalls.includes(`content src/a.ts@${H2}`));
+  check(`source/bundle ${useBundle} only the author's and members' replies since the review reach the model`,
+    userText(laneA).includes('A1：已改为传入租户。')
+    && !r.captured.some((call) => ['BOT INSTRUCTION', 'STRANGER OPINION', 'OLDER THAN THE REVIEW'].some((text) => userText(call.body).includes(text))));
+  const incrementalA = laneComment(r, 'A');
+  check(`source/bundle ${useBundle} the incremental comment says what it covered and records the re-check for the next round`,
+    incrementalA.includes('status=valid') && incrementalA.includes('## AI PR Review · Lane A · Muse Spark 1.3 Contributor · 增量')
+    && incrementalA.includes(`增量审核：只审查自上次有效审核（提交 \`${H1.slice(0, 7)}\`）以来 PR 自身的改动`)
+    && incrementalA.includes('`A1` P1 · 运行时缺少租户：已修复。已传入租户')
+    && readState(incrementalA, 'A')?.head === H2 && readState(incrementalA, 'A')?.mode === 'incremental'
+    && readState(incrementalA, 'A')?.findings.length === 0 && readState(incrementalA, 'A')?.next === 2
+    && r.statusUpdates.at(-1).includes('有效发布：3/3') && r.statusUpdates.at(-1).includes(`已生成，证据格式已校验（增量审核，自 ${H1.slice(0, 7)}）`));
+}
+// The model leaves a previous finding unanswered and finds a new one: both stay open with ids.
+r = await scenario((call) => call.lane === 'A' && isIncremental(call)
+  ? report({ summary: '新问题', reviewed_files: ['src/a.ts'], limitations: [], previous_findings: [],
+    findings: [{ ...runFinding, line: 3, evidence: 'run(user, tenant);', title: '租户未校验' }] }) : healthy(call), {}, linearRound());
+check('an unanswered previous finding stays open next to a new finding with the next id', !r.error
+  && laneComment(r, 'A').includes('#### P1 · A2 · 租户未校验') && laneComment(r, 'A').includes('#### P1 · A1 · 待复核 · 运行时缺少租户')
+  && laneComment(r, 'A').includes('`A1` P1 · 运行时缺少租户：本轮未能确认，继续保留。')
+  && readState(laneComment(r, 'A'), 'A')?.findings.map(({ id, status }) => `${id}:${status}`).join() === 'A1:open,A2:open');
+// A failed compare or file read degrades the material, never the run.
+r = await scenario(verdictA, {}, linearRound({ compare: {}, contents: {} }));
+check('when the compare and the file text are unavailable the record of per-file changes still keeps the review incremental', !r.error
+  && r.captured.every(isIncremental) && userText(r.captured.find(({ lane }) => lane === 'A').body).includes('+run(user, tenant);')
+  && !userText(r.captured.find(({ lane }) => lane === 'A').body).includes('3 | run(user, tenant);'));
+
+// A large changed file gets numbered windows around the change instead of its whole text, so the
+// incremental material stays well under the full review's (2026-10-19 replay: whole-file text made
+// the median re-review larger than a full one on NebulaLab).
+const bigText = (call) => Array.from({ length: 2000 }, (_, i) => (i + 1 === 1001 ? call : `const v${i + 1} = step(${i + 1});`)).join('\n');
+const bigSrc = (call) => ({ filename: 'src/big.ts', status: 'modified', additions: 1, deletions: 1,
+  patch: `@@ -1000,3 +1000,3 @@\n const v1000 = step(1000);\n-old();\n+${call}\n const v1002 = step(1002);` });
+const wide = { filename: 'src/wide.ts', status: 'added', additions: 400, deletions: 0,
+  patch: ['@@ -0,0 +1,400 @@', ...Array.from({ length: 400 }, (_, i) => `+export const wide${i} = compute(${i});`)].join('\n') };
+const wideRoute = () => report({ summary: '无问题', reviewed_files: ['src/big.ts', 'src/wide.ts'], findings: [], limitations: [] });
+r = await scenario(wideRoute, {}, atHead(H1, { files: [bigSrc('a();'), wide] }));
+const wideRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+r = await scenario(wideRoute, {}, atHead(H2, { files: [bigSrc('b();'), wide], commits: linearTo(H2), comments: wideRoundOne,
+  compare: { [`${H1}...${H2}`]: { status: 'ahead', merge_base_commit: { sha: H1 }, files: [{ filename: 'src/big.ts', status: 'modified',
+    additions: 1, deletions: 1, patch: '@@ -1001,1 +1001,1 @@\n-a();\n+b();' }] } }, contents: { 'src/big.ts': bigText('b();') } }));
+const windowedA = userText(r.captured.find(({ lane }) => lane === 'A')?.body);
+check('a large changed file is sent as numbered windows around its change, not as its whole text', !r.error && r.captured.every(isIncremental)
+  && windowedA.includes('[Lines 941-1061 of the current text of src/big.ts at the head commit') && windowedA.includes('1001 | b();')
+  && !windowedA.includes('1 | const v1 = step(1);') && !windowedA.includes('+export const wide0')
+  && laneComment(r, 'A').includes('以下文件只提供了改动处前后的带行号片段'));
+
+// After a merge from main the since-review compare would include main's changes, so each changed
+// file is sent as its whole PR change instead, and files only main touched are never sent.
+r = await scenario(healthy, {}, atHead(H2, { files: [srcFile('run(user, tenant)', '@@ -40,3 +41,4 @@'), testFile('@@ -7,1 +9,2 @@'), otherFile()],
+  commits: mergedTo(H2), contents: { 'src/a.ts': srcText }, comments: roundOne }));
+check('after a main merge only files whose PR-own change differs are re-sent, each as its whole PR change', !r.error
+  && r.captured.every(isIncremental) && !r.apiCalls.some((call) => call.startsWith('compare'))
+  && userText(r.captured[0].body).includes('the base branch was merged since the reviewed commit')
+  && userText(r.captured[0].body).includes('+run(user, tenant);') && !userText(r.captured[0].body).includes('+test2();'));
+
+// Fallbacks to a full review.
+const bigFile = { filename: 'src/big.ts', status: 'added', additions: 400, deletions: 0,
+  patch: `@@ -0,0 +1,400 @@\n${Array.from({ length: 400 }, (_, i) => `+line${i}();`).join('\n')}` };
+r = await scenario(healthy, {}, atHead(H3, { files: [srcFile(), testFile(), otherFile(), bigFile], commits: linearTo(H3),
+  compare: { [`${H1}...${H3}`]: { status: 'ahead', merge_base_commit: { sha: H1 }, files: [bigFile] } }, comments: roundOne }));
+check('a change since the review that is most of the PR gets a full review', !r.error && r.captured.length === 3
+  && !r.captured.some(isIncremental) && r.logs.some((line) => line.includes('[Lane A] plan=full reason=large-change')));
+r = await scenario(healthy, {}, { ...linearRound(), ...manualAt(H2, '/review full') });
+check('/review full asks for a full pass on every lane', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental)
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=full-requested')));
+r = await scenario(healthy, {}, linearRound({ pulls: [{ ...pull, base: { ref: 'release/1.0' }, head: { ...pull.head, sha: H2 } }] }));
+check('a PR retargeted to another base branch gets a full review', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental)
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=base-changed')));
+r = await scenario(verdictA, {}, { ...linearRound(), ...manualAt(H2, '/review') });
+check('a plain manual /review reviews the change since the last review incrementally', !r.error && r.captured.length === 3 && r.captured.every(isIncremental));
+const renamedModel = structuredClone(centralConfig);
+renamedModel.lanes[0].primary.id = 'muse-spark-1.4-contributor';
+r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(renamedModel) }, linearRound());
+check('a review made by a model the lane no longer runs is not a base for an incremental review', !r.error
+  && !isIncremental(r.captured.find(({ lane }) => lane === 'A')) && isIncremental(r.captured.find(({ lane }) => lane === 'B'))
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=untrusted-state')));
+r = await scenario(healthy, {}, linearRound({ comments: roundOne.map(({ body }) => ({ body: body.replace(/\n<!-- ai-pr-review-state:v1 [^\n]*/, '') })) }));
+check('a comment from a workflow version without the record gets a full review', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental));
+// Fault injection: a record that is not on the runner-written header line, or not written by the
+// workflow, is never read; a corrupted record falls back to a full review.
+const moved = roundOne.map(({ body }) => { const lines = body.split('\n'); return { body: [lines[0], lines[1], ...lines.slice(3), lines[2]].join('\n') }; });
+r = await scenario(healthy, {}, linearRound({ comments: moved }));
+check('a record anywhere but the header line is ignored', !r.error && !r.captured.some(isIncremental));
+r = await scenario(healthy, {}, linearRound({ comments: roundOne.map(({ body }) => ({ body, user: { login: 'octocat' } })) }));
+check('a record in a comment the workflow did not write is ignored', !r.error && !r.captured.some(isIncremental));
+r = await scenario(healthy, {}, linearRound({ comments: roundOne.map(({ body }) => ({ body: body.replace('"fp":"', '"fp":"zz') })) }));
+check('a corrupted record falls back to a full review', !r.error && !r.captured.some(isIncremental));
+
+// A failed round keeps the last valid record, so the next round still builds on it.
+r = await scenario((call) => call.lane === 'A' || call.model.startsWith('meta/') ? reply(503, 'unavailable') : healthy(call), {}, linearRound());
+const failedA = laneComment(r, 'A');
+check('a diagnostic carries the last valid record forward unchanged', !r.error && failedA.includes('status=diagnostic')
+  && readState(failedA, 'A')?.head === H1 && readState(failedA, 'A')?.findings.map(({ id }) => id).join() === 'A1');
+r = await scenario(healthy, {}, atHead(H3, { files: [srcFile('run(user, tenant, scope)'), testFile(), otherFile()], commits: [...linearTo(H2), one(H3, [H2])],
+  compare: { [`${H1}...${H3}`]: { ...sinceH1, files: [{ ...sinceH1.files[0], patch: '@@ -4,1 +4,1 @@\n-run(user);\n+run(user, tenant, scope);' }] } },
+  contents: { 'src/a.ts': srcText }, comments: [{ body: failedA }, roundOne[1], roundOne[2]] }));
+check('after a failed round the next review is incremental from the last valid review', !r.error
+  && isIncremental(r.captured.find(({ lane }) => lane === 'A')) && r.apiCalls.includes(`compare ${H1}...${H3}`));
+r = await scenario(healthy, {}, atHead(H3, { files: [srcFile(), testFile(), otherFile()], commits: [...linearTo(H2), one(H3, [H2])], comments: [{ body: failedA }, roundOne[1], roundOne[2]] }));
+check('an unchanged diff is not skipped when the comment no longer shows that review', !r.error
+  && r.captured.some(({ lane }) => lane === 'A') && r.logs.some((line) => line.includes('[Lane A] plan=full reason=unchanged-not-shown')));
+
+// NebulaLab: Lane B's first pass stays a full Sonnet review, while A and C go incremental.
+r = await scenario((call) => call.model === 'claude-sonnet-5-5' ? reply(503, 'overloaded') : healthy(call), twEgress, atHead(H1, { files: [srcFile(), testFile(), otherFile()] }));
+const nebulaRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+r = await scenario(healthy, twEgress, linearRound({ comments: nebulaRoundOne }));
+check('NebulaLab: a first pass still due keeps Lane B a full Sonnet review while A and C review incrementally', !r.error
+  && laneBCalls(r) === 'claude-sonnet-5-5' && !isIncremental(r.captured.find(({ lane }) => lane === 'B'))
+  && isIncremental(r.captured.find(({ lane }) => lane === 'A')) && isIncremental(r.captured.find(({ lane, model }) => lane === 'C' && model === 'gpt-6-luna'))
+  && laneBBody(r).includes(firstPassMark(H2)));
+r = await scenario(healthy, twEgress, atHead(H1, { files: [srcFile(), testFile(), otherFile()] }));
+const sonnetRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+r = await scenario(healthy, twEgress, linearRound({ comments: sonnetRoundOne }));
+check('NebulaLab: after the Sonnet first pass, Haiku reviews later pushes incrementally and keeps the first pass folded', !r.error
+  && laneBCalls(r) === 'claude-haiku-5-5' && isIncremental(r.captured.find(({ lane }) => lane === 'B'))
+  && laneBBody(r).includes(firstPassMark(H1)) && laneBBody(r).includes('· 增量'));
+
 if (checks.some((value) => !value)) process.exitCode = 1;

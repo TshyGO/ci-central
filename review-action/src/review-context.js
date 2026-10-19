@@ -78,6 +78,82 @@ function packDiff(files, budget) {
     omittedHunks, coverage, manifest: coverage.map(({ code, ranges, old_ranges, hunks, ...metadata }) => metadata) };
 }
 
+// A file's whole current text as one numbered hunk, so findings may quote code around the change.
+function fullTextHunk(file) {
+  const code = file.full_text.split('\n');
+  return { text: `[Complete current text of ${file.filename} at the head commit; line numbers are head-side.]\n`
+    + code.map((line, index) => `${index + 1} | ${line}`).join('\n'),
+  complete: true, ranges: [[1, code.length]], old_ranges: [], code, new_code: code, old_code: [], full_text: true };
+}
+
+// The head-side line spans a patch's hunks cover: where to look in the current text.
+function changedSpans(patch) {
+  return [...String(patch ?? '').matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)]
+    .map((match) => [Number(match[1]), Number(match[1]) + Math.max(1, match[2] === undefined ? 1 : Number(match[2])) - 1]);
+}
+
+// Numbered windows of the current text around each changed span, merged where they meet: the
+// surrounding code of a file too large to send whole.
+function windowHunks(file, windowLines) {
+  const code = file.full_text.split('\n');
+  const merged = [];
+  for (const [start, end] of changedSpans(file.patch).map(([start, end]) => [Math.max(1, start - windowLines), Math.min(code.length, end + windowLines)])
+    .filter(([start, end]) => start <= end).sort((a, b) => a[0] - b[0])) {
+    if (merged.length && start <= merged.at(-1)[1] + 1) merged.at(-1)[1] = Math.max(merged.at(-1)[1], end);
+    else merged.push([start, end]);
+  }
+  return merged.map(([start, end]) => {
+    const lines = code.slice(start - 1, end);
+    return { text: `[Lines ${start}-${end} of the current text of ${file.filename} at the head commit; the rest of the file is not supplied.]\n`
+      + lines.map((line, index) => `${start + index} | ${line}`).join('\n'),
+    complete: true, ranges: [[start, end]], old_ranges: [], code: lines, new_code: lines, old_code: [] };
+  });
+}
+
+// Incremental material: every file's since-review patch hunks first, in risk order, then the
+// current text around them while it fits both the budget and the context limit. Smaller files
+// get their whole text first; a file whose whole text does not fit gets numbered windows around
+// its changes; a file whose windows do not fit either keeps its hunks only. The result has
+// packDiff's shape, so evidence is validated the same way against exactly what was supplied.
+const CONTEXT_WINDOW_LINES = 60;
+function packIncremental(files, budget, { contextLimit = Infinity, windowLines = CONTEXT_WINDOW_LINES } = {}) {
+  const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
+  const prefix = (file) => `File: ${file.filename}\nStatus: ${file.status}; +${file.additions} -${file.deletions}`
+    + `${file.scope === 'pr' ? ' (the complete PR change to this file: the base branch was merged since the reviewed commit)' : ' (change since the reviewed commit)'}\n`;
+  const plans = ordered.map((file) => ({ file, patch: hunks({ filename: file.filename, patch: file.patch }),
+    text: typeof file.full_text === 'string' ? fullTextHunk(file) : null, context: [], selected: [] }));
+  let used = 0;
+  const cost = (plan, hunk, extra = 0) => (plan.selected.length + extra ? 1 : prefix(plan.file).length + (used ? SEPARATOR.length : 0)) + hunk.text.length;
+  for (const plan of plans) {
+    for (const hunk of plan.patch) {
+      if (hunk.complete === false || used + cost(plan, hunk) > budget) continue;
+      used += cost(plan, hunk);
+      plan.selected.push(hunk);
+    }
+  }
+  const limit = Math.min(budget, contextLimit);
+  for (const plan of plans.filter(({ text }) => text).sort((a, b) => a.file.full_text.length - b.file.full_text.length)) {
+    for (const candidate of [[plan.text], windowHunks(plan.file, windowLines)]) {
+      const total = candidate.reduce((sum, hunk, index) => sum + cost(plan, hunk, index), 0);
+      if (!candidate.length || used + total > limit) continue;
+      used += total;
+      plan.selected.push(...candidate);
+      plan.context = candidate;
+      break;
+    }
+  }
+  const blocks = plans.filter((plan) => plan.selected.length).map((plan) => prefix(plan.file) + plan.selected.map((hunk) => hunk.text).join('\n'));
+  const coverage = plans.map(({ file, patch, text, context, selected }) => ({ file: file.filename, status: file.status, supplied_hunks: selected.length,
+    total_hunks: patch.length + (text ? Math.max(1, context.length) : 0), patch_available: Boolean(file.patch || text),
+    mode: !context.length ? 'patch' : context[0] === text ? 'patch+head_text' : 'patch+head_windows',
+    ranges: selected.flatMap((hunk) => hunk.ranges), old_ranges: selected.flatMap((hunk) => hunk.old_ranges),
+    hunks: selected.map(({ text: hunkText, ...evidence }) => evidence), code: selected.flatMap((hunk) => hunk.code) }));
+  const text = blocks.join(SEPARATOR);
+  return { text, kept: blocks.length, packedChars: text.length, omitted: coverage.filter((file) => !file.supplied_hunks).length,
+    omittedHunks: coverage.reduce((sum, file) => sum + file.total_hunks - file.supplied_hunks, 0), coverage,
+    manifest: coverage.map(({ code, ranges, old_ranges, hunks: _, ...metadata }) => metadata) };
+}
+
 async function enrichWorkflows({ github, owner, repo, head, files, logger }) {
   const enriched = [];
   for (const file of files) {
@@ -144,4 +220,4 @@ async function collectIssues({ github, owner, repo, pull, commits, logger, budge
   return { text: blocks.join(''), manifest, omitted_references: Math.max(0, all.length - numbers.length) };
 }
 
-module.exports = { packDiff, collectIssues, excerpt, hunks, enrichWorkflows };
+module.exports = { packDiff, packIncremental, collectIssues, excerpt, hunks, enrichWorkflows };

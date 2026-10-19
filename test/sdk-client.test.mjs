@@ -210,6 +210,70 @@ for (const [name, implementation] of [
     });
   }
 
+  // Command Code reports an exhausted plan as 429 RATE_LIMITED; only its message says so. Go names
+  // the plan error type and gives the wait as retry-after. Only a boolean, a closed-vocabulary
+  // window and a checked timestamp may leave the client, never the message or the account.
+  const inThreeDays = new Date(Date.now() + 3 * 86400000).toISOString();
+  for (const [label, status, headers, body, expected] of [
+    ['Command Code weekly usage limit', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your weekly usage limit for your plan. Your limit resets at ${inThreeDays}. Please wait for the window to reset or upgrade your plan. PRIVATE test-only-B` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    ['Command Code 5-hour usage limit', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your 5-hour usage limit for your plan. Your limit resets at ${inThreeDays}. PRIVATE` } },
+    { exhausted: true, window: '5h', resetAt: inThreeDays }],
+    ['a weekly limit whose message also counts hours', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your weekly usage limit. It resets in 5 hours, at ${inThreeDays}. PRIVATE` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    ['Go usage limit with retry-after', 429, { 'retry-after': '48358' }, { type: 'error',
+      error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' }, metadata: { workspace: 'wrk_PRIVATE', limitName: 'weekly' } },
+    { exhausted: true, window: undefined, resetInSeconds: 48358 }],
+    ['an OpenAI insufficient_quota', 429, {}, { error: { code: 'insufficient_quota', type: 'insufficient_quota',
+      message: 'You exceeded your current quota, please check your plan and billing details. PRIVATE' } },
+    { exhausted: true, window: undefined, resetAt: undefined }],
+    ['a reset time already in the past', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: "You've reached your weekly usage limit for your plan. Your limit resets at 2020-01-01T00:00:00.000Z. PRIVATE" } },
+    { exhausted: true, window: 'weekly', resetAt: undefined }],
+    ['an ordinary rate limit', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'Rate limit reached for requests per minute. Please try again in 20s. PRIVATE' } },
+    { exhausted: false }],
+    ['a capacity 503', 503, {}, { error: { code: 'overloaded', type: 'server_error', message: 'usage limit PRIVATE' } }, { exhausted: false }],
+  ]) {
+    test(`${name}: Responses ${label} ${expected.exhausted ? 'is' : 'is not'} reported as an exhausted plan quota, without its text`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(status, { 'content-type': 'application/json', ...headers });
+        res.end(JSON.stringify(body));
+      });
+      const started = Date.now();
+      await assert.rejects(f.invoke({ protocol: 'openai-responses', payload: { model: 'gpt-6-luna', input: 'synthetic code', max_output_tokens: 16, store: false } }),
+        (error) => {
+          assert.equal(error.status, status);
+          assert.equal(error.quotaExhausted, expected.exhausted);
+          assert.equal(error.quotaWindow, expected.window);
+          if (expected.resetInSeconds) {
+            const reset = Date.parse(error.quotaResetAt);
+            assert.ok(reset >= started + expected.resetInSeconds * 1000 - 1000 && reset <= Date.now() + expected.resetInSeconds * 1000 + 1000);
+          } else assert.equal(error.quotaResetAt, expected.resetAt);
+          assert.ok(!JSON.stringify(error).includes('PRIVATE') && !error.message.includes('usage limit'));
+          return true;
+        });
+      assert.equal(f.calls.length, 1);
+      const finished = f.logs.find((entry) => entry.event === 'finished');
+      assert.equal(finished.quota_exhausted ?? false, expected.exhausted);
+      assert.ok(!JSON.stringify(f.logs).includes('PRIVATE'));
+    });
+  }
+  test(`${name}: Anthropic Messages Go usage limit keeps its window from the plan metadata`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' },
+        metadata: { workspace: 'wrk_PRIVATE', limitName: 'weekly' } }));
+    });
+    await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: { model: 'claude-haiku-5-5',
+      max_tokens: 16, messages: [{ role: 'user', content: 'synthetic code' }] } }),
+    (error) => error.status === 429 && error.quotaExhausted === true && error.quotaWindow === 'weekly'
+      && Math.abs(Date.parse(error.quotaResetAt) - (Date.now() + 3600000)) < 5000 && !JSON.stringify(error).includes('PRIVATE'));
+  });
+
   for (const [label, body] of [
     ['DONE without finish', frame(delta('partial')) + 'data: [DONE]\n\n'],
     ['EOF without finish', frame(delta('partial'))],

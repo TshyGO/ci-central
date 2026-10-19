@@ -81,6 +81,36 @@ function usageCounts(usage) {
   };
 }
 
+// An exhausted plan or usage limit, told apart from a rate limit by the provider's own words.
+// Command Code answers it as 429 RATE_LIMITED and says "weekly usage limit ... resets at <time>"
+// only in the message; Go names a *UsageLimitError and puts the wait in retry-after. Only a
+// boolean, a closed-vocabulary window and a checked timestamp leave; never the message itself.
+const QUOTA_WINDOWS = [['5h', /\b(?:5|five)[- ]?h(?:ou)?rs?\b/i], ['weekly', /\bweek(?:ly)?\b|\b7[- ]day\b/i],
+  ['monthly', /\bmonth(?:ly)?\b/i], ['daily', /\bdaily\b|\b24[- ]?h(?:ou)?rs?\b/i]];
+const QUOTA_RESET_HORIZON_MS = 45 * 86400000;
+function planQuota(error, providerError, body) {
+  if (![402, 403, 429].includes(error?.status)) return { exhausted: false };
+  const words = [providerError?.message, error?.message].filter((value) => typeof value === 'string')
+    .map((value) => value.slice(0, 4000)).join('\n');
+  const named = [providerError?.type, providerError?.code, error?.code]
+    .some((value) => typeof value === 'string' && /usagelimiterror$|^insufficient_quota$|^quota_exceeded$/i.test(value));
+  const exhausted = named || /\busage limit\b/i.test(words) || /insufficient[_ ]quota|exceeded your current quota/i.test(words)
+    || /\bquota\b[^.\n]{0,60}\b(?:exhausted|exceeded|reached|used up|depleted)\b/i.test(words);
+  if (!exhausted) return { exhausted: false };
+  const limitName = typeof body?.metadata?.limitName === 'string' ? body.metadata.limitName.replace(/[_-]/g, ' ') : '';
+  // The word right before "usage limit" names the window; a later "resets in 5 hours" does not.
+  const statedWindow = /([\w-]+)\s+(?:usage\s+)?limit\b/i.exec(words)?.[1] ?? '';
+  const window = [limitName, statedWindow, words]
+    .map((text) => QUOTA_WINDOWS.find(([, pattern]) => pattern.test(text))?.[0]).find(Boolean);
+  const stated = /\breset[s]?\b[^\n]{0,40}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:?\d{2}))/i.exec(words)?.[1];
+  const retryAfter = String(error?.headers?.get?.('retry-after') ?? '').trim();
+  const reset = stated ? Date.parse(stated)
+    : /^\d{1,8}$/.test(retryAfter) ? Date.now() + Number(retryAfter) * 1000 : Date.parse(retryAfter);
+  const resetAt = Number.isFinite(reset) && reset > Date.now() - 60000 && reset < Date.now() + QUOTA_RESET_HORIZON_MS
+    ? new Date(reset).toISOString() : undefined;
+  return { exhausted: true, window, resetAt };
+}
+
 // Anthropic SDKs append /v1/messages to their base; Lane bases end in /v1 like the OpenAI ones.
 function anthropicBaseURL(endpoint) {
   const path = endpoint.pathname.replace(/\/+$/, '');
@@ -464,6 +494,12 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     // or as a 400 whose message says the credit balance is too low.
     sanitized.creditExhausted = sanitized.status === 402 || providerError?.type === 'billing_error'
       || /credit balance is too low/i.test(typeof providerError?.message === 'string' ? providerError.message : '');
+    // The Anthropic SDK keeps the whole error body, where Go adds the plan metadata.
+    const quota = planQuota(error, providerError, error.error);
+    sanitized.quotaExhausted = quota.exhausted;
+    sanitized.quotaWindow = quota.window;
+    sanitized.quotaResetAt = quota.resetAt;
+    if (quota.exhausted) Object.assign(timing, { quota_exhausted: true, quota_window: quota.window ?? null, quota_reset_at: quota.resetAt ?? null });
     if (signal?.aborted) sanitized.code = 'REVIEW_DEADLINE';
     sanitized.httpStatus = Number.isInteger(timing.status) ? timing.status : undefined;
     // No model output reached us (rejected, or queued and closed before any token),

@@ -89,6 +89,12 @@ function usageCounts(usage) {
 const QUOTA_WINDOWS = [['5h', /\b(?:5|five)[- ]?h(?:(?:ou)?rs?)?\b/i], ['weekly', /\bweek(?:ly)?\b|\b7[- ]?d(?:ays?)?\b/i],
   ['monthly', /\bmonth(?:ly)?\b|\b30[- ]?d(?:ays?)?\b/i], ['daily', /\bdaily\b|\b24[- ]?h(?:(?:ou)?rs?)?\b/i]];
 const QUOTA_RESET_HORIZON_MS = 45 * 86400000;
+// A per-minute or per-second limit is a rate limit, however it is worded ("quota exceeded for
+// requests per minute"). Kept in step with the runner's raw-text check.
+const RATE_WINDOW = /\bper[- ]?(?:minute|min|second|sec)\b|\b(?:requests|tokens)[- ]per[- ](?:minute|second)\b|\b[rt]p[ms]\b/i;
+// A generic "usage limit" or "quota exceeded" names a spent plan only next to plan, billing,
+// reset or window wording; a code that names the plan needs none.
+const PLAN_WORDING = /\b(?:plan|billing|subscription|resets?)\b/i;
 // Go puts the plan window in a top-level metadata.limitName that the OpenAI SDK drops from its error
 // (it keeps only body.error), so the client reads that one field from the raw error body.
 const ERROR_BODY_PEEK_BYTES = 65536;
@@ -96,13 +102,16 @@ function planQuota(error, providerError, body, peekedLimitName) {
   if (![402, 403, 429].includes(error?.status)) return { exhausted: false };
   const words = [providerError?.message, error?.message].filter((value) => typeof value === 'string')
     .map((value) => value.slice(0, 4000)).join('\n');
-  const named = [providerError?.type, providerError?.code, error?.code]
-    .some((value) => typeof value === 'string' && /usagelimiterror$|^insufficient_quota$|^quota_exceeded$/i.test(value));
-  const exhausted = named || /\busage limit\b/i.test(words) || /insufficient[_ ]quota|exceeded your current quota/i.test(words)
-    || /\bquota\b[^.\n]{0,60}\b(?:exhausted|exceeded|reached|used up|depleted)\b/i.test(words);
-  if (!exhausted) return { exhausted: false };
+  const codes = [providerError?.type, providerError?.code, error?.code].filter((value) => typeof value === 'string');
+  const planCode = codes.some((value) => /usagelimiterror$|^insufficient_quota$/i.test(value));
+  const quotaCode = codes.some((value) => /^quota_exceeded$/i.test(value));
   const rawLimitName = typeof body?.metadata?.limitName === 'string' ? body.metadata.limitName : peekedLimitName;
   const limitName = typeof rawLimitName === 'string' ? rawLimitName.slice(0, 80).replace(/[_-]/g, ' ') : '';
+  const planWorded = PLAN_WORDING.test(words) || [limitName, words].some((text) => QUOTA_WINDOWS.some(([, pattern]) => pattern.test(text)));
+  const quotaWorded = /\busage limit\b|insufficient[_ ]quota|exceeded your current quota/i.test(words)
+    || /\bquota\b[^.\n]{0,60}\b(?:exhausted|exceeded|reached|used up|depleted)\b/i.test(words);
+  const exhausted = planCode || (!RATE_WINDOW.test(words) && (quotaCode || (quotaWorded && planWorded)));
+  if (!exhausted) return { exhausted: false };
   // The word right before "usage limit" names the window; a later "resets in 5 hours" does not.
   const statedWindow = /([\w-]+)\s+(?:usage\s+)?limit\b/i.exec(words)?.[1] ?? '';
   const window = [limitName, statedWindow, words]
@@ -274,13 +283,15 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
         const reader = response.body.getReader();
         const chunks = [];
         let size = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
-          size += value.byteLength;
-          if (size >= ERROR_BODY_PEEK_BYTES) { reader.cancel().catch(() => {}); break; }
-        }
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+            size += value.byteLength;
+            if (size >= ERROR_BODY_PEEK_BYTES) { reader.cancel().catch(() => {}); break; }
+          }
+        } catch { /* A body cut off mid-read still carries its HTTP status; keep what arrived. */ }
         const text = Buffer.concat(chunks).subarray(0, ERROR_BODY_PEEK_BYTES).toString('utf8');
         try {
           const limitName = JSON.parse(text)?.metadata?.limitName;

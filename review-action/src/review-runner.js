@@ -427,7 +427,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     manual: '手动 /review，完整审核', 'base-changed': '目标分支已变更，完整审核', 'first-pass-due': '首审',
     'large-change': '自上次审核以来改动超过 PR 的一半，完整审核', 'not-smaller': '改动文件的完整文本比完整审核还大，完整审核',
     'text-unavailable': '有改动文件读不到完整文本，完整审核', 'over-budget': '改动文件的完整文本超出模型预算，完整审核',
-    'no-file-record': '无法单独比较此后的提交，也没有逐文件记录，完整审核' };
+    'no-file-record': '无法单独比较此后的提交，也没有逐文件记录，完整审核',
+    'record-incomplete': '上一轮审核记录没能装下全部未决发现，完整审核' };
   for (const lane of lanes) {
     const plan = plans.get(lane.id);
     if (plan.mode === 'incremental') {
@@ -579,7 +580,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       text.includes('insufficient_quota')
       // OpenCode Go plan limits surface as GoUsageLimitError (or Free/Black variants).
       || text.includes('usagelimiterror')
-      || text.includes('usage limit')
+      // A per-minute or per-second limit stays a rate limit, as in the SDK client's check.
+      || (text.includes('usage limit') && !/\bper[- ]?(?:minute|min|second|sec)\b|\b[rt]p[ms]\b/i.test(text))
       || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text)
       || /quota[^\n]*reset at/i.test(text)
@@ -924,7 +926,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         lastOutcome = '';
         const quotaNote = outcome.quota ? quotaWording(route.provider, outcome.quota) : null;
         if (!crossing) ownQuota = quotaNote;
-        if (quotaNote) quotaNotes.push({ provider: route.provider, ...quotaNote });
+        // A plan that stopped several models of the lane is named once.
+        if (quotaNote && !quotaNotes.some((note) => note.provider === route.provider && note.headline === quotaNote.headline)) {
+          quotaNotes.push({ provider: route.provider, ...quotaNote });
+        }
         if (response?.ok && !requestError && failureKind !== 'gateway-blocked') {
           try {
             const { review, record, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
@@ -1097,7 +1102,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     // last valid review, carried unchanged so a failed round does not lose it.
     const record = status === 'valid' && result.record ? { v: 1, lane: lane.id, head: reviewHeadSha, workflow: workflowSha, base: pull.base.ref,
       prompt: PROMPT_VERSION, model: servedBy.id, mode: incrementalContexts.has(lane.id) ? 'incremental' : 'full', at: contextAt,
-      fp: identity.fingerprint, files: identity.files, findings: result.record.findings, next: result.record.next }
+      fp: identity.fingerprint, files: identity.files, findings: result.record.findings, next: result.record.next,
+      ...(result.record.lossy ? { lossy: true } : {}) }
       : laneRecords.get(lane.id)?.state ?? null;
     const recordLine = record ? [encodeState(record)] : [];
     const servedLabel = servedBy && servedVia ? `${servedBy.id} via ${servedVia.provider}` : servedBy?.id;

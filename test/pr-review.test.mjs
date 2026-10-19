@@ -1311,6 +1311,12 @@ r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(unserved(4
 check('a plain rate limit is not relabelled as an exhausted quota', !r.error
   && laneComment(r, 'C').includes('gpt-6-luna -> HTTP 429 (1 attempt(s))') && !laneComment(r, 'C').includes('额度用尽')
   && r.statusUpdates.at(-1).includes('| C | gpt-6-luna | 审核未生成 |'));
+// ci-central#72 review: a per-minute limit stays a rate limit even when its raw text says "usage limit".
+r = await scenario((call) => lunaOnCommandCode(call) ? reply(429, '{"error":{"code":"rate_limit_exceeded","message":"usage limit exceeded per minute"}}')
+  : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('a per-minute limit worded as a usage limit is not relabelled as an exhausted quota', !r.error
+  && laneComment(r, 'C').includes('gpt-6-luna -> HTTP 429 (1 attempt(s))') && !laneComment(r, 'C').includes('额度用尽')
+  && r.statusUpdates.at(-1).includes('| C | gpt-6-luna | 审核未生成 |'));
 
 // A config may still name a different-model fallback; each model then gets its own cross route,
 // in order: the primary here, the primary there, the fallback here, the fallback there.
@@ -1323,6 +1329,16 @@ check('a configured fallback model runs only after the primary failed on both pr
   && r.captured.filter(({ model }) => model.includes('muse-spark')).map(({ lane, model }) => `${lane}:${model}`).join(',')
     === 'A:muse-spark-1.3-contributor,C:meta/muse-spark-1.3-contributor,A:muse-spark-1.2-contributor,C:meta/muse-spark-1.2-contributor'
   && r.posted.some((body) => body.includes('Lane A: muse-spark-1.3-contributor unavailable -> served by muse-spark-1.2-contributor via command-code meta/muse-spark-1.2-contributor (opencode-go unavailable)')));
+// ci-central#72 review: one spent plan is named once, however many models of the lane it stopped.
+r = await scenario((call) => call.lane === 'A' ? Promise.reject(goWeekly)
+  : call.model.startsWith('meta/muse-spark') ? Promise.reject(commandCodeWeekly) : healthy(call),
+{ PR_REVIEW_CONFIG: JSON.stringify(withFallbackConfig) });
+const twiceQuota = laneComment(r, 'A');
+check('a spent plan that stopped two models of the lane is named once', !r.error
+  && r.captured.filter(({ model }) => model.includes('muse-spark')).length === 4
+  && twiceQuota.split('`opencode-go` 的周用量上限已用完').length === 2 && twiceQuota.split('`command-code` 的周用量上限已用完').length === 2
+  && twiceQuota.split('the opencode-go plan quota is exhausted').length === 2 && twiceQuota.split('the command-code plan quota is exhausted').length === 2
+  && r.statusUpdates.at(-1).includes('供应商额度用尽，审核未生成（opencode-go 周上限已用完，北京时间 2026-10-20 11:30 重置；command-code 周上限已用完，北京时间 2026-10-22 16:56 重置） |'));
 // The cross-provider request gets a full model window of its own, even after a resend spent
 // part of the window on the lane's own provider.
 const resendThenQuotaConfig = structuredClone(centralConfig);
@@ -1943,7 +1959,7 @@ for (const useBundle of [false, true]) {
     incrementalA.includes('status=valid') && incrementalA.includes('## AI PR Review · Lane A · Muse Spark 1.3 Contributor · 增量')
     && incrementalA.includes(`增量审核：只审查自上次有效审核（提交 \`${H1.slice(0, 7)}\`）以来 PR 自身的改动`)
     && incrementalA.includes('附每个文件的完整当前文本') && incrementalA.includes('需要完整审核时评论 `/review`。')
-    && incrementalA.includes('`A1` P1 · 运行时缺少租户：已修复。已传入租户')
+    && incrementalA.includes('`A1` P1 · 运行时缺少租户：模型复核认为已修复。已传入租户')
     && readState(incrementalA, 'A')?.head === H2 && readState(incrementalA, 'A')?.mode === 'incremental'
     && readState(incrementalA, 'A')?.findings.length === 0 && readState(incrementalA, 'A')?.next === 2
     && r.statusUpdates.at(-1).includes('有效发布：3/3') && r.statusUpdates.at(-1).includes(`已生成，证据格式已校验（增量审核，自 ${H1.slice(0, 7)}）`));
@@ -1954,7 +1970,7 @@ r = await scenario((call) => call.lane === 'A' && isIncremental(call)
     findings: [{ ...runFinding, line: 3, evidence: 'run(user, tenant);', title: '租户未校验' }] }) : healthy(call), {}, linearRound());
 check('an unanswered previous finding stays open next to a new finding with the next id', !r.error
   && laneComment(r, 'A').includes('#### P1 · A2 · 租户未校验') && laneComment(r, 'A').includes('#### P1 · A1 · 待复核 · 运行时缺少租户')
-  && laneComment(r, 'A').includes('`A1` P1 · 运行时缺少租户：本轮未能确认，继续保留。')
+  && laneComment(r, 'A').includes('`A1` P1 · 运行时缺少租户：模型复核无法确认，继续保留。')
   && readState(laneComment(r, 'A'), 'A')?.findings.map(({ id, status }) => `${id}:${status}`).join() === 'A1:open,A2:open');
 // A failed compare falls back to the per-file record; a changed file whose text cannot be read means
 // the full review, because an incremental one would see less of it.
@@ -2077,6 +2093,19 @@ check('a lane whose record lost its per-file hashes uses those of another lane f
 r = await scenario(healthy, {}, mergedRound(roundOne.map(({ body }, i) => withRecord(body, 'ABC'[i], (record) => { record.files = null; }))));
 check('without any per-file hashes a merged round is reviewed in full', !r.error && !r.captured.some(isIncremental)
   && r.logs.some((line) => line.includes('[Lane A] plan=full reason=no-file-record')));
+// ci-central#72 review: a record that could not keep every open finding cannot carry an incremental
+// round, which re-checks only what the record holds; that lane reviews the changed diff in full.
+const manyFindings = Array.from({ length: 61 }, (_, i) => ({ ...runFinding, title: `运行时缺少租户 ${i + 1}` }));
+r = await scenario((call) => call.lane === 'A' && call.model === 'muse-spark-1.3-contributor'
+  ? report({ summary: '多处问题', reviewed_files: ['src/a.ts'], findings: manyFindings, limitations: [] }) : healthy(call), {},
+atHead(H1, { files: [srcFile(), testFile(), otherFile()] }));
+const crowdedA = laneComment(r, 'A');
+r = await scenario(healthy, {}, linearRound({ comments: [{ body: crowdedA }, roundOne[1], roundOne[2]] }));
+check('a lane whose record could not keep every open finding reviews the changed diff in full', !r.error
+  && readState(crowdedA, 'A')?.lossy === true && readState(crowdedA, 'A')?.findings.length === 60
+  && !isIncremental(r.captured.find(({ lane }) => lane === 'A')) && isIncremental(r.captured.find(({ lane }) => lane === 'B'))
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=record-incomplete'))
+  && r.statusUpdates.some((body) => body.includes('上一轮审核记录没能装下全部未决发现')));
 // Only a binary file changed since the review: there is nothing to review incrementally.
 const icon = (sha) => ({ filename: 'img/icon.png', status: 'modified', additions: 0, deletions: 0, sha });
 r = await scenario(healthy, {}, atHead(H1, { files: [srcFile(), testFile(), otherFile(), icon('1'.repeat(40))] }));
@@ -2108,6 +2137,13 @@ check('NebulaLab: a first pass still due keeps Lane B a full Sonnet review while
   && laneBCalls(r) === 'claude-sonnet-5-5' && !isIncremental(r.captured.find(({ lane }) => lane === 'B'))
   && isIncremental(r.captured.find(({ lane }) => lane === 'A')) && isIncremental(r.captured.find(({ lane, model }) => lane === 'C' && model === 'gpt-6-luna'))
   && laneBBody(r).includes(firstPassMark(H2)));
+// ci-central#72 review: a first pass that is still due is never replaced by a skip. After Sonnet failed
+// and Haiku reviewed, a push that only merges main runs the Sonnet first pass on Lane B, as the next
+// commit always did, while Lanes A and C skip.
+r = await scenario(healthy, twEgress, atHead(H2, { files: mergedMainFiles, commits: mergedTo(H2), comments: nebulaRoundOne }));
+check('NebulaLab: a first pass still due is run on an unchanged diff while the other lanes skip', !r.error
+  && laneBCalls(r) === 'claude-sonnet-5-5' && !r.captured.some(({ lane, model }) => lane === 'A' || model === 'gpt-6-luna')
+  && r.logs.some((line) => line.includes('[Lane B] plan=full reason=first-pass-due')) && laneBBody(r).includes(firstPassMark(H2)));
 r = await scenario(healthy, twEgress, atHead(H1, { files: [srcFile(), testFile(), otherFile()] }));
 const sonnetRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
 r = await scenario(healthy, twEgress, linearRound({ comments: sonnetRoundOne }));

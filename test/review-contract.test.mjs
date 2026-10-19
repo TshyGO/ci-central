@@ -257,6 +257,8 @@ test('a repeated quote with a slightly wrong line is repaired from the changed h
 test('a file whose only supplied hunk is a placeholder is not inspectable material', () => {
   const packed = packIncremental([{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 }], 20000);
   assert.equal(packed.coverage[0].patch_available, false);
+  const unfit = packIncremental([{ filename: 'big.dat', status: 'modified', additions: 0, deletions: 0, full_text: 'x'.repeat(5000) }], 100);
+  assert.equal(unfit.coverage[0].patch_available, false, 'a whole text that did not fit leaves nothing to inspect');
 });
 test('when space is short the since-review patch is kept and the full text is left out and disclosed', () => {
   const packed = packIncremental([sinceReview], 300);
@@ -287,6 +289,8 @@ test('an incremental prompt asks for verdicts on previous findings and keeps eve
   assert.ok(/unless the new code contradicts/.test(system));
   // Files unchanged since that commit are not supplied; a finding about them cannot be called fixed.
   assert.ok(/mark it unclear/.test(system) && /cannot see code that was not supplied/.test(system));
+  // ci-central#72 review: effects on files that were not supplied are named, not silently missed.
+  assert.ok(/could affect code in files that were not supplied/.test(system));
   assert.ok(!buildSystemPrompt('Repository-specific boundaries.', 'A').includes('previous_findings'), 'a full review is unchanged');
 });
 test('previous-finding verdicts are read for known ids only, and a missing verdict keeps the finding open', () => {
@@ -298,6 +302,10 @@ test('previous-finding verdicts are read for known ids only, and a missing verdi
     { id: 'A1', status: 'fixed', reason: '已加入租户检查' }, { id: 'A2', status: 'unclear', reason: '' },
     { id: 'A3', status: 'still_present', reason: '新代码绕过了守卫' }]);
   assert.ok(parsed.limitations.some((item) => item.includes('1 条上一轮发现')));
+  // ci-central#72 review: an answer the model cannot explain keeps the finding open.
+  const bare = parseReview(JSON.stringify({ ...incrementalReport, previous_findings: [{ id: 'A1', status: 'answered' }, { id: 'A2', status: 'answered', reason: '  ' }] }),
+    context, { previous });
+  assert.deepEqual(bare.previous.slice(0, 2).map(({ status }) => status), ['unclear', 'unclear']);
   assert.equal(parseReview(JSON.stringify(incrementalReport), context).previous, undefined, 'a full review ignores the field');
 });
 test('an incremental review renders new findings with ids and the re-check of every previous finding', () => {
@@ -307,7 +315,7 @@ test('an incremental review renders new findings with ids and the re-check of ev
   const rendered = renderReview(parsed, { ...context, incremental: { since: previousHead, previous, changedFiles: 1, unchangedFiles: 3 } });
   assert.ok(rendered.includes('#### P1 · A4 · 授权路径缺少检查'));
   assert.ok(rendered.includes(`### 上一轮发现复核（上次有效审核：提交 \`${previousHead.slice(0, 7)}\`）`));
-  assert.ok(rendered.includes('`A1` P1 · 授权路径缺少检查：作者已用证据答复，不再提出。回复给出了调用方校验'));
+  assert.ok(rendered.includes('`A1` P1 · 授权路径缺少检查：模型复核认为作者的答复有证据支持，不再提出。回复给出了调用方校验'));
   assert.ok(rendered.includes('#### P2 · A2 · 仍存在 · 持久化缺少用户'));
   assert.ok(rendered.includes('本轮复核：仍未传入用户'));
   assert.ok(rendered.includes('persist(user);'), 'a still-present finding keeps its evidence');

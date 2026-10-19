@@ -97,8 +97,8 @@ function validFinding(finding) {
 
 function validState(state, laneId) {
   if (!state || typeof state !== 'object' || Array.isArray(state) || state.v !== STATE_VERSION || state.lane !== laneId) return null;
-  const { head, workflow, base, prompt, model, mode, at, fp, files, findings, next } = state;
-  if (typeof head !== 'string' || !SHA.test(head) || typeof workflow !== 'string' || !SHA.test(workflow)
+  const { head, workflow, base, prompt, model, mode, at, fp, files, findings, next, lossy } = state;
+  if (typeof head !== 'string' || !SHA.test(head) || typeof workflow !== 'string' || !SHA.test(workflow) || ![undefined, true].includes(lossy)
     || typeof base !== 'string' || !base || base.length > 255
     || typeof prompt !== 'string' || !prompt || prompt.length > 64 || typeof model !== 'string' || !MODEL_ID.test(model)
     || !['full', 'incremental'].includes(mode) || typeof at !== 'string' || !ISO.test(at) || !Number.isFinite(Date.parse(at))
@@ -108,7 +108,8 @@ function validState(state, laneId) {
     || !Array.isArray(findings) || findings.length > MAX_STATE_FINDINGS || !Number.isSafeInteger(next) || next < 1 || next > 1000000) return null;
   const checked = findings.map(validFinding);
   if (checked.some((finding) => !finding)) return null;
-  return { v: STATE_VERSION, lane: laneId, head, workflow, base, prompt, model, mode, at, fp, files, findings: checked, next };
+  return { v: STATE_VERSION, lane: laneId, head, workflow, base, prompt, model, mode, at, fp, files, findings: checked, next,
+    ...(lossy ? { lossy } : {}) };
 }
 
 // JSON with <, > and line separators escaped, so model text inside a finding can neither close
@@ -118,7 +119,8 @@ const stateLine = (state) => `<!-- ai-pr-review-state:v1 ${JSON.stringify(state)
 
 // Most states are a few kilobytes. When one is not, it gives up detail in this order: long
 // finding text, older remembered answers, the per-file hashes, every remembered answer, and
-// finally the lowest-priority open findings. Open findings are what the next round re-checks.
+// finally the lowest-priority open findings. Open findings are what the next round re-checks, so a
+// record that lost any is marked lossy and the next changed diff gets a full review.
 function encodeState(state) {
   let current = state;
   let line = stateLine(current);
@@ -141,9 +143,10 @@ function encodeState(state) {
   while (kept.length && !fits()) {
     const drop = kept.reduce((worst, finding, index) => (rank(finding) >= rank(kept[worst]) ? index : worst), 0);
     kept.splice(drop, 1);
-    current = { ...current, findings: kept };
+    current = { ...current, lossy: true, findings: kept };
   }
-  return line;
+  // The loop can stop on an empty list without measuring it; the line returned is always current's.
+  return stateLine(current);
 }
 
 // Only the runner-written header line counts: line 0 is the lane marker, line 1 the v2 evidence
@@ -211,6 +214,8 @@ function collectReplies({ pull, since, comments = [], reviews = [], reviewCommen
 // contract, by a model the lane still runs.
 function planLane({ lane, state, evidence, base, fingerprint, promptVersion, manual, firstPassDue }) {
   if (manual) return { mode: 'full', reason: 'manual' };
+  // A first pass that is still due runs on the next commit, whether or not its diff changed.
+  if (firstPassDue) return { mode: 'full', reason: 'first-pass-due' };
   if (!state) return { mode: 'full', reason: 'no-previous-review' };
   const models = [lane.first_pass, lane.primary, ...(lane.fallbacks || [])].filter(Boolean).map((model) => model.id);
   if (state.prompt !== promptVersion || !models.includes(state.model)) return { mode: 'full', reason: 'untrusted-state' };
@@ -221,7 +226,8 @@ function planLane({ lane, state, evidence, base, fingerprint, promptVersion, man
     if (evidence?.status !== 'valid' || evidence.head !== state.head) return { mode: 'full', reason: 'unchanged-not-shown' };
     return { mode: 'skip', reason: 'unchanged' };
   }
-  if (firstPassDue) return { mode: 'full', reason: 'first-pass-due' };
+  // The record lost open findings the incremental round would have to re-check; a full review sees them again.
+  if (state.lossy) return { mode: 'full', reason: 'record-incomplete' };
   return { mode: 'incremental', reason: 'changed' };
 }
 
@@ -261,9 +267,12 @@ function nextFindings({ previous = [], statuses = [], fresh = [], laneId, next =
     carried.push({ id: finding.id, ...Object.fromEntries(STORED_FIELDS.map((key) =>
       [key, Object.hasOwn(FINDING_LIMITS, key) ? clip(finding[key], FINDING_LIMITS[key]) : finding[key]])), status: 'open', head });
   }
-  const open = carried.filter((finding) => finding.status === 'open').slice(-MAX_OPEN);
+  const allOpen = carried.filter((finding) => finding.status === 'open');
+  const open = allOpen.slice(-MAX_OPEN);
   const answered = carried.filter((finding) => finding.status === 'answered').slice(-MAX_ANSWERED);
-  return { findings: carried.filter((finding) => open.includes(finding) || answered.includes(finding)), next: id };
+  // Open findings left out of the record are never re-checked by an incremental round; the record says so.
+  return { findings: carried.filter((finding) => open.includes(finding) || answered.includes(finding)), next: id,
+    ...(open.length < allOpen.length ? { lossy: true } : {}) };
 }
 
 module.exports = { STATE_VERSION, diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies,

@@ -236,7 +236,14 @@ for (const [name, implementation] of [
     ['an ordinary rate limit', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
       message: 'Rate limit reached for requests per minute. Please try again in 20s. PRIVATE' } },
     { exhausted: false }],
-    ['a capacity 503', 503, {}, { error: { code: 'overloaded', type: 'server_error', message: 'usage limit PRIVATE' } }, { exhausted: false }],
+    ['a capacity 503', 503, {}, { error: { code: 'overloaded', type: 'server_error',
+      message: "You've reached your weekly usage limit for your plan. PRIVATE" } }, { exhausted: false }],
+    ['a per-minute limit worded as a quota', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'Rate limit: quota exceeded for requests per minute, retry after 20 s. PRIVATE' } }, { exhausted: false }],
+    ['a per-minute limit worded as a usage limit', 429, {}, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'usage limit exceeded per minute. PRIVATE' } }, { exhausted: false }],
+    ['a generic quota message that names no plan, reset or window', 429, {}, { error: { code: 'too_many_requests', type: 'rate_limit_error',
+      message: 'Quota exceeded, please slow down. PRIVATE' } }, { exhausted: false }],
   ]) {
     test(`${name}: Responses ${label} ${expected.exhausted ? 'is' : 'is not'} reported as an exhausted plan quota, without its text`, async (t) => {
       const f = await fixture(t, implementation, async (_req, res) => {
@@ -282,6 +289,18 @@ for (const [name, implementation] of [
       max_tokens: 16, messages: [{ role: 'user', content: 'synthetic code' }] } }),
     (error) => error.status === 429 && error.quotaExhausted === true && error.quotaWindow === 'weekly'
       && Math.abs(Date.parse(error.quotaResetAt) - (Date.now() + 3600000)) < 5000 && !JSON.stringify(error).includes('PRIVATE'));
+  });
+  // ci-central#72 review: reading the error body for the plan window must not cost the HTTP status.
+  test(`${name}: an error body cut off mid-read keeps its HTTP status`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json', 'content-length': '4096' });
+      res.write('{"error":{"code":"RATE_LIMITED","message":"PRIVATE');
+      await delay(50);
+      res.destroy();
+    });
+    await assert.rejects(f.invoke({ protocol: 'openai-responses', payload: { model: 'gpt-6-luna', input: 'synthetic code', max_output_tokens: 16, store: false } }),
+      (error) => error.status === 429 && error.quotaExhausted === false && !JSON.stringify(error).includes('PRIVATE'));
+    assert.equal(f.calls.length, 1);
   });
 
   for (const [label, body] of [

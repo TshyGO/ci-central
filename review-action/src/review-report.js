@@ -22,7 +22,7 @@ const incrementalContract = [
   'This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round\'s findings, replies the PR author or maintainers posted since, the PR\'s own changes since that commit, and the complete current text of the files those changes touch.',
   'Re-check every previous finding against the current code and the replies, and give each one a verdict in previous_findings with status fixed, still_present, answered or unclear. Use answered only when a reply gives concrete evidence that holds against the current code; an assertion without evidence is not an answer.',
   'Do not report again, as a new finding, an issue that was answered with evidence, unless the new code contradicts that answer; then mark it still_present and say why.',
-  'The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing.',
+  'The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing. When a change could affect code in files that were not supplied (callers, implementations, tests, configuration), name those files and the risk in limitations instead of assuming they still fit.',
   'Review the changes since that commit in depth, including how they interact with the rest of each supplied file, and report new defects in findings with a code quote from the supplied patch or file text. Do not repeat still-present previous findings in findings.',
 ].join('\n\n');
 
@@ -58,7 +58,9 @@ function readVerdicts(report, previous) {
     if (!previous.some((finding) => finding.id === item.id)) continue;
     const status = VERDICTS[typeof item.status === 'string' ? item.status.trim().toLowerCase() : ''];
     if (!status) continue;
-    given.set(item.id, { id: item.id, status, reason: typeof item.reason === 'string' ? item.reason.trim().slice(0, 600) : '' });
+    const reason = typeof item.reason === 'string' ? item.reason.trim().slice(0, 600) : '';
+    // An answer the model cannot explain does not close a finding; it stays open as unclear.
+    given.set(item.id, { id: item.id, status: status === 'answered' && !reason ? 'unclear' : status, reason });
   }
   const verdicts = previous.map((finding) => given.get(finding.id) ?? { id: finding.id, status: 'unclear', reason: '' });
   const unanswered = previous.filter((finding) => finding.status === 'open' && !given.has(finding.id)).length;
@@ -127,18 +129,17 @@ function parseReview(text, context, { previous } = {}) {
     if (!['new', 'old'].includes(side) || !Number.isSafeInteger(finding.line) || finding.line < 1
         || !(side === 'old' ? file.old_ranges : file.ranges).some(([start, end]) => finding.line >= start && finding.line <= end)) throw new Error('Review contract: line is outside supplied hunks.');
     const evidence = plain(finding.evidence, 'evidence');
-    // An incremental review supplies a changed hunk and the whole file it sits in, so the same
-    // place can be found twice; it is still one place.
-    const locate = (hunks) => [...new Map(hunks.flatMap(hunk => {
+    const locate = (hunks) => hunks.flatMap(hunk => {
       const ranges = side === 'old' ? hunk.old_ranges : hunk.ranges;
       if (!ranges.some(([start, end]) => finding.line >= start && finding.line <= end)) return [];
       return quoteLocations(side === 'old' ? hunk.old_code : hunk.new_code, ranges[0][0], evidence);
-    }).map((location) => [location.join(':'), location])).values()];
+    });
     let locations = locate(file.hunks);
     if (!locations.length) throw new Error('Review contract: code quote was not supplied on that side of the hunk.');
     let aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
-    // A quote repeated elsewhere in a whole supplied file must not make a slightly wrong line
-    // ambiguous when the changed hunks alone pin it, as they would in a full review.
+    // A quote repeated elsewhere in a whole supplied file, or found both in a changed hunk and in the
+    // whole file around it, must not make a slightly wrong line ambiguous when the changed hunks
+    // alone pin it, as they would in a full review.
     if (!aligned && locations.length !== 1) {
       const inChanges = locate(file.hunks.filter((hunk) => hunk.full_text !== true));
       if (inChanges.length === 1) locations = inChanges;
@@ -201,7 +202,9 @@ const fenced = (text) => {
 const token = (value, pattern) => '`' + String(value).replace(pattern, '') + '`';
 const idTag = (id) => token(id, /[^A-Za-z0-9]/g);
 const shaTag = (sha) => token(String(sha).slice(0, 7), /[^0-9a-f]/g);
-const VERDICT_TEXT = { fixed: '已修复', still_present: '仍存在', answered: '作者已用证据答复，不再提出', unclear: '本轮未能确认，继续保留' };
+// Every verdict is the model's re-check, not a verified fact, and reads as such.
+const VERDICT_TEXT = { fixed: '模型复核认为已修复', still_present: '模型复核认为仍存在', answered: '模型复核认为作者的答复有证据支持，不再提出',
+  unclear: '模型复核无法确认，继续保留' };
 const findingBody = (finding) => [
   `文件：${code(`${finding.file}:${finding.line}`)}（${finding.side === 'old' ? 'base/删除侧' : 'head/新增侧'}）`, '',
   ...(finding.reported_line ? [`模型原行号为 ${finding.reported_line}；已按唯一代码引用定位到上述行号。`] : []),

@@ -481,7 +481,7 @@ var require_review_report = __commonJS({
       "This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round's findings, replies the PR author or maintainers posted since, the PR's own changes since that commit, and the complete current text of the files those changes touch.",
       "Re-check every previous finding against the current code and the replies, and give each one a verdict in previous_findings with status fixed, still_present, answered or unclear. Use answered only when a reply gives concrete evidence that holds against the current code; an assertion without evidence is not an answer.",
       "Do not report again, as a new finding, an issue that was answered with evidence, unless the new code contradicts that answer; then mark it still_present and say why.",
-      "The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing.",
+      "The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing. When a change could affect code in files that were not supplied (callers, implementations, tests, configuration), name those files and the risk in limitations instead of assuming they still fit.",
       "Review the changes since that commit in depth, including how they interact with the rest of each supplied file, and report new defects in findings with a code quote from the supplied patch or file text. Do not repeat still-present previous findings in findings."
     ].join("\n\n");
     function buildSystemPrompt2(repositoryPrompt, lane, { incremental = false } = {}) {
@@ -523,7 +523,8 @@ var require_review_report = __commonJS({
         if (!previous.some((finding) => finding.id === item.id)) continue;
         const status = VERDICTS[typeof item.status === "string" ? item.status.trim().toLowerCase() : ""];
         if (!status) continue;
-        given.set(item.id, { id: item.id, status, reason: typeof item.reason === "string" ? item.reason.trim().slice(0, 600) : "" });
+        const reason = typeof item.reason === "string" ? item.reason.trim().slice(0, 600) : "";
+        given.set(item.id, { id: item.id, status: status === "answered" && !reason ? "unclear" : status, reason });
       }
       const verdicts = previous.map((finding) => given.get(finding.id) ?? { id: finding.id, status: "unclear", reason: "" });
       const unanswered = previous.filter((finding) => finding.status === "open" && !given.has(finding.id)).length;
@@ -595,11 +596,11 @@ var require_review_report = __commonJS({
         const side = Object.hasOwn(sideNames, rawSide) ? sideNames[rawSide] : rawSide;
         if (!["new", "old"].includes(side) || !Number.isSafeInteger(finding.line) || finding.line < 1 || !(side === "old" ? file.old_ranges : file.ranges).some(([start, end]) => finding.line >= start && finding.line <= end)) throw new Error("Review contract: line is outside supplied hunks.");
         const evidence = plain(finding.evidence, "evidence");
-        const locate = (hunks) => [...new Map(hunks.flatMap((hunk) => {
+        const locate = (hunks) => hunks.flatMap((hunk) => {
           const ranges = side === "old" ? hunk.old_ranges : hunk.ranges;
           if (!ranges.some(([start, end]) => finding.line >= start && finding.line <= end)) return [];
           return quoteLocations(side === "old" ? hunk.old_code : hunk.new_code, ranges[0][0], evidence);
-        }).map((location) => [location.join(":"), location])).values()];
+        });
         let locations = locate(file.hunks);
         if (!locations.length) throw new Error("Review contract: code quote was not supplied on that side of the hunk.");
         let aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
@@ -667,7 +668,12 @@ ${delimiter}`;
     var token = (value, pattern) => "`" + String(value).replace(pattern, "") + "`";
     var idTag = (id) => token(id, /[^A-Za-z0-9]/g);
     var shaTag = (sha) => token(String(sha).slice(0, 7), /[^0-9a-f]/g);
-    var VERDICT_TEXT = { fixed: "\u5DF2\u4FEE\u590D", still_present: "\u4ECD\u5B58\u5728", answered: "\u4F5C\u8005\u5DF2\u7528\u8BC1\u636E\u7B54\u590D\uFF0C\u4E0D\u518D\u63D0\u51FA", unclear: "\u672C\u8F6E\u672A\u80FD\u786E\u8BA4\uFF0C\u7EE7\u7EED\u4FDD\u7559" };
+    var VERDICT_TEXT = {
+      fixed: "\u6A21\u578B\u590D\u6838\u8BA4\u4E3A\u5DF2\u4FEE\u590D",
+      still_present: "\u6A21\u578B\u590D\u6838\u8BA4\u4E3A\u4ECD\u5B58\u5728",
+      answered: "\u6A21\u578B\u590D\u6838\u8BA4\u4E3A\u4F5C\u8005\u7684\u7B54\u590D\u6709\u8BC1\u636E\u652F\u6301\uFF0C\u4E0D\u518D\u63D0\u51FA",
+      unclear: "\u6A21\u578B\u590D\u6838\u65E0\u6CD5\u786E\u8BA4\uFF0C\u7EE7\u7EED\u4FDD\u7559"
+    };
     var findingBody = (finding) => [
       `\u6587\u4EF6\uFF1A${code(`${finding.file}:${finding.line}`)}\uFF08${finding.side === "old" ? "base/\u5220\u9664\u4FA7" : "head/\u65B0\u589E\u4FA7"}\uFF09`,
       "",
@@ -953,11 +959,26 @@ var require_review_incremental = __commonJS({
     }
     function validState(state, laneId) {
       if (!state || typeof state !== "object" || Array.isArray(state) || state.v !== STATE_VERSION || state.lane !== laneId) return null;
-      const { head, workflow, base, prompt, model, mode, at, fp, files, findings, next } = state;
-      if (typeof head !== "string" || !SHA.test(head) || typeof workflow !== "string" || !SHA.test(workflow) || typeof base !== "string" || !base || base.length > 255 || typeof prompt !== "string" || !prompt || prompt.length > 64 || typeof model !== "string" || !MODEL_ID.test(model) || !["full", "incremental"].includes(mode) || typeof at !== "string" || !ISO.test(at) || !Number.isFinite(Date.parse(at)) || typeof fp !== "string" || !/^[0-9a-f]{64}$/.test(fp) || !(files === null || typeof files === "string" && /^[A-Za-z0-9_-]*$/.test(files) && Buffer.from(files, "base64url").length % FILE_HASH_BYTES === 0 && Buffer.from(files, "base64url").length <= MAX_FILE_HASHES * FILE_HASH_BYTES) || !Array.isArray(findings) || findings.length > MAX_STATE_FINDINGS || !Number.isSafeInteger(next) || next < 1 || next > 1e6) return null;
+      const { head, workflow, base, prompt, model, mode, at, fp, files, findings, next, lossy } = state;
+      if (typeof head !== "string" || !SHA.test(head) || typeof workflow !== "string" || !SHA.test(workflow) || ![void 0, true].includes(lossy) || typeof base !== "string" || !base || base.length > 255 || typeof prompt !== "string" || !prompt || prompt.length > 64 || typeof model !== "string" || !MODEL_ID.test(model) || !["full", "incremental"].includes(mode) || typeof at !== "string" || !ISO.test(at) || !Number.isFinite(Date.parse(at)) || typeof fp !== "string" || !/^[0-9a-f]{64}$/.test(fp) || !(files === null || typeof files === "string" && /^[A-Za-z0-9_-]*$/.test(files) && Buffer.from(files, "base64url").length % FILE_HASH_BYTES === 0 && Buffer.from(files, "base64url").length <= MAX_FILE_HASHES * FILE_HASH_BYTES) || !Array.isArray(findings) || findings.length > MAX_STATE_FINDINGS || !Number.isSafeInteger(next) || next < 1 || next > 1e6) return null;
       const checked = findings.map(validFinding);
       if (checked.some((finding) => !finding)) return null;
-      return { v: STATE_VERSION, lane: laneId, head, workflow, base, prompt, model, mode, at, fp, files, findings: checked, next };
+      return {
+        v: STATE_VERSION,
+        lane: laneId,
+        head,
+        workflow,
+        base,
+        prompt,
+        model,
+        mode,
+        at,
+        fp,
+        files,
+        findings: checked,
+        next,
+        ...lossy ? { lossy } : {}
+      };
     }
     var stateLine = (state) => `<!-- ai-pr-review-state:v1 ${JSON.stringify(state).replace(UNSAFE_IN_COMMENT, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)} -->`;
     function encodeState2(state) {
@@ -981,9 +1002,9 @@ var require_review_incremental = __commonJS({
       while (kept.length && !fits()) {
         const drop = kept.reduce((worst, finding, index) => rank(finding) >= rank(kept[worst]) ? index : worst, 0);
         kept.splice(drop, 1);
-        current = { ...current, findings: kept };
+        current = { ...current, lossy: true, findings: kept };
       }
-      return line;
+      return stateLine(current);
     }
     function readState2(body, laneId) {
       const lines = String(body ?? "").split(/\r?\n/, 3);
@@ -1030,6 +1051,7 @@ var require_review_incremental = __commonJS({
     }
     function planLane2({ lane, state, evidence, base, fingerprint, promptVersion, manual, firstPassDue }) {
       if (manual) return { mode: "full", reason: "manual" };
+      if (firstPassDue) return { mode: "full", reason: "first-pass-due" };
       if (!state) return { mode: "full", reason: "no-previous-review" };
       const models = [lane.first_pass, lane.primary, ...lane.fallbacks || []].filter(Boolean).map((model) => model.id);
       if (state.prompt !== promptVersion || !models.includes(state.model)) return { mode: "full", reason: "untrusted-state" };
@@ -1038,7 +1060,7 @@ var require_review_incremental = __commonJS({
         if (evidence?.status !== "valid" || evidence.head !== state.head) return { mode: "full", reason: "unchanged-not-shown" };
         return { mode: "skip", reason: "unchanged" };
       }
-      if (firstPassDue) return { mode: "full", reason: "first-pass-due" };
+      if (state.lossy) return { mode: "full", reason: "record-incomplete" };
       return { mode: "incremental", reason: "changed" };
     }
     var INCREMENTAL_SHARE_LIMIT2 = 0.5;
@@ -1069,9 +1091,14 @@ var require_review_incremental = __commonJS({
         finding.id = `${laneId}${id++}`;
         carried.push({ id: finding.id, ...Object.fromEntries(STORED_FIELDS.map((key) => [key, Object.hasOwn(FINDING_LIMITS, key) ? clip(finding[key], FINDING_LIMITS[key]) : finding[key]])), status: "open", head });
       }
-      const open = carried.filter((finding) => finding.status === "open").slice(-MAX_OPEN);
+      const allOpen = carried.filter((finding) => finding.status === "open");
+      const open = allOpen.slice(-MAX_OPEN);
       const answered = carried.filter((finding) => finding.status === "answered").slice(-MAX_ANSWERED);
-      return { findings: carried.filter((finding) => open.includes(finding) || answered.includes(finding)), next: id };
+      return {
+        findings: carried.filter((finding) => open.includes(finding) || answered.includes(finding)),
+        next: id,
+        ...open.length < allOpen.length ? { lossy: true } : {}
+      };
     }
     module2.exports = {
       STATE_VERSION,
@@ -1526,7 +1553,8 @@ ${issueContext}` : "Referenced issues: none.",
     "not-smaller": "\u6539\u52A8\u6587\u4EF6\u7684\u5B8C\u6574\u6587\u672C\u6BD4\u5B8C\u6574\u5BA1\u6838\u8FD8\u5927\uFF0C\u5B8C\u6574\u5BA1\u6838",
     "text-unavailable": "\u6709\u6539\u52A8\u6587\u4EF6\u8BFB\u4E0D\u5230\u5B8C\u6574\u6587\u672C\uFF0C\u5B8C\u6574\u5BA1\u6838",
     "over-budget": "\u6539\u52A8\u6587\u4EF6\u7684\u5B8C\u6574\u6587\u672C\u8D85\u51FA\u6A21\u578B\u9884\u7B97\uFF0C\u5B8C\u6574\u5BA1\u6838",
-    "no-file-record": "\u65E0\u6CD5\u5355\u72EC\u6BD4\u8F83\u6B64\u540E\u7684\u63D0\u4EA4\uFF0C\u4E5F\u6CA1\u6709\u9010\u6587\u4EF6\u8BB0\u5F55\uFF0C\u5B8C\u6574\u5BA1\u6838"
+    "no-file-record": "\u65E0\u6CD5\u5355\u72EC\u6BD4\u8F83\u6B64\u540E\u7684\u63D0\u4EA4\uFF0C\u4E5F\u6CA1\u6709\u9010\u6587\u4EF6\u8BB0\u5F55\uFF0C\u5B8C\u6574\u5BA1\u6838",
+    "record-incomplete": "\u4E0A\u4E00\u8F6E\u5BA1\u6838\u8BB0\u5F55\u6CA1\u80FD\u88C5\u4E0B\u5168\u90E8\u672A\u51B3\u53D1\u73B0\uFF0C\u5B8C\u6574\u5BA1\u6838"
   };
   for (const lane of lanes) {
     const plan = plans.get(lane.id);
@@ -1651,7 +1679,7 @@ ${googleDeepReviewContract}`), model.review_lane_id, laneMode(model));
     const rawText = `${responseText || ""}
 ${requestError || ""}`;
     const text = rawText.toLowerCase();
-    const quotaExhausted = Boolean(quota) || status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || text.includes("usage limit") || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || provider === "anthropic" && (status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"'));
+    const quotaExhausted = Boolean(quota) || status === 429 && (text.includes("insufficient_quota") || text.includes("usagelimiterror") || text.includes("usage limit") && !/\bper[- ]?(?:minute|min|second|sec)\b|\b[rt]p[ms]\b/i.test(text) || /token[- ]?plan[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /weekly[^\n]*quota[^\n]*(exhausted|reached)/i.test(text) || /quota[^\n]*reset at/i.test(text)) || provider === "anthropic" && (status === 402 || text.includes("billing_error") || text.includes('"credit":"exhausted"'));
     const authenticationFailed = status === 401 || status === 403 && /(invalid[_ -]?api[_ -]?key|authentication|unauthori[sz]ed)/i.test(text);
     const gatewayBlocked = /^\s*(<!doctype html|<html\b)/i.test(responseText || "") || !response?.ok && text.includes("\u9A8C\u8BC1\u5931\u8D25");
     const endpointUnavailable = !response && /fetch failed|enotfound|eai_again|getaddrinfo|econnrefused|certificate|\btls\b/i.test(text);
@@ -1974,7 +2002,9 @@ ${requestError || ""}`;
         lastOutcome = "";
         const quotaNote = outcome.quota ? quotaWording(route.provider, outcome.quota) : null;
         if (!crossing) ownQuota = quotaNote;
-        if (quotaNote) quotaNotes.push({ provider: route.provider, ...quotaNote });
+        if (quotaNote && !quotaNotes.some((note) => note.provider === route.provider && note.headline === quotaNote.headline)) {
+          quotaNotes.push({ provider: route.provider, ...quotaNote });
+        }
         if (response?.ok && !requestError && failureKind !== "gateway-blocked") {
           try {
             const { review: review2, record, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
@@ -2120,7 +2150,8 @@ ${fence}
       fp: identity.fingerprint,
       files: identity.files,
       findings: result.record.findings,
-      next: result.record.next
+      next: result.record.next,
+      ...result.record.lossy ? { lossy: true } : {}
     } : laneRecords.get(lane.id)?.state ?? null;
     const recordLine = record ? [encodeState(record)] : [];
     const servedLabel = servedBy && servedVia ? `${servedBy.id} via ${servedVia.provider}` : servedBy?.id;

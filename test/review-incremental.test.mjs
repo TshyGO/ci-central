@@ -161,6 +161,8 @@ test('a changed diff on a trusted state is an incremental candidate unless a ful
   const changed = { fingerprint: 'e'.repeat(64) };
   assert.deepEqual(plan(changed), { mode: 'incremental', reason: 'changed' });
   assert.deepEqual(plan({ ...changed, firstPassDue: true }), { mode: 'full', reason: 'first-pass-due' });
+  // ci-central#72 review: a skip must not stand in for a first pass that is still due.
+  assert.deepEqual(plan({ firstPassDue: true }), { mode: 'full', reason: 'first-pass-due' });
   assert.deepEqual(plan({ ...changed, evidence: { head, status: 'diagnostic', workflow } }), { mode: 'incremental', reason: 'changed' },
     'a later failed round keeps the last valid review as the base');
 });
@@ -205,4 +207,27 @@ test('findings carry forward with stable ids: still present stays open, answered
   assert.equal(result.findings.find(({ id }) => id === 'A3').note, 'README explains it');
   assert.equal(result.findings.find(({ id }) => id === 'A5').head, head);
   assert.equal(fresh[0].id, 'A5', 'the published finding shows the id the next round will use');
+});
+
+// ci-central#72 review: an incremental round re-checks only the open findings its record holds, while
+// a full review sees the whole PR again. A record that had to drop open findings says so, and the
+// next changed diff gets a full review. An unchanged diff may still be skipped: the comment it
+// reuses shows every finding of that review.
+test('a record that dropped open findings says so, and the next changed diff gets a full review', () => {
+  const many = Array.from({ length: 61 }, (_, i) => ({ priority: 'P2', file: 'src/b.js', side: 'new', line: i + 1, title: `t${i}`,
+    confidence: 'medium', trigger: 't', impact: 'i', evidence: 'c', suggestion: 's' }));
+  const capped = nextFindings({ previous: [], statuses: [], fresh: many, laneId: 'A', next: 1, head });
+  assert.equal(capped.findings.length, 60);
+  assert.equal(capped.lossy, true);
+  assert.equal(nextFindings({ previous: [], statuses: [], fresh: many.slice(0, 60), laneId: 'A', next: 1, head }).lossy, undefined);
+  const long = Array.from({ length: 100 }, (_, i) => ({ ...findings[0], id: `A${i + 1}`, title: '标题'.repeat(90),
+    trigger: '触发'.repeat(200), impact: '影响'.repeat(200), evidence: 'x'.repeat(800), suggestion: '建议'.repeat(200) }));
+  const shrunk = readState(body('A', encodeState(state({ findings: long }))), 'A');
+  assert.ok(shrunk.findings.length < 100 && shrunk.lossy === true, 'the encoder marks a record it had to cut open findings from');
+  assert.equal(readState(body('A', encodeState(state())), 'A').lossy, undefined, 'a complete record is not marked');
+  assert.deepEqual(readState(body('A', encodeState(state({ lossy: true }))), 'A'), state({ lossy: true }));
+  assert.equal(readState(body('A', `<!-- ai-pr-review-state:v1 ${JSON.stringify(state({ lossy: 'yes' }))} -->`), 'A'), null,
+    'only true marks a record');
+  assert.deepEqual(plan({ state: state({ lossy: true }), fingerprint: 'e'.repeat(64) }), { mode: 'full', reason: 'record-incomplete' });
+  assert.deepEqual(plan({ state: state({ lossy: true }) }), { mode: 'skip', reason: 'unchanged' });
 });

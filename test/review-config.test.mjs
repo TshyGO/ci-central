@@ -41,20 +41,24 @@ for (const repository of repositories) {
   assert.ok(fromSource.lanes.every((lane) => lane.fallbacks.length === 0), `${repository} lanes must not fall back to another model`);
   assert.deepEqual(fromBundle, fromSource, `${repository} source and dist loaders disagree`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gpt-6-luna']);
   // Lanes A/B draw on the OpenCode Go plan (NebulaLab's B on Anthropic) and Lane C on Command Code.
   assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', onAnthropic ? 'anthropic' : 'opencode-go', 'command-code'], `${repository} lane providers changed`);
   // A fallback on the same provider cannot help once that provider's quota is gone or it is down.
   // So a primary that yields no usable review, for any reason, is asked once more as the same
   // model on the other provider: Lanes A/B on Command Code through the Lane C slot, Lane C on Go
-  // through the Lane A slot. Command Code served Muse 1.3 and Haiku on 2026-10-15, and Go
-  // recognised hy3 on 2026-10-18.
+  // through the Lane A slot. Command Code served Muse 1.3 and Haiku on 2026-10-15, and Go served
+  // GPT-6 Luna on 2026-10-19 under the same id.
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.cross_provider), [
     { credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' },
     { credential_lane: 'C', id: 'claude-haiku-5-5' },
-    { credential_lane: 'A', id: 'hy3' },
+    { credential_lane: 'A', id: 'gpt-6-luna' },
   ], `${repository} each primary must name the same model on the other provider`);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-responses']);
+  // Go serves GPT-6 Luna only over Responses (Chat Completions returns 400 ModelProtocolUnsupported),
+  // and the cross route reuses the model's protocol, so no model-level override may move it back.
+  assert.equal(fromSource.lanes[2].primary.protocol ?? fromSource.lanes[2].protocol, 'openai-responses',
+    `${repository} GPT-6 Luna must be asked over Responses on both providers`);
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.first_pass?.id ?? null), [null, onAnthropic ? 'claude-sonnet-5-5' : null, null],
     `${repository} only NebulaLab's Lane B has a first pass`);
@@ -63,9 +67,10 @@ for (const repository of repositories) {
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
   assert.equal(fromSource.lanes[1].primary.effort, 'high', `${repository} Haiku must stay at high effort`);
   // Calibration took Muse and Hy3 from near-silent to 1-5 findings on large NebulaLab PRs with no
-  // high-confidence clean-change noise; on Haiku it only added noise.
+  // high-confidence clean-change noise; on Haiku it only added noise. GPT-6 Luna took over Lane C
+  // with Hy3's setting and was measured with it on 2026-10-19.
   assert.deepEqual(fromSource.lanes.flatMap((lane) => [lane.primary, ...lane.fallbacks]).filter((model) => model.reporting_calibration).map((model) => model.id),
-    ['muse-spark-1.3-contributor', 'tencent/hy3-paid'], `${repository} calibration must stay limited to Muse and Hy3`);
+    ['muse-spark-1.3-contributor', 'gpt-6-luna'], `${repository} calibration must stay limited to Muse and GPT-6 Luna`);
   assert.ok(fromSource.lanes.every((lane) => [lane.primary, ...lane.fallbacks].every((model) => model.thinking_level === undefined)),
     `${repository} no active lane uses Google thinking`);
   // Every active model must send an explicit output ceiling.
@@ -91,11 +96,12 @@ for (const repository of repositories) {
   assert.equal(config.lanes[1].primary.max_output_tokens, 120000, `${repository} Lane B must preserve the Haiku output ceiling`);
   assert.equal(config.lanes[1].request_timeout_ms, 1800000, `${repository} Lane B preserves reasoning with a thirty-minute request ceiling`);
   assert.equal(config.lanes[1].model_budget_ms, 1800000, `${repository} Lane B model budget matches its request ceiling`);
-  // Measured 2026-10-15: calibrated Hy3 finished three large NebulaLab PRs in 115-156 s, so it
-  // keeps the lane's fifteen minutes, on Command Code and again on Go.
+  // Measured 2026-10-15: calibrated Hy3 finished three large NebulaLab PRs in 115-156 s; on
+  // 2026-10-19 GPT-6 Luna finished the same three on Go in 68-107 s. Lane C keeps its fifteen
+  // minutes, on Command Code and again on Go.
   assert.equal(config.lanes[2].request_timeout_ms, 900000, `${repository} Lane C request budget changed without a measurement behind it`);
-  assert.equal(config.lanes[2].model_budget_ms, 900000, `${repository} Lane C model cap matches Hy3's fifteen minutes`);
-  assert.equal(config.lanes[2].primary.request_timeout_ms, undefined, `${repository} Hy3 inherits the lane's fifteen-minute window`);
+  assert.equal(config.lanes[2].model_budget_ms, 900000, `${repository} Lane C model cap matches GPT-6 Luna's fifteen minutes`);
+  assert.equal(config.lanes[2].primary.request_timeout_ms, undefined, `${repository} GPT-6 Luna inherits the lane's fifteen-minute window`);
   // Measured 2026-10-14: Haiku finished 71-226K-token NebulaLab PRs in 146-211 s.
   assert.equal(config.lanes[1].primary.request_timeout_ms, 900000, `${repository} Lane B Haiku primary uses a fifteen-minute window`);
   if (anthropicLaneB.has(repository)) {
@@ -147,8 +153,11 @@ const inputTokenRoom = {
   'meta/muse-spark-1.3-contributor': 1048576,
   'meta/muse-spark-1.2-contributor': 1048576,
   'moonshotai/Kimi-K2.7-Code': 256000,
+  // GPT-6 Luna: a 1M-token window (recorded 2026-10-19). Command Code and Go use the same id, so this
+  // one entry bounds both routes; it is counted together with its output, the conservative reading.
+  'gpt-6-luna': 1000000,
 };
-const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'z-ai/glm-5.3-flash', 'moonshotai/Kimi-K2.7-Code']);
+const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'z-ai/glm-5.3-flash', 'moonshotai/Kimi-K2.7-Code', 'gpt-6-luna']);
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
   const policy = config.review_policy;
@@ -185,8 +194,8 @@ const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'anthropic');
 assert.equal(nebula.lanes[2].provider, 'command-code');
-assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-chat-completions']);
-assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'tencent/hy3-paid']);
+assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-responses']);
+assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gpt-6-luna']);
 assert.equal(nebula.lanes[0].primary.context_profile, 'full');
 // Sonnet 5.5 found real defects Haiku missed and none of Haiku's false P1s on NebulaLab
 // #1133/#1237/#1241 (2026-10-15), at 0.4x Haiku's output. A first review sees a median 97% of
@@ -258,6 +267,10 @@ googleOmitMaxTokens.lanes[2].protocol = 'google-generate-content';
 delete googleOmitMaxTokens.lanes[2].primary.cross_provider;
 googleOmitMaxTokens.lanes[2].primary.omit_max_tokens = true;
 assert.throws(() => source.validateConfig(googleOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens is only supported by openai-chat-completions/);
+// Lane C's Responses request always carries its output ceiling; the flag cannot drop it there either.
+const responsesOmitMaxTokens = structuredClone(nebula);
+responsesOmitMaxTokens.lanes[2].primary.omit_max_tokens = true;
+assert.throws(() => source.validateConfig(responsesOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens is only supported by openai-chat-completions/);
 
 const invalidLaneBudget = structuredClone(nebula);
 invalidLaneBudget.lanes[2].model_budget_ms = invalidLaneBudget.lanes[2].request_timeout_ms - 1;

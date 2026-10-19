@@ -66,19 +66,19 @@
     {
       "id": "C",
       "provider": "command-code",
-      "protocol": "openai-chat-completions",
+      "protocol": "openai-responses",
       "advisory": true,
       "request_timeout_ms": 900000,
       "model_budget_ms": 900000,
       "primary": {
-        "id": "tencent/hy3-paid",
-        "label": "Hy3 (Command Code)",
+        "id": "gpt-6-luna",
+        "label": "GPT-6 Luna",
         "context_profile": "full",
         "max_output_tokens": 65536,
         "reporting_calibration": true,
         "cross_provider": {
           "credential_lane": "A",
-          "id": "hy3"
+          "id": "gpt-6-luna"
         }
       },
       "fallbacks": []

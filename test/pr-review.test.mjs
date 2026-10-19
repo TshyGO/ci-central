@@ -845,6 +845,19 @@ r = await scenario(firstCallFails('B', 'claude-haiku-5-5', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model and route', !r.error
   && r.captured.filter(({ lane, model }) => lane === 'B' && model === 'claude-haiku-5-5').length === 1
   && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5').length === 1);
+// NebulaLab #1296: Command Code rate-limited Hy3, then Go streamed Hy3 for about 300 s and closed
+// the stream before it finished. The diagnostic must not read as a rate limit or an auth problem.
+const closedStream = Object.assign(new Error('SDK request failed (code=REVIEW_INCOMPLETE_STREAM, http=200, end=clean_close, last_event=reasoning, idle_before_end_ms=2616).'),
+  { name: 'SDKRequestError', code: 'REVIEW_INCOMPLETE_STREAM', httpStatus: 200, unserved: false });
+r = await scenario((call) => call.model === 'tencent/hy3-paid'
+  ? Promise.reject(unserved(429, { providerType: 'rate_limit_error', providerCode: 'RATE_LIMITED' }))
+  : call.lane === 'A' && call.model === 'hy3' ? Promise.reject(closedStream) : healthy(call));
+const closedStreamComment = r.posted.find((body) => body.includes('lane=C') && body.includes('status=diagnostic')) || '';
+check('a stream closed before the model finished is named as such, not as a failed request or an auth problem', !r.error
+  && closedStreamComment.includes('tencent/hy3-paid -> HTTP 429 (1 attempt(s))')
+  && /tencent\/hy3-paid via opencode-go hy3 -> HTTP 200, stream closed before the model finished after \d+ s \(1 attempt\(s\)\)/.test(closedStreamComment)
+  && closedStreamComment.includes('this is not a rate limit, quota or authentication failure. opencode-go accepted the request (HTTP 200)')
+  && !closedStreamComment.includes('HTTP request failed') && !closedStreamComment.includes('request or auth problem'));
 const invalidResendConfig = structuredClone(centralConfig);
 invalidResendConfig.lanes[2].resend_unserved = 'yes';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(invalidResendConfig) });

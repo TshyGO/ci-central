@@ -78,6 +78,53 @@ function packDiff(files, budget) {
     omittedHunks, coverage, manifest: coverage.map(({ code, ranges, old_ranges, hunks, ...metadata }) => metadata) };
 }
 
+// A file's whole current text as one numbered hunk, so findings may quote code around the change.
+function fullTextHunk(file) {
+  const code = file.full_text.split('\n');
+  return { text: `[Complete current text of ${file.filename} at the head commit; line numbers are head-side.]\n`
+    + code.map((line, index) => `${index + 1} | ${line}`).join('\n'),
+  complete: true, ranges: [[1, code.length]], old_ranges: [], code, new_code: code, old_code: [], full_text: true };
+}
+
+// Incremental material: every file's since-review patch hunks first, in risk order, then the
+// complete current text of each changed file while the budget lasts. The runner reviews in full
+// whenever any of it is left out (quality first: an incremental review never sees less of a changed
+// file than its whole text). The result has packDiff's shape, so evidence is validated the same
+// way against exactly what was supplied.
+function packIncremental(files, budget) {
+  const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
+  const prefix = (file) => `File: ${file.filename}\nStatus: ${file.status}; +${file.additions} -${file.deletions}`
+    + ` (its complete PR change${file.scope === 'pr' ? ': the commits since the reviewed one could not be compared on their own'
+      : file.since ? `; since the reviewed commit: ${file.since}` : ''})\n`;
+  const plans = ordered.map((file) => ({ file, patch: hunks({ filename: file.filename, patch: file.patch }),
+    text: typeof file.full_text === 'string' ? fullTextHunk(file) : null, context: [], selected: [] }));
+  let used = 0;
+  const cost = (plan, hunk) => (plan.selected.length ? 1 : prefix(plan.file).length + (used ? SEPARATOR.length : 0)) + hunk.text.length;
+  for (const plan of plans) {
+    for (const hunk of plan.patch) {
+      if (hunk.complete === false || used + cost(plan, hunk) > budget) continue;
+      used += cost(plan, hunk);
+      plan.selected.push(hunk);
+    }
+  }
+  for (const plan of plans.filter(({ text }) => text).sort((a, b) => a.file.full_text.length - b.file.full_text.length)) {
+    if (used + cost(plan, plan.text) > budget) continue;
+    used += cost(plan, plan.text);
+    plan.selected.push(plan.text);
+    plan.context = [plan.text];
+  }
+  const blocks = plans.filter((plan) => plan.selected.length).map((plan) => prefix(plan.file) + plan.selected.map((hunk) => hunk.text).join('\n'));
+  const coverage = plans.map(({ file, patch, text, context, selected }) => ({ file: file.filename, status: file.status, supplied_hunks: selected.length,
+    total_hunks: patch.length + (text ? 1 : 0), patch_available: Boolean(file.patch) || context.length > 0,
+    mode: context.length ? 'patch+head_text' : 'patch',
+    ranges: selected.flatMap((hunk) => hunk.ranges), old_ranges: selected.flatMap((hunk) => hunk.old_ranges),
+    hunks: selected.map(({ text: hunkText, ...evidence }) => evidence), code: selected.flatMap((hunk) => hunk.code) }));
+  const text = blocks.join(SEPARATOR);
+  return { text, kept: blocks.length, packedChars: text.length, omitted: coverage.filter((file) => !file.supplied_hunks).length,
+    omittedHunks: coverage.reduce((sum, file) => sum + file.total_hunks - file.supplied_hunks, 0), coverage,
+    manifest: coverage.map(({ code, ranges, old_ranges, hunks: _, ...metadata }) => metadata) };
+}
+
 async function enrichWorkflows({ github, owner, repo, head, files, logger }) {
   const enriched = [];
   for (const file of files) {
@@ -144,4 +191,4 @@ async function collectIssues({ github, owner, repo, pull, commits, logger, budge
   return { text: blocks.join(''), manifest, omitted_references: Math.max(0, all.length - numbers.length) };
 }
 
-module.exports = { packDiff, collectIssues, excerpt, hunks, enrichWorkflows };
+module.exports = { packDiff, packIncremental, collectIssues, excerpt, hunks, enrichWorkflows };

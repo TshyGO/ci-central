@@ -210,6 +210,122 @@ for (const [name, implementation] of [
     });
   }
 
+  // Command Code reports an exhausted plan as 429 RATE_LIMITED; only its message says so. Go names
+  // the plan error type and gives the wait as retry-after. Only a boolean, a closed-vocabulary
+  // window and a checked timestamp may leave the client, never the message or the account.
+  const inThreeDays = new Date(Date.now() + 3 * 86400000).toISOString();
+  for (const [label, status, headers, body, expected] of [
+    ['Command Code weekly usage limit', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your weekly usage limit for your plan. Your limit resets at ${inThreeDays}. Please wait for the window to reset or upgrade your plan. PRIVATE test-only-B` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    ['Command Code 5-hour usage limit', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your 5-hour usage limit for your plan. Your limit resets at ${inThreeDays}. PRIVATE` } },
+    { exhausted: true, window: '5h', resetAt: inThreeDays }],
+    ['a weekly limit whose message also counts hours', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your weekly usage limit. It resets in 5 hours, at ${inThreeDays}. PRIVATE` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    ['Go usage limit with retry-after', 429, { 'retry-after': '48358' }, { type: 'error',
+      error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' }, metadata: { workspace: 'wrk_PRIVATE', limitName: 'weekly' } },
+    { exhausted: true, window: 'weekly', resetInSeconds: 48358 }],
+    ['an OpenAI insufficient_quota', 429, {}, { error: { code: 'insufficient_quota', type: 'insufficient_quota',
+      message: 'You exceeded your current quota, please check your plan and billing details. PRIVATE' } },
+    { exhausted: true, window: undefined, resetAt: undefined }],
+    ['a reset time already in the past', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: "You've reached your weekly usage limit for your plan. Your limit resets at 2020-01-01T00:00:00.000Z. PRIVATE" } },
+    { exhausted: true, window: 'weekly', resetAt: undefined }],
+    ['an ordinary rate limit', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'Rate limit reached for requests per minute. Please try again in 20s. PRIVATE' } },
+    { exhausted: false }],
+    ['a capacity 503', 503, {}, { error: { code: 'overloaded', type: 'server_error',
+      message: "You've reached your weekly usage limit for your plan. PRIVATE" } }, { exhausted: false }],
+    ['a per-minute limit worded as a quota', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'Rate limit: quota exceeded for requests per minute, retry after 20 s. PRIVATE' } }, { exhausted: false }],
+    ['a per-minute limit worded as a usage limit', 429, {}, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'usage limit exceeded per minute. PRIVATE' } }, { exhausted: false }],
+    ['a generic quota message that names no plan, reset or window', 429, {}, { error: { code: 'too_many_requests', type: 'rate_limit_error',
+      message: 'Quota exceeded, please slow down. PRIVATE' } }, { exhausted: false }],
+    // Plan and reset wording do not turn a per-minute limit into a spent plan.
+    ['a per-minute plan limit that says when it resets', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'Your plan allows 60 requests per minute; this usage limit resets in 20 seconds. PRIVATE' } }, { exhausted: false }],
+    ['a quota_exceeded code for a per-minute limit', 429, {}, { error: { code: 'quota_exceeded', type: 'rate_limit_error',
+      message: 'Too many requests per minute. PRIVATE' } }, { exhausted: false }],
+    ['a per-minute limit named in TPM', 429, {}, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: "Your plan's usage limit of 90000 TPM was exceeded; it resets shortly. PRIVATE" } }, { exhausted: false }],
+    ['a bare quota_exceeded code', 429, {}, { error: { code: 'quota_exceeded', type: 'invalid_request_error', message: 'Request denied. PRIVATE' } },
+      { exhausted: true, window: undefined, resetAt: undefined }],
+    // ci-central#72 review: an explicit plan window or reset time outweighs per-minute wording elsewhere in the text.
+    ['a weekly limit that also mentions RPM', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your weekly usage limit. Resets at ${inThreeDays}. Upgrade for higher RPM. PRIVATE` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    // ci-central#72 review (B7): how soon a limit resets does not name its window; a window named elsewhere does.
+    ['a reset delay that is not the plan window', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: 'You have exceeded your usage limit for your plan. Your limit resets in 5 hours. PRIVATE' } },
+    { exhausted: true, window: undefined, resetAt: undefined }],
+    ['a window named outside the usage-limit phrase', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `Weekly quota exhausted for this plan; it resets at ${inThreeDays}. PRIVATE` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    ['a plan error code with per-minute wording', 429, { 'retry-after': '600' }, { type: 'error',
+      error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded (60 requests per minute). PRIVATE' }, metadata: { limitName: 'weekly' } },
+    { exhausted: true, window: 'weekly', resetInSeconds: 600 }],
+  ]) {
+    test(`${name}: Responses ${label} ${expected.exhausted ? 'is' : 'is not'} reported as an exhausted plan quota, without its text`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(status, { 'content-type': 'application/json', ...headers });
+        res.end(JSON.stringify(body));
+      });
+      const started = Date.now();
+      await assert.rejects(f.invoke({ protocol: 'openai-responses', payload: { model: 'gpt-6-luna', input: 'synthetic code', max_output_tokens: 16, store: false } }),
+        (error) => {
+          assert.equal(error.status, status);
+          assert.equal(error.quotaExhausted, expected.exhausted);
+          assert.equal(error.quotaWindow, expected.window);
+          if (expected.resetInSeconds) {
+            const reset = Date.parse(error.quotaResetAt);
+            assert.ok(reset >= started + expected.resetInSeconds * 1000 - 1000 && reset <= Date.now() + expected.resetInSeconds * 1000 + 1000);
+          } else assert.equal(error.quotaResetAt, expected.resetAt);
+          assert.ok(!JSON.stringify(error).includes('PRIVATE') && !error.message.includes('usage limit'));
+          return true;
+        });
+      assert.equal(f.calls.length, 1);
+      const finished = f.logs.find((entry) => entry.event === 'finished');
+      assert.equal(finished.quota_exhausted ?? false, expected.exhausted);
+      assert.ok(!JSON.stringify(f.logs).includes('PRIVATE'));
+    });
+  }
+  for (const [limitName, window] of [['rolling_5h', '5h'], ['7d', 'weekly'], ['24h', 'daily'], ['monthly', 'monthly']]) {
+    test(`${name}: Go's limitName ${limitName} names the ${window} window`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '600' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' }, metadata: { workspace: 'wrk_PRIVATE', limitName } }));
+      });
+      await assert.rejects(f.invoke({ protocol: 'openai-responses', payload: { model: 'muse-spark-1.3-contributor', input: 'synthetic code', max_output_tokens: 16, store: false } }),
+        (error) => error.quotaExhausted === true && error.quotaWindow === window && !JSON.stringify(error).includes('PRIVATE'));
+    });
+  }
+  test(`${name}: Anthropic Messages Go usage limit keeps its window from the plan metadata`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' },
+        metadata: { workspace: 'wrk_PRIVATE', limitName: 'weekly' } }));
+    });
+    await assert.rejects(f.invoke({ protocol: 'anthropic-messages', basePath: '/B/v1', payload: { model: 'claude-haiku-5-5',
+      max_tokens: 16, messages: [{ role: 'user', content: 'synthetic code' }] } }),
+    (error) => error.status === 429 && error.quotaExhausted === true && error.quotaWindow === 'weekly'
+      && Math.abs(Date.parse(error.quotaResetAt) - (Date.now() + 3600000)) < 5000 && !JSON.stringify(error).includes('PRIVATE'));
+  });
+  // ci-central#72 review: reading the error body for the plan window must not cost the HTTP status.
+  test(`${name}: an error body cut off mid-read keeps its HTTP status`, async (t) => {
+    const f = await fixture(t, implementation, async (_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json', 'content-length': '4096' });
+      res.write('{"error":{"code":"RATE_LIMITED","message":"PRIVATE');
+      await delay(50);
+      res.destroy();
+    });
+    await assert.rejects(f.invoke({ protocol: 'openai-responses', payload: { model: 'gpt-6-luna', input: 'synthetic code', max_output_tokens: 16, store: false } }),
+      (error) => error.status === 429 && error.quotaExhausted === false && !JSON.stringify(error).includes('PRIVATE'));
+    assert.equal(f.calls.length, 1);
+  });
+
   for (const [label, body] of [
     ['DONE without finish', frame(delta('partial')) + 'data: [DONE]\n\n'],
     ['EOF without finish', frame(delta('partial'))],

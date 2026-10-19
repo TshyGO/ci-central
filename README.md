@@ -44,7 +44,7 @@ SDK 负责 SSE 分帧、UTF-8 和 JSON 解码。适配层逐事件累计最终�
 
 安全日志区分响应头时间、首个事件、首个正文、正文/思考字符数、结束原因和实际耗时；不记录请求正文、Key 或私有思考。原始响应限制为 32 MiB。B 使用 Claude Haiku 5.5（输出上限 120000），C 使用 GPT-6 Luna（输出上限 65536），跨供应商兜底沿用同一模型的参数。Haiku 固定 effort high，不添加 low/关闭思考参数；B 的 Haiku 与 C 的 GPT-6 Luna 在每个供应商上的时限各 15 分钟。本地截止明确报 `REVIEW_DEADLINE`，不再把持续推理后的主动中止说成上游不可用。
 
-SDK 对干净 EOF、`[DONE]` 和传输层 `AbortError` 都会静默结束迭代，因此适配层在原始正文层记录终止方式。流没有结束原因时仍报 `REVIEW_INCOMPLETE_STREAM`。失败评论只附 `code`、`http`、`end`、`last_event` 类型、`idle_before_end_ms` 和本地词汇内的 `body_error`；`finished` 日志记录全部脱敏证据：`incomplete_end`（`clean_close` 正常关流、`idle_close` 静默 60 秒以上后关流、`done_without_finish` 有 `[DONE]` 无结束原因、`transport_error` 被 SDK 吞掉的传输错误；未观察到正文结束时为 `unknown`）、`body_end`/`body_error`、`done_marker`、`frame_boundary`（是否停在完整 SSE 帧之后，零字节时为 null）、`max_gap_ms`、`idle_before_end_ms`、`last_event`（Chat Completions 为 `reasoning`、`content`、`no_choice:<键名>` 等，只含键名；Responses 为事件 type）以及 usage token 数。TCP 断开或重置不属于这一类，仍报 `UND_ERR_SOCKET`/`ECONNRESET`。每个失败还带 `unserved`：请求在产生任何正文、推理或结束原因之前就失败时为 true，供“未受理重发”判断；`done_marker` 按数据块逐段扫描，`[DONE]` 之后再跟多少数据都不会漏判。上游接受请求后在结束原因前关流（`REVIEW_INCOMPLETE_STREAM`）时，失败评论的 Tried 列表写成 `HTTP 200, stream closed before the model finished after N s`，Action needed 说明这不是限流、额度或认证问题；此前它显示为 `HTTP request failed` 并提示检查请求或认证，NebulaLab #1296 因此被误读为限流。
+SDK 对干净 EOF、`[DONE]` 和传输层 `AbortError` 都会静默结束迭代，因此适配层在原始正文层记录终止方式。流没有结束原因时仍报 `REVIEW_INCOMPLETE_STREAM`。失败评论只附 `code`、`http`、`end`、`last_event` 类型、`idle_before_end_ms` 和本地词汇内的 `body_error`；`finished` 日志记录全部脱敏证据：`incomplete_end`（`clean_close` 正常关流、`idle_close` 静默 60 秒以上后关流、`done_without_finish` 有 `[DONE]` 无结束原因、`transport_error` 被 SDK 吞掉的传输错误；未观察到正文结束时为 `unknown`）、`body_end`/`body_error`、`done_marker`、`frame_boundary`（是否停在完整 SSE 帧之后，零字节时为 null）、`max_gap_ms`、`idle_before_end_ms`、`last_event`（Chat Completions 为 `reasoning`、`content`、`no_choice:<键名>` 等，只含键名；Responses 为事件 type）以及 usage token 数；供应商报告套餐额度用尽时另记 `quota_exhausted`、`quota_window`（5h/weekly/monthly/daily）和校验过的 `quota_reset_at`，不记报错原文。TCP 断开或重置不属于这一类，仍报 `UND_ERR_SOCKET`/`ECONNRESET`。每个失败还带 `unserved`：请求在产生任何正文、推理或结束原因之前就失败时为 true，供“未受理重发”判断；`done_marker` 按数据块逐段扫描，`[DONE]` 之后再跟多少数据都不会漏判。上游接受请求后在结束原因前关流（`REVIEW_INCOMPLETE_STREAM`）时，失败评论的 Tried 列表写成 `HTTP 200, stream closed before the model finished after N s`，Action needed 说明这不是限流、额度或认证问题；此前它显示为 `HTTP request failed` 并提示检查请求或认证，NebulaLab #1296 因此被误读为限流。
 
 依赖版本和 lockfile 在中央仓库管理；`npm run build` 打包 SDK 到 `review-action/dist/sdk-client.js`，真实审核只执行固定中央 SHA 的产物，不运行 npm、不下载依赖。CI 重建并比较产物，同时测试源码和产物的真实 TLS/SSE 行为。`SDK_LONG_HEADER_TEST=1` 可额外运行 310 秒响应头回归，验证请求不会被旧的 300 秒底层限制截断。
 
@@ -153,8 +153,8 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 上下文收集前、模型调用前、发布评论前分别核对 PR head SHA。
 - 每条 Lane 评论都包含 v2 机器证据：Lane、完整 40 位 head SHA、解析后的中央 workflow SHA 和 `valid`、`diagnostic` 或 `partial` 状态。
 - 每条 Lane 评论在标题下方醒目标出审核 commit、更新时间和运行链接；新提交仍原地更新同一条稳定评论，不会因时间线位置不变而隐藏审核新鲜度。
-- 自动触发只复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；缺失、旧版、诊断和不完整 Lane 会单独重跑。
-- 显式 `/review` 保持强制重跑语义，不受同 HEAD 去重限制。
+- 自动触发复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；PR 自身 diff 与该 Lane 上次有效审核相同、评论仍显示那次审核时也不调用模型（见“增量复审、重复审核跳过与额度诊断”）。缺失、诊断和不完整的 Lane，以及没有可信审核记录的旧版评论，会单独重跑；有可信记录且改动不大时只做增量复审。
+- 显式 `/review` 一律对每条 Lane 做当前版本的完整审核：不受同 HEAD 去重和“diff 未变”跳过的限制，也不做增量复审。
 - Lane 主模型在本供应商成功时绝不调用跨供应商兜底。
 - 所有模型请求失败（包括超时、限流、认证、HTML 验证页、DNS/TLS、解析失败、空正文和不完整输出）都只把同一模型改发另一供应商一次（`cross_provider`）；仍失败且没有配置其他模型时，发布诊断或明确标记的不完整结果，不计为有效审核。未配置该 Lane 凭据时仍直接发布配置诊断，不发送请求。
 - 不做退避重试，不做可选参数修复后重发，不跟随 HTTP 重定向。A/B/C 并行，每路一旦完整成功或主备均结束就立即校验 PR head/state 并发布稳定评论；不等待其他 Lane。最终 job 仍等待各路结束后执行原有 quorum/required 门禁，不因提早发布而提早放行。
@@ -174,11 +174,100 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 每个健康 Lane 只发布一条稳定标记评论；隐藏 reasoning 永不进入 PR 评论。
 - 未配置、失败或输出不完整的 Lane 会保留诊断/部分结果；有效 Lane 数不足 quorum（或未配置 quorum 时缺少必需 Lane）才在发布其他健康 Lane 后明确失败。
 
+### 增量复审、重复审核跳过与额度诊断（2026-10-19）
+
+订阅额度固定（OpenCode Go 与 Command Code GOAT 各 $35/7 天），不加钱，唯一的办法是少花 token。10-19 统计 NebulaLab 近 7 天：真正调用到模型的运行（pr-agent.yml 超过 90 秒）有 263 次，分布在 84 个 PR 上，平均每个 PR 3.1 轮。其中 179 次（68%）是复审已审过的 PR，每轮都重发整个 PR，而本仓库自己的测量是首审时已能看到最终 diff 的 97%。最多的两个 PR 审了 22 轮和 14 轮；11 次复审的是已经审过的 head。复审还会重提已有结论的问题：#1296 Lane A 重提了作者已用证据驳回的 TLS P1，#1297 Lane B 重提了两条已修复的问题。Command Code 的周额度在 10-19 用尽，供应商返回 429 `{"code":"RATE_LIMITED","type":"rate_limit_error"}`，只有 message 写着 “You've reached your weekly usage limit ... resets at <时间>”，所以评论看起来像限流。为此做了三处改动。
+
+**审核记录。** 每条 Lane 评论的第 3 行是运行器写的一行隐藏记录 `<!-- ai-pr-review-state:v1 {...} -->`（第 1、2 行仍是原来的 Lane 标记和 v2 evidence，两者格式不变）。记录内容：
+- 上次有效审核的 head、workflow、目标分支、报告契约版本、实际服务的模型、审核方式（full/incremental），以及那一轮读取评论的时间；
+- PR 自身 diff 的指纹：按 git patch-id 的方式，去掉 hunk 头（行号和函数名），增、删、上下文行原样保留，空白也保留；没有补丁的文件用 blob；
+- 每个文件的指纹（最多 600 个文件），用来在合并 main 之后找出 PR 自身改动有变化的文件；
+- 仍需复核的发现。发现带编号（A1、B2…），评论里的标题也显示编号，作者回复时可以直接引用。
+
+只读取评论第 3 行，而且评论必须是 `github-actions[bot]` 写的。记录里 `<`、`>` 和行分隔符一律转义，模型写的文字关不掉这条 HTML 注释。读取时逐个字段校验格式和长度，任何一项不合格就当作没有记录，走完整审核。某一轮失败或输出不完整时，原样保留上一次有效审核的记录。记录超过 24 000 字符时依次舍弃：较长的文字、较早的已答复发现、每文件指纹、全部已答复发现、最低优先级的未决发现。记录最多保留 60 条未决发现。只要舍弃过未决发现，记录就标为不完整（`lossy`）：之后 PR 自身 diff 有变化时，这条 Lane 做完整审核，因为增量复审只复核记录里有的发现；diff 没变时仍可跳过，因为跳过只是原样沿用那条评论，不比上一轮少什么。
+
+**不重复审核（改动 2）。** 同一 head、同一 workflow 的有效证据照旧直接复用。新增的规则：某条 Lane 的 PR 自身 diff 指纹与它上次有效审核相同、评论仍显示那次有效审核、并且不是手动 `/review` 时，不调用模型，直接复用那条评论，并计入 quorum。
+
+- **覆盖的情况**：只合入 main、变基或同树重推、新提交没有改到 PR 自身代码。判断依据是补丁内容，不是 head SHA。
+- **旧中央版本**：上次审核来自旧的中央版本也可以复用，前提是评论带着可信记录（格式 v1、报告契约版本相同、那次审核的模型仍在该 Lane 当前的配置里）。没有这条记录的旧评论照旧完整审核。
+- **状态表**：写明复用的是哪个提交、哪个中央版本、原因是什么。例如“复用此前提交的有效证据，未请求模型（提交 xxxxxxx 的审核，中央版本 yyyyyyy（当前 zzzzzzz）；PR 自身改动未变，期间合并了其他分支，如 main）”。原因也可能是“提交历史被改写（变基或重推）”或“新提交没有改变 PR 自身的改动”。
+- **不跳过的例外**：main 改到了 PR 改动旁边的上下文行时，指纹也会变，这时照常审核，因为相邻的改动可能改变 PR 代码的含义。
+- **只看补丁**：跳过只比较 PR 自身的补丁。PR 描述、关联 Issue 或仓库提示词变了，不会单独触发重审；需要时评论 `/review`。
+
+**增量复审（改动 1）。** 有可信记录且 PR 自身 diff 有变化时，只审自上次有效审核以来改动过的文件，并带上那一轮的结论。可信记录指：格式为 v1，报告契约版本相同，审核的模型仍在该 Lane 的模型链里（包括首审模型），目标分支没变。发给模型的材料：
+- **自上次审核以来 PR 自身改动过的文件，每个都给完整的 PR 补丁**，和完整审核看到的一样，包括 PR 在更早的提交里删掉的 base 行。找出这些文件的办法：
+  - 新提交是从上次 head 直接快进过来的（合并基点正是上次 head，其中没有合并提交，也没有被截断）时，用 `compare <上次 head>...<当前 head>`。文件标题里写明此后改了哪些行，用当前文本的行号，例如 “since the reviewed commit: added or rewritten lines 40-52; lines removed after line 60”。compare 只用来找文件、标行，不作为审核材料；证据的行号一律按 base 和当前 head。
+  - 不满足时（期间合并过 main、变基过，或 compare 失败），compare 可能混进 main 的改动。这时改为按每文件指纹找出 PR 自身改动有变化的文件，不标行；只被 main 改过的文件不会发送。
+  - 同一 head 的每文件指纹在各条 Lane 的记录里都一样，某条 Lane 的记录因篇幅舍掉了指纹时，借用其他 Lane 的。
+- **每个改动文件的完整当前文本，一个不少。** 材料里逐个文件写明给了什么：完整 PR 补丁加完整文本；已删除的文件只有删除的行；二进制文件没有文本。也写明此后没有改动的文件本轮不提供：完整审核会再发一遍它们的 PR 补丁，增量复审不发。这是增量复审比完整审核少看的唯一部分；这些文件上一轮已经审过，那一轮的发现由记录带入本轮复核。
+- **上一轮的发现（JSON），以及此后的回复。**
+  - 回复只收 PR 作者和 OWNER/MEMBER/COLLABORATOR 发表的，包括普通评论、review 摘要和行内评论；bot（包括本工作流）的评论和其他人的评论一律排除。
+  - “此后”从上一轮读取评论之前一分钟算起。同一秒或 runner 时钟偏差下发的回复宁可重复给，也不漏掉。
+  - 每条回复最多 6 000 字符，合计最多 24 000 字符，超出时保留最新的回复。
+- **PR 描述和关联 Issue**，与完整审核相同。
+
+提示词对模型的要求：
+- 逐条对照当前代码和回复复核上一轮的发现，在 `previous_findings` 里标出 fixed、still_present、answered 或 unclear；
+- 回复给出了在当前代码上成立的证据才算 answered，只有说法、没有证据不算；
+- 只能根据给出的材料判断：上一轮发现所指的代码不在材料里，或者材料不足以判断时，标 unclear 并说明缺什么，不能标 fixed；
+- 改动可能影响未提供的文件（调用方、实现、测试、配置）时，在 limitations 里点名这些文件和风险，不能假定它们仍然适配；
+- 作者已用证据答复的问题不再作为新发现提出，除非新代码推翻了那个答复（这时标 still_present 并说明原因）；
+- 深入审查新改动。
+
+复核结论的处理：只认已知编号；模型没给结论的未决发现继续保留，并在限制里注明；标 fixed 或 answered 却不给理由的，按 unclear 处理，发现继续保留。这些结论是模型的复核意见，不是已证实的事实，评论里照此措辞：“模型复核认为已修复”“模型复核认为仍存在”“模型复核认为作者的答复有证据支持，不再提出”“模型复核无法确认，继续保留”。仍存在和待复核的发现完整展示，并标出最初报告时的提交。新发现必须通过同样的证据校验。
+
+完整审核（包括手动 `/review` 和各种回退）不复核上一轮的发现，评论里也不列出它们。但只要上一条记录可信，作者已答复的发现会原样带进新记录，下一次增量复审仍知道它们，不会因为中间做过一次完整审核就把作者驳回过的问题当成新问题。
+
+**质量优先（Peter，2026-10-19）。** 对每个改动文件，增量复审看到的不比完整审核少：完整审核给的 PR 补丁照给，另加完整文本，从不截成片段；放不下就做完整审核。此后没有改动的文件不再发送（见上文）。第一版只给自上次审核以来的补丁加完整文本，看不到 PR 在更早提交里删掉的 base 行；推送前的独立审查指出后，改为给完整 PR 补丁。Peter 的理由是：现在用的模型都很便宜，额度的大头在 A 路，每月约 $100，够用，不值得为了省这一点降低质量。代价是省得少：按这个规则（改动文件给完整 PR 补丁和完整文本，不截断），回放估算输入 token 省 17.5%；2026-10-20 已确认这个结果可以接受，质量优先。回放里复审轮次的中位数：自上轮以来的补丁只有 1.2 万字符，改动文件的完整文本却有 12.9 万字符，比整个 PR 的 diff（11.4 万）还大（例如 `data_center_client.py` 就有 175 KB），所以很多复审会退回完整审核。
+
+**回退到完整审核。** 以下情况走原来的完整审核：
+- 手动 `/review`：一律对每条 Lane 做当前版本的完整审核，不复用、不跳过、不增量；
+- 没有可信记录，包括本次改动之前的版本写的评论；
+- 自上轮以来的补丁超过 PR 全部补丁的 50%（`large-change`）。阈值依据：复审轮次中这个比例的 90 分位是 51%；
+- 有改动文件读不到完整文本（`text-unavailable`，例如文件超过 200 KB）；
+- 补丁加完整文本超出该 Lane 任一模型的 diff 预算（`over-budget`，常见于预算 26 万字符的 Lane C）；
+- 补丁加完整文本比完整审核的材料还多（`not-smaller`）；
+- 合并 main 之后没有每文件指纹可用；
+- 上一轮的记录没能装下全部未决发现（`record-incomplete`）；
+- 目标分支变了；
+- 首审还没完成：NebulaLab Lane B 的 Sonnet 首审仍是完整审核，首审完成后，Haiku 对之后的提交做增量复审。
+
+**信任边界。** 作者回复只是给模型的材料：以 JSON 形式传入，提示词写明它们是待核实的说法，不是指令。回复内容不参与工作流的任何决策。
+
+**额度诊断（改动 3）。** SDK 客户端在本地读供应商的报错，只输出三样东西：是否额度用尽（布尔值）、窗口（5 小时、周、月、日）、校验过的 UTC 重置时间。不输出 message、账号、请求内容或密钥。能识别的情况：
+- Command Code 的 “weekly/5-hour usage limit ... resets at <ISO>”；
+- Go 的 `*UsageLimitError`，重置时间取自 `retry-after`，窗口取自 `metadata.limitName`（也认 `5h`、`7d`、`rolling_5h` 这样的简写）。OpenAI SDK 的报错不带这个字段，所以 SDK 客户端会读一份有上限的报错正文副本，只取出这一个字段；
+- `insufficient_quota`，以及 “exceeded your current quota”。
+
+“usage limit”“quota exceeded” 这类泛用说法，只有同时出现套餐、计费、重置或窗口字样时才算额度用尽。报错里出现按分钟、按秒的字样（per minute、RPM、TPM 等）时算限流，除非供应商写明了这个上限的套餐窗口：Go 的 `limitName`，或紧挨在 “usage limit” 前面的 weekly、5-hour 这类词。`*UsageLimitError`、`insufficient_quota` 这类错误码本身就表示套餐额度。“resets in 5 hours” 这类话只说明多久后重置，不当作窗口。运行器读原文时不单凭 “usage limit” 判断额度，以 SDK 客户端的结论为准。读报错正文时连接中断，照样按 HTTP 状态码报告。
+
+普通限流仍按 429 处理。额度用尽时：
+- 评论第二行写“⛔ 额度用尽，不是限流：`command-code` 的周用量上限已用完，2026-10-22T08:56:41Z（北京时间 2026-10-22 16:56）重置”；
+- Tried 列表写 `HTTP 429, command-code weekly usage limit exhausted, resets ...`；
+- Action needed 写明这是套餐额度，不是限流；
+- 两家都用尽时，按尝试顺序逐一列出每家的重置时间；同一家的额度挡住同一 Lane 的几个模型时只列一次；
+- 状态表写“供应商额度用尽，审核未生成（command-code 周上限已用完，北京时间 … 重置）”；
+- 同一模型经另一供应商审核成功时，横幅会写出本家没能审核的原因。
+
+**回放估算（NebulaLab，2026-10-12 14:00Z 起 7 天）。** 用 GitHub 历史只读回放了 257 次运行（其中 254 次调用到模型）、78 个 PR、750 个 Lane 运行。实际 token 取自运行日志；审核材料取自当时的 PR diff、提交之间的 compare 和文件大小；决策直接调用本仓库的 `diffIdentity`、`packIncremental` 和 `chooseIncremental`。按上面的规则：
+- **增量复审**：94 个 Lane 运行（12.5%），每个都带改动文件完整的 PR 补丁和完整文本。其余复审退回完整审核，原因主要是：材料比完整审核还大（224 次）、改动过半（46 次）、超出模型预算（37 次，其中 Lane C 32 次）、手动 `/review`（33 次）、读不到完整文本（16 次）；
+- **跳过**：6 个 Lane 运行，其中 2 次运行完全不调用模型（占 0.8%）。同一 head 的重跑大多是手动 `/review`，按规定不跳过；18 次合入 main 里，只有 2 次没有改到 PR 自身代码；
+- **输入 token**：省 17.5%（增量 17.3%，跳过 0.3%）；
+- **输出 token**：主要是推理，按回放拟合，每次审核约 1–2 万 token，与输入大小几乎无关，估计只省约 2.5%；即使输出与输入成比例，上限也只有 6.4%；
+- **按金额**：这一周共 4 557 万输入 token、1 399 万输出 token；假设输出单价是输入的 5 倍，约省 8%，上限约 11%；
+- **审了最多轮的 PR 省得最多**：#1259（16 轮）输入省 40.4%，#1258（10 轮）省 32.5%；
+- **对比方案**：
+  - 第一版只给自上次审核以来的补丁加完整文本：161 个 Lane 运行做增量，输入省 20.9%。它看不到 PR 在更早提交里删掉的 base 行，所以改成了现在的做法；
+  - 改动文件只按预算给片段（总量不超过完整审核的 50%）：395 个 Lane 运行做增量，输入省 42.5%。按 Peter 的决定，为了不降低审核质量，没有采用。
+
 ### Draft 冻结门禁
 
-PR 在集中修复阶段保持 Draft。每次推送后，等待 Lane A/B/C、常规 CI 和 review threads 全部稳定在同一个最终 head SHA。满足工作区 clean、成功刷新远端后的本地/远端 0/0、三条 Lane 都有当前 workflow 生成的 `valid` 证据、CI 全绿、unresolved threads 为 0 且没有待修改事项后，才标记 Ready。
+PR 在集中修复阶段保持 Draft。每次推送后，等待 Lane A/B/C、常规 CI 和 review threads 全部稳定在同一个最终 head SHA。同时满足以下条件后才标记 Ready：工作区 clean；成功刷新远端后，本地/远端为 0/0；三条 Lane 都有 `valid` 证据，证据由当前 workflow 生成，或者按下段规则复用；CI 全绿；unresolved threads 为 0，且没有待修改事项。
 
-`ready_for_review` 事件保留：如果该 head 已在 `synchronize` 中完成有效审核，中央工作流会直接复用三条 Lane 证据而不调用模型；此前审核失败、部分完成、来自旧 workflow 或没有生成评论时，只重跑对应 Lane。Ready 后不再修改代码；如果意外发现问题，先转回 Draft，再集中修复。最终合并应冻结完整 head SHA，并使用 `gh pr merge --admin --match-head-commit <SHA>` 防止检查结束到合并之间 HEAD 被替换。
+`ready_for_review` 事件保留，复用和重跑的规则如下：
+- 如果该 head 已在 `synchronize` 中完成有效审核，中央工作流直接复用三条 Lane 的证据，不调用模型。
+- PR 自身 diff 与某条 Lane 上次有效审核相同时，也复用那次审核，即使它来自旧的中央版本；状态表写明复用的提交、中央版本和原因。这种复用不满足“三条 Lane 都是当前 workflow 生成的证据”。可以接受的理由：AI 审核是建议性的；合并仍由 Peter 用管理员权限把关；否则每次升级 pin，所有开放 PR 都要整轮重审。需要当前版本的结论时，评论 `/review`：手动触发一律对每条 Lane 做当前版本的完整审核。
+- 此前审核失败、部分完成、没有生成评论，或评论来自没有可信审核记录的旧 workflow 时，只重跑对应 Lane。Ready 后不再修改代码；如果意外发现问题，先转回 Draft，再集中修复。最终合并应冻结完整 head SHA，并使用 `gh pr merge --admin --match-head-commit <SHA>` 防止检查结束到合并之间 HEAD 被替换。
 
 ## 运维命令
 
@@ -194,6 +283,7 @@ npm ci --ignore-scripts
 npm run build
 node ./test/review-config.test.mjs
 node ./test/pr-review.test.mjs
+node --test ./test/review-incremental.test.mjs ./test/review-contract.test.mjs
 node --test ./test/sdk-client.test.mjs
 git diff --check
 ```
@@ -257,7 +347,7 @@ YAML 只负责固定权限、runner 档位、中央 SHA 校验和受信任启动
 
 ### 验证与发布巡检
 
-`npm test` 同时覆盖受信任 workflow 桥接、源码和生产 runner 产物、SDK TLS/SSE、完整 hunk/Issue 摘录、结构化报告证据、状态发布与 stale-head 防护。`test/fixtures/review-evaluation.json` 提供小 PR、正确授权、删除授权、跨文件 pin 漂移、较大上下文、二进制与源端截断等合成场景。
+`npm test` 同时覆盖受信任 workflow 桥接、源码和生产 runner 产物、SDK TLS/SSE、完整 hunk/Issue 摘录、结构化报告证据、状态发布与 stale-head 防护，以及审核记录、跳过、增量复审各条回退路径和额度诊断（`test/review-incremental.test.mjs` 与 `pr-review.test.mjs` 末尾）。`test/fixtures/review-evaluation.json` 提供小 PR、正确授权、删除授权、跨文件 pin 漂移、较大上下文、二进制与源端截断等合成场景。
 
 `node scripts/evaluate-review-reports.mjs --reports <JSON文件>` 离线比较模型最终报告与场景位置：报告契约、漏掉的预期位置和额外位置。输入文件将 fixture ID 映射到模型最终 JSON 字符串。这个工具不调用模型；位置匹配也不代表语义正确，仍需人工判断，不能将确定性契约测试称为模型质量测量。
 

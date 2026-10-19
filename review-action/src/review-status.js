@@ -5,23 +5,31 @@ const labels = { running: '主模型运行中', fallback: '备用模型运行中
   reused: '复用当前提交的有效证据', failed: '审核未生成', partial: '输出不完整，不计入 quorum',
   publication_failed: '结果发布失败，不计入 quorum', resending: '模型未受理，换会话重发一次中',
   cross: '本供应商未产生可用审核，同模型经另一供应商运行中',
+  quota: '供应商额度用尽，审核未生成',
+  unchanged: '复用此前提交的有效证据，未请求模型', incremental: '增量审核运行中',
   skipped: '无可审查的文本补丁，未请求模型' };
+const VALID_STATES = new Set(['complete', 'reused', 'unchanged']);
 const cell = (text) => String(text ?? '').replace(/[|`<>\r\n]/g, ' ');
 
+// `initial` sets a lane's first row: a skipped lane shows the earlier review it reuses and why,
+// and a lane reviewing incrementally or in full for a reason says so from the start.
 function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow, runUrl, runId,
-  lanes, reusableLaneIds, comments, quorum, logger }) {
-  const rows = new Map(lanes.map((lane) => [lane.id, { primary: lane.primary.id,
-    state: reusableLaneIds.has(lane.id) ? 'reused' : 'running', served: null }]));
+  lanes, reusableLaneIds, initial = new Map(), comments, quorum, logger }) {
+  const rows = new Map(lanes.map((lane) => {
+    const first = reusableLaneIds.has(lane.id) ? { state: 'reused' } : initial.get(lane.id) ?? {};
+    if (first.state && !Object.hasOwn(labels, first.state)) throw new Error('Unknown lane/status transition.');
+    return [lane.id, { primary: lane.primary.id, state: first.state ?? 'running', served: first.served ?? null, detail: first.detail ?? null }];
+  }));
   const summaries = comments.filter((item) => item.user?.login === 'github-actions[bot]' && item.body?.split(/\r?\n/, 1)[0] === MARKER);
   let comment = summaries.at(-1);
   let queue = Promise.resolve();
   let skipped = false;
   function body() {
-    const valid = [...rows.values()].filter((row) => ['complete', 'reused'].includes(row.state)).length;
+    const valid = [...rows.values()].filter((row) => VALID_STATES.has(row.state)).length;
     return [MARKER, `<!-- ai-pr-review-status-head:${head} workflow:${workflow} run:${runId} -->`,
       '## AI 审核 · 当前提交状态', '', `提交：\`${head}\` · [本轮运行](${runUrl})`,
       `中央版本：\`${workflow}\``, '', '| Lane | 主模型 | 当前状态 | 实际服务模型 |', '|---|---|---|---|',
-      ...lanes.map((lane) => { const row = rows.get(lane.id); return `| ${lane.id} | ${cell(row.primary)} | ${labels[row.state]} | ${cell(row.served || (row.state === 'reused' ? '见该 Lane 评论' : '—'))} |`; }),
+      ...lanes.map((lane) => { const row = rows.get(lane.id); return `| ${lane.id} | ${cell(row.primary)} | ${labels[row.state]}${row.detail ? `（${cell(row.detail)}）` : ''} | ${cell(row.served || (row.state === 'reused' ? '见该 Lane 评论' : '—'))} |`; }),
       '', ...(skipped ? ['本提交没有可审查的文本补丁（二进制、纯重命名或补丁不可用），未请求模型；这不是审核失败，也不代表已审核或已批准。']
         : [`有效发布：${valid}/${lanes.length}${quorum ? `；至少需要 ${quorum} 路` : ''}。`,
           'quorum 表示本次审核证据已生成，不表示模型结论正确或人工批准。']),
@@ -51,9 +59,9 @@ function createStatusPublisher({ github, owner, repo, pullNumber, head, workflow
     }).catch(() => logger.log('Current-head status summary could not be published; lane evidence remains independent.'));
     return queue;
   }
-  return { publish, update(lane, state, served = null) {
+  return { publish, update(lane, state, served = null, detail = null) {
     if (!rows.has(lane) || !Object.hasOwn(labels, state)) throw new Error('Unknown lane/status transition.');
-    rows.set(lane, { ...rows.get(lane), state, served });
+    rows.set(lane, { ...rows.get(lane), state, served, detail });
     return publish();
   }, skip() {
     skipped = true;

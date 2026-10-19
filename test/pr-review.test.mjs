@@ -700,9 +700,10 @@ check('reusable job uses one latest-wins group for automatic and manual triggers
   && workflowText.includes('timeout-minutes: 70'));
 
 let r = await scenario(healthy);
-check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:tencent/hy3-paid');
+check('healthy path calls exactly the three configured lane primaries', r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === 'A:muse-spark-1.3-contributor,B:claude-haiku-5-5,C:gpt-6-luna');
+// GPT-6 Luna has the same id on both providers, so its cross route shows as the Lane A slot.
 check('healthy path never crosses to the other provider', r.captured.length === 3
-  && !r.captured.some(({ model }) => model.startsWith('meta/') || model === 'hy3'));
+  && !r.captured.some(({ lane, model }) => model.startsWith('meta/') || (lane === 'A' && model === 'gpt-6-luna')));
 const healthyLaneA = r.captured.find(({ lane }) => lane === 'A')?.body;
 const healthyLaneB = r.captured.find(({ lane }) => lane === 'B')?.body;
 const healthyLaneC = r.captured.find(({ lane }) => lane === 'C')?.body;
@@ -717,10 +718,15 @@ check('no leftover Markdown instruction contradicts the JSON contract, which is 
   && [healthyLaneA, healthyLaneB, healthyLaneC].every((body) =>
     !systemText(body).includes('Markdown review') && systemText(body).includes('final JSON report')
     && userText(body).trimEnd().endsWith('a Markdown review cannot be accepted.')));
-// Lane C runs Hy3 through Command Code's Chat Completions endpoint, preserving its output ceiling.
-check('Lane C uses Command Code Hy3 over Chat Completions without Google thinking fields',
-  healthyLaneC?.model === 'tencent/hy3-paid'
-  && healthyLaneC?.max_tokens === 65536
+// Lane C runs GPT-6 Luna through Command Code's Responses endpoint, preserving its output ceiling.
+// Go serves the model only over Responses, so the request carries input and max_output_tokens.
+check('Lane C uses Command Code GPT-6 Luna over Responses without Google thinking fields',
+  healthyLaneC?.model === 'gpt-6-luna'
+  && healthyLaneC?.max_output_tokens === 65536
+  && healthyLaneC?.store === false
+  && healthyLaneC?.input?.length === 2 && healthyLaneC.input[0].role === 'system' && healthyLaneC.input[1].role === 'user'
+  && healthyLaneC?.messages === undefined
+  && healthyLaneC?.max_tokens === undefined
   && healthyLaneC?.temperature === undefined
   && healthyLaneC?.generationConfig === undefined);
 // Haiku at max effort spent all 65,536 tokens thinking on three large PRs; high finished them.
@@ -813,49 +819,54 @@ const firstCallFails = (lane, model, error) => {
   let calls = 0;
   return (call) => call.lane === lane && call.model === model && calls++ === 0 ? Promise.reject(error) : healthy(call);
 };
+// Lane C's GPT-6 Luna has one id on both providers: its own request goes through the Lane C slot
+// (Command Code) and its cross-provider request through the Lane A slot (Go).
+const lunaOnCommandCode = ({ lane, model }) => lane === 'C' && model === 'gpt-6-luna';
+const lunaOnGo = ({ lane, model }) => lane === 'A' && model === 'gpt-6-luna';
 // The resend is opt-in per lane and no production lane uses it any more; it is exercised here on Lane C.
 const resendConfig = structuredClone(centralConfig);
 resendConfig.lanes[2].resend_unserved = true;
 const resendEnv = { PR_REVIEW_CONFIG: JSON.stringify(resendConfig) };
-r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(429)), resendEnv);
+r = await scenario(firstCallFails('C', 'gpt-6-luna', unserved(429)), resendEnv);
 check('an unserved Lane C 429 is resent once with a fresh session and still counts as the primary', !r.error
-  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2
-  && !r.captured.some(({ model }) => model === 'hy3') && r.timeouts.includes(30000)
+  && r.captured.filter(lunaOnCommandCode).length === 2
+  && !r.captured.some(lunaOnGo) && r.timeouts.includes(30000)
   && r.posted.some((body) => body.includes('lane=C') && body.includes('status=valid') && !body.includes('served by') && !body.includes(' via '))
   && r.statusUpdates.some((body) => body.includes('换会话重发')) && r.logs.some((line) => line.includes('attempt 2')));
-r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(429, { retryAfterMs: 5000 })), resendEnv);
+r = await scenario(firstCallFails('C', 'gpt-6-luna', unserved(429, { retryAfterMs: 5000 })), resendEnv);
 check('a provider retry-after paces the single resend', !r.error && r.timeouts.includes(5000) && !r.timeouts.includes(30000));
-r = await scenario(firstCallFails('C', 'tencent/hy3-paid', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })), resendEnv);
+r = await scenario(firstCallFails('C', 'gpt-6-luna', unserved(200, { code: 'REVIEW_INCOMPLETE_STREAM' })), resendEnv);
 check('a stream queued and closed before any output is resent immediately', !r.error
-  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.timeouts.includes(0));
-r = await scenario((call) => call.model === 'tencent/hy3-paid' ? Promise.reject(unserved(503)) : healthy(call), resendEnv);
+  && r.captured.filter(lunaOnCommandCode).length === 2 && r.timeouts.includes(0));
+r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(unserved(503)) : healthy(call), resendEnv);
 check('a resend that is also unserved crosses once to the other provider instead of retrying again', !r.error
-  && r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 2 && r.captured.filter(({ lane, model }) => lane === 'A' && model === 'hy3').length === 1
-  && r.posted.some((body) => body.includes('Lane C: tencent/hy3-paid via opencode-go hy3 (command-code unavailable)')));
+  && r.captured.filter(lunaOnCommandCode).length === 2 && r.captured.filter(lunaOnGo).length === 1
+  && r.posted.some((body) => body.includes('Lane C: gpt-6-luna via opencode-go gpt-6-luna (command-code unavailable)')));
 for (const [label, error] of [
   ['plan usage limits', unserved(429, { providerType: 'GoUsageLimitError' })],
   ['output that was already produced', Object.assign(unserved(200), { unserved: false })],
   ['the local deadline', Object.assign(new Error('AI endpoint request aborted (model deadline reached).'), { name: 'AbortError', unserved: false })],
 ]) {
-  r = await scenario(firstCallFails('C', 'tencent/hy3-paid', error), resendEnv);
-  check(`${label} are never resent`, r.captured.filter(({ model }) => model === 'tencent/hy3-paid').length === 1
-    && r.captured.filter(({ lane, model }) => lane === 'A' && model === 'hy3').length === 1);
+  r = await scenario(firstCallFails('C', 'gpt-6-luna', error), resendEnv);
+  check(`${label} are never resent`, r.captured.filter(lunaOnCommandCode).length === 1
+    && r.captured.filter(lunaOnGo).length === 1);
 }
 r = await scenario(firstCallFails('B', 'claude-haiku-5-5', unserved(429)));
 check('lanes without resend_unserved keep exactly one request per model and route', !r.error
   && r.captured.filter(({ lane, model }) => lane === 'B' && model === 'claude-haiku-5-5').length === 1
   && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5').length === 1);
-// NebulaLab #1296: Command Code rate-limited Hy3, then Go streamed Hy3 for about 300 s and closed
-// the stream before it finished. The diagnostic must not read as a rate limit or an auth problem.
-const closedStream = Object.assign(new Error('SDK request failed (code=REVIEW_INCOMPLETE_STREAM, http=200, end=clean_close, last_event=reasoning, idle_before_end_ms=2616).'),
+// NebulaLab #1296 (Lane C then ran Hy3): Command Code rate-limited the request, then Go streamed the
+// same model for about 300 s and closed the stream before it finished. The diagnostic must not read
+// as a rate limit or an auth problem. Lane C's GPT-6 Luna, over Responses, takes the same route.
+const closedStream = Object.assign(new Error('SDK request failed (code=REVIEW_INCOMPLETE_STREAM, http=200, end=clean_close, last_event=response.reasoning_text.delta, idle_before_end_ms=2616).'),
   { name: 'SDKRequestError', code: 'REVIEW_INCOMPLETE_STREAM', httpStatus: 200, unserved: false });
-r = await scenario((call) => call.model === 'tencent/hy3-paid'
+r = await scenario((call) => lunaOnCommandCode(call)
   ? Promise.reject(unserved(429, { providerType: 'rate_limit_error', providerCode: 'RATE_LIMITED' }))
-  : call.lane === 'A' && call.model === 'hy3' ? Promise.reject(closedStream) : healthy(call));
+  : lunaOnGo(call) ? Promise.reject(closedStream) : healthy(call));
 const closedStreamComment = r.posted.find((body) => body.includes('lane=C') && body.includes('status=diagnostic')) || '';
 check('a stream closed before the model finished is named as such, not as a failed request or an auth problem', !r.error
-  && closedStreamComment.includes('tencent/hy3-paid -> HTTP 429 (1 attempt(s))')
-  && /tencent\/hy3-paid via opencode-go hy3 -> HTTP 200, stream closed before the model finished after \d+ s \(1 attempt\(s\)\)/.test(closedStreamComment)
+  && closedStreamComment.includes('Tried: gpt-6-luna -> HTTP 429 (1 attempt(s)); ')
+  && /gpt-6-luna via opencode-go gpt-6-luna -> HTTP 200, stream closed before the model finished after \d+ s \(1 attempt\(s\)\)/.test(closedStreamComment)
   && closedStreamComment.includes('this is not a rate limit, quota or authentication failure. opencode-go accepted the request (HTTP 200)')
   && !closedStreamComment.includes('HTTP request failed') && !closedStreamComment.includes('request or auth problem'));
 const invalidResendConfig = structuredClone(centralConfig);
@@ -866,11 +877,13 @@ check('no repository profile resends on the same provider', fs.readdirSync(path.
   .every((name) => JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', name), 'utf8'))
     .lanes.every((lane) => lane.resend_unserved === undefined)));
 const privateReport = JSON.stringify({ summary: 'PRIVATE_REPORT_CONTENT', reviewed_files: ['not-supplied.js'], findings: [], limitations: [] });
-// Lane C's Hy3 returns a well-formed but unverifiable report on both providers, in its own protocol shape.
-r = await scenario(call => call.lane !== 'C' && call.model !== 'hy3' ? healthy(call) : reply(200, JSON.stringify(call.body.contents
+// Lane C's GPT-6 Luna returns a well-formed but unverifiable report on both providers, in the shape
+// the SDK client hands back for its protocol.
+r = await scenario(call => call.lane !== 'C' && !lunaOnGo(call) ? healthy(call) : reply(200, JSON.stringify(call.body.contents
   ? { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: privateReport }] } }] }
   : { choices: [{ finish_reason: 'stop', message: { content: privateReport } }] })));
 check('contract diagnostics expose the safe local reason without leaking rejected report content', !r.error
+  && r.captured.filter(lunaOnCommandCode).length === 1 && r.captured.filter(lunaOnGo).length === 1
   && r.posted.some(body => body.includes('no supplied file was reviewed') && body.includes('not an authentication or HTTP failure'))
   && !r.posted.some(body => body.includes('PRIVATE_REPORT_CONTENT')));
 // The engine still runs one different-model fallback per lane when a config names one.
@@ -987,17 +1000,17 @@ check('full-context primaries preserve input while Lane C carries its own output
   r.captured.every(({ body }) => userText(body).includes('Changed files and patches:'))
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 65536
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 120000
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_output_tokens === 65536);
 
 check('protocol and credentials come from lanes', r.captured.find(({ lane }) => lane === 'A')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'A')?.headers.authorization === 'Bearer lane-a-key'
   && r.captured.find(({ lane }) => lane === 'B')?.url.endsWith('/messages')
   && r.captured.find(({ lane }) => lane === 'B')?.headers['x-api-key'] === 'lane-b-key'
-  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/chat/completions')
+  && r.captured.find(({ lane }) => lane === 'C')?.url.endsWith('/responses')
   && r.captured.find(({ lane }) => lane === 'C')?.headers.authorization === 'Bearer lane-c-key');
 
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
-check('self-hosted Go proxies Muse and Haiku, which are not verified for direct egress, while verified Hy3 stays direct',
+check('self-hosted Go proxies Muse and Haiku, which are not verified for direct egress, while Lane C on Command Code stays direct',
   !r.error
   && ['A', 'B'].every((lane) => r.captured.find(c => c.lane === lane)?.proxy === 'http://177.201.224.95:13128')
   && r.captured.find(c => c.lane === 'C')?.proxy === undefined
@@ -1020,10 +1033,11 @@ for (const useBundle of [false, true]) {
 // A Go route that cannot get an approved proxy fails closed before sending; the same model then
 // crosses to Command Code, which needs no proxy, so no request ever leaves directly for Go.
 const onlyCommandCode = (result) => result.captured.every(c => c.lane === 'C' && c.proxy === undefined);
-for (const invalidProxy of ['', 'http://unapproved.example:17890', 'http://192.168.122.1:17891',
+const invalidModelProxies = ['', 'http://unapproved.example:17890', 'http://192.168.122.1:17891',
   'http://192.168.122.1:17890/path', 'http://192.168.122.1:17890?x=1',
   'http://192.168.122.1:17890#fragment', 'http://user:secret@192.168.122.1:17890',
-  'https://192.168.122.1:17890']) {
+  'https://192.168.122.1:17890'];
+for (const invalidProxy of invalidModelProxies) {
   r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'self-hosted',
     NEBULA_REVIEW_PROXY_URL: invalidProxy, https_proxy: 'http://177.201.224.95:13128' });
   check('invalid model proxy override fails closed for Go and crosses to Command Code: ' + invalidProxy,
@@ -1033,7 +1047,7 @@ r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'custom-runner',
   NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
 // The Go proxy requirement is Go's alone: on an unknown runtime only Command Code dispatches.
 check('unknown runtime cannot use the local szlab exception', r.captured.length === 3 && onlyCommandCode(r)
-  && r.captured.some(c => c.model === 'tencent/hy3-paid'));
+  && r.captured.some(lunaOnCommandCode));
 r = await scenario(healthy, { RUNNER_ENVIRONMENT: 'github-hosted',
   NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
 check('GitHub hosted ignores the model proxy override', !r.error && r.captured.every(c => c.proxy === undefined));
@@ -1059,14 +1073,54 @@ for (const useBundle of [false, true]) {
     && ['meta/muse-spark-1.3-contributor', 'claude-haiku-5-5'].every(model => r.captured.some(c => c.lane === 'C' && c.model === model && c.proxy === undefined))
     && ['A', 'B', 'C'].every(lane => r.posted.some(b => b.includes(`lane=${lane}`) && b.includes('status=valid'))));
 }
-// Lane C's Hy3 crosses to Go, which serves Hy3 directly from the review runners.
-r = await scenario(call => call.model === 'tencent/hy3-paid' ? reply(503, 'unavailable') : healthy(call),
-  { RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' });
-const goHy3 = r.captured.find(c => c.lane === 'A' && c.model === 'hy3');
-check('on self-hosted runners Lane C reaches Hy3 on Go directly with a Go session',
-  !r.error && goHy3?.url === 'https://lane-a.example.test/v1/chat/completions' && goHy3.headers.authorization === 'Bearer lane-a-key'
-  && goHy3.proxy === undefined && /-lane-C$/.test(goHy3.headers['x-opencode-session'] || '')
-  && r.logs.some(line => line.includes('[Lane C/hy3] egress=direct')));
+// Lane C's GPT-6 Luna crosses to Go over Responses. Only verified Chat Completions models reach Go
+// directly, so from the review runners it leaves through the approved proxy exactly like Muse (Go
+// refused it from the China egress on 2026-10-19), while its Command Code request stays direct.
+const commandCodeLunaDown = (call) => lunaOnCommandCode(call) ? reply(503, 'unavailable') : healthy(call);
+for (const useBundle of [false, true]) {
+  r = await scenario(commandCodeLunaDown,
+    { RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' }, { useBundle });
+  const goLuna = r.captured.find(lunaOnGo);
+  check(`source/bundle ${useBundle} on self-hosted runners Lane C reaches GPT-6 Luna on Go through the szlab proxy with a Go session`,
+    !r.error && goLuna?.url === 'https://lane-a.example.test/v1/responses' && goLuna.headers.authorization === 'Bearer lane-a-key'
+    && goLuna.proxy === 'http://192.168.122.1:17890' && /-lane-C$/.test(goLuna.headers['x-opencode-session'] || '')
+    && r.captured.filter(lunaOnCommandCode).length === 1
+    && r.captured.filter(lunaOnCommandCode).every(c => c.proxy === undefined && c.headers['x-opencode-session'] === undefined)
+    && r.logs.some(line => line.includes('[Lane C/gpt-6-luna] egress=approved-proxy'))
+    && !r.logs.some(line => line.includes('[Lane C/gpt-6-luna] egress=direct'))
+    && r.posted.some(body => body.includes('lane=C') && body.includes('status=valid')
+      && body.includes('Lane C: gpt-6-luna via opencode-go gpt-6-luna (command-code unavailable)')));
+}
+r = await scenario(commandCodeLunaDown, { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://177.201.224.95:13128' });
+check('without the szlab override Lane C reaches GPT-6 Luna on Go through the VPS proxy',
+  !r.error && r.captured.find(lunaOnGo)?.proxy === 'http://177.201.224.95:13128'
+  && r.logs.some(line => line.includes('[Lane C/gpt-6-luna] egress=approved-proxy'))
+  && r.posted.some(body => body.includes('lane=C') && body.includes('status=valid')));
+// Without an approved proxy Lane C's Go request fails closed before sending, exactly like Muse's.
+// Its own provider was Command Code, so the lane publishes a diagnostic and nothing reaches Go.
+const laneCFailedClosed = (result) => {
+  const laneC = result.posted.find((body) => body.includes('lane=C')) || '';
+  return !result.error && onlyCommandCode(result) && result.captured.filter(lunaOnCommandCode).length === 1
+    && !result.logs.some((line) => line.includes('[Lane C/gpt-6-luna] egress='))
+    && laneC.includes('status=diagnostic')
+    && laneC.includes('gpt-6-luna via opencode-go gpt-6-luna -> HTTP request failed (1 attempt(s))')
+    && laneC.includes('Lane C requires an approved review proxy');
+};
+for (const invalidProxy of invalidModelProxies) {
+  r = await scenario(commandCodeLunaDown, { RUNNER_ENVIRONMENT: 'self-hosted',
+    NEBULA_REVIEW_PROXY_URL: invalidProxy, https_proxy: 'http://177.201.224.95:13128' });
+  check('invalid model proxy override fails closed for Lane C on Go: ' + invalidProxy, laneCFailedClosed(r));
+}
+for (const [label, overrides] of [
+  ['a missing Go proxy on a self-hosted runner', { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: '', HTTPS_PROXY: '' }],
+  ['an unapproved ambient proxy on a self-hosted runner', { RUNNER_ENVIRONMENT: 'self-hosted', https_proxy: 'http://unapproved.example:13128' }],
+  ['the szlab override on an unknown runtime', { RUNNER_ENVIRONMENT: 'custom-runner', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' }],
+  ['unknown runtime custom-runner without a proxy', { RUNNER_ENVIRONMENT: 'custom-runner', https_proxy: '', HTTPS_PROXY: '' }],
+  ['unknown runtime missing without a proxy', { RUNNER_ENVIRONMENT: '', https_proxy: '', HTTPS_PROXY: '' }],
+]) {
+  r = await scenario(commandCodeLunaDown, overrides);
+  check(`${label} cannot send Lane C directly to Go`, laneCFailedClosed(r));
+}
 const unknownGoModel = structuredClone(centralConfig);
 unknownGoModel.lanes[1].primary.id = 'future-go-model';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(unknownGoModel),
@@ -1082,7 +1136,7 @@ r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(overriddenConfig)
 check('repository configuration supplied through the environment remains authoritative', r.error === undefined
   && r.captured.find(({ lane }) => lane === 'A')?.body.max_output_tokens === 8192
   && r.captured.find(({ lane }) => lane === 'B')?.body.max_tokens === 120000
-  && r.captured.find(({ lane }) => lane === 'C')?.body.max_tokens === 65536);
+  && r.captured.find(({ lane }) => lane === 'C')?.body.max_output_tokens === 65536);
 
 // Each lane's only fallback is the same model on the other provider, sent once.
 r = await scenario((call) => call.model === 'muse-spark-1.3-contributor' ? reply(503, '{"error":"unavailable"}') : healthy(call));
@@ -1107,16 +1161,22 @@ check('Lane B asks Haiku on Command Code once, never another model',
   && !r.captured.some(({ model }) => /kimi|glm/i.test(model))
   && r.posted.some((body) => body.includes('Lane B: claude-haiku-5-5 via command-code claude-haiku-5-5 (opencode-go unavailable)')));
 
-r = await scenario((call) => call.lane === 'C' && call.model === 'tencent/hy3-paid' ? reply(503, '{"error":"slow upstream"}') : healthy(call));
-const hy3Cross = r.captured.find(({ lane, model }) => lane === 'A' && model === 'hy3');
-check('Lane C asks Hy3 on Go through the Lane A slot once, never another model',
-  r.captured.filter(({ lane, model }) => lane === 'C' && model === 'tencent/hy3-paid').length === 1
+// The Go request is the same Responses request Command Code received; GitHub-hosted runners send it directly.
+r = await scenario((call) => lunaOnCommandCode(call) ? reply(503, '{"error":"slow upstream"}') : healthy(call));
+const lunaOwn = r.captured.find(lunaOnCommandCode);
+const lunaCross = r.captured.find(lunaOnGo);
+check('Lane C asks GPT-6 Luna on Go through the Lane A slot once, never another model',
+  r.captured.filter(lunaOnCommandCode).length === 1
   && r.captured.filter(({ lane }) => lane === 'C').length === 1
-  && hy3Cross?.url === 'https://lane-a.example.test/v1/chat/completions' && hy3Cross.headers.authorization === 'Bearer lane-a-key'
-  && /-lane-C$/.test(hy3Cross.headers['x-opencode-session'] || '') && hy3Cross.body.max_tokens === 65536
-  && hy3Cross.body.messages[0].content.includes('Reporting calibration')
-  && !r.captured.some(({ model }) => /glm/i.test(model))
-  && r.posted.some((body) => body.includes('Lane C: tencent/hy3-paid via opencode-go hy3 (command-code unavailable)')));
+  && r.captured.filter(lunaOnGo).length === 1
+  && lunaCross?.url === 'https://lane-a.example.test/v1/responses' && lunaCross.headers.authorization === 'Bearer lane-a-key'
+  && /-lane-C$/.test(lunaCross.headers['x-opencode-session'] || '') && lunaCross.body.max_output_tokens === 65536
+  && lunaCross.body.store === false && lunaCross.body.max_tokens === undefined && lunaCross.body.messages === undefined
+  && lunaCross.body.input[0].content.includes('Reporting calibration')
+  && JSON.stringify(lunaCross.body.input) === JSON.stringify(lunaOwn?.body.input)
+  && lunaCross.proxy === undefined && r.logs.some((line) => line.includes('[Lane C/gpt-6-luna] egress=direct'))
+  && r.captured.every(({ model }) => ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gpt-6-luna'].includes(model))
+  && r.posted.some((body) => body.includes('Lane C: gpt-6-luna via opencode-go gpt-6-luna (command-code unavailable)')));
 
 // Without a configured cross route a plan quota keeps the lane on its own provider, and with
 // no other model configured the lane publishes a quota diagnostic.
@@ -1314,9 +1374,13 @@ check('Claude Haiku uses Anthropic Messages with adaptive thinking, configured e
   && haikuCall.body.messages?.length === 1 && haikuCall.body.messages[0].role === 'user'
   && haikuCall.body.messages[0].content.includes('Changed files and patches:') && haikuCall.body.temperature === undefined
   && /-lane-B$/.test(haikuCall.headers['x-opencode-session'] || ''));
+// Since Lane C moved to Responses, this is where a Chat Completions request shows its own output
+// ceiling, and where a verified model's direct Go route keeps its session on a self-hosted runner.
 check('a fallback with its own protocol keeps chat completions and its direct Go egress inside the lane',
   kimiFallbackCall?.url === 'https://opencode.ai/zen/go/v1/chat/completions' && kimiFallbackCall.proxy === undefined
   && haikuCall?.proxy === 'http://192.168.122.1:17890' && kimiFallbackCall.body.messages?.[1]?.content.includes('Changed files and patches:')
+  && kimiFallbackCall.body.max_tokens === 65536 && kimiFallbackCall.body.max_output_tokens === undefined
+  && /-lane-B$/.test(kimiFallbackCall.headers['x-opencode-session'] || '') && r.logs.some((line) => line.includes('[Lane B/kimi-k2.7-code] egress=direct'))
   && r.posted.some((body) => body.includes('lane-B') && body.includes('status=valid') && body.includes('served by kimi-k2.7-code')));
 r = await scenario(healthy, goModelsEnv);
 const geminiCall = byModel(r, 'gemini-4-argon-contributor')[0];
@@ -1343,9 +1407,9 @@ check('reporting calibration follows the model flag across protocols',
   && !byModel(r, 'gemini-4-argon-contributor')[0]?.body.systemInstruction.parts[0].text.includes('Reporting calibration')
   && !byModel(r, 'muse-spark-1.3-contributor')[0]?.body.input[0].content.includes('Reporting calibration'));
 r = await scenario(healthy);
-check('production Muse and Hy3 are calibrated while Haiku is not',
+check('production Muse and GPT-6 Luna are calibrated while Haiku is not',
   r.captured.find(({ lane }) => lane === 'A')?.body.input[0].content.includes('Reporting calibration: surface every plausible defect you traced')
-  && r.captured.find(({ lane }) => lane === 'C')?.body.messages[0].content.includes('Reporting calibration: surface every plausible defect you traced')
+  && r.captured.find(({ lane }) => lane === 'C')?.body.input[0].content.includes('Reporting calibration: surface every plausible defect you traced')
   && !r.captured.find(({ lane }) => lane === 'B')?.body.system.includes('Reporting calibration'));
 const goQuota = Object.assign(new Error('SDK request failed (http=429).'), { name: 'SDKRequestError', status: 429, httpStatus: 429,
   unserved: true, providerType: 'GoUsageLimitError' });
@@ -1520,7 +1584,7 @@ for (const [label, fail] of [
     r.captured.length === 6 && /0 of 3 lanes/.test(r.error?.message || '')
     && r.captured.map(({ lane, model }) => `${lane}:${model}`).sort().join(',') === [
       'A:muse-spark-1.3-contributor', 'C:meta/muse-spark-1.3-contributor', 'B:claude-haiku-5-5',
-      'C:claude-haiku-5-5', 'C:tencent/hy3-paid', 'A:hy3'].sort().join(','));
+      'C:claude-haiku-5-5', 'C:gpt-6-luna', 'A:gpt-6-luna'].sort().join(','));
 }
 for (const invalidAttempts of [undefined, 0, 2, 3, '1']) {
   const config = structuredClone(centralConfig);
@@ -1555,7 +1619,7 @@ check('each publication rechecks freshness; later lanes cannot publish after hea
 
 r = await scenario((call) => call.lane === 'B' && call.model === 'claude-haiku-5-5' ? reply(503, 'unavailable') : healthy(call));
 // A gets ten minutes for inputs up to its 1M-token window. Haiku finished 70-226K-token
-// NebulaLab PRs in 146-211 s; it gets fifteen minutes on each provider, as does Hy3.
+// NebulaLab PRs in 146-211 s; it gets fifteen minutes on each provider, as does GPT-6 Luna.
 check('B primary gets fifteen minutes on each provider, while A and C keep their configured deadlines',
   !r.error && r.timeouts.join(',') === '600000,900000,900000,900000');
 const inheritedTimeoutConfig = structuredClone(centralConfig);

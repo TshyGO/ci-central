@@ -22,6 +22,7 @@ const incrementalContract = [
   'This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round\'s findings, replies the PR author or maintainers posted since, the PR\'s own changes since that commit, and the complete current text of the files those changes touch.',
   'Re-check every previous finding against the current code and the replies, and give each one a verdict in previous_findings with status fixed, still_present, answered or unclear. Use answered only when a reply gives concrete evidence that holds against the current code; an assertion without evidence is not an answer.',
   'Do not report again, as a new finding, an issue that was answered with evidence, unless the new code contradicts that answer; then mark it still_present and say why.',
+  'The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing.',
   'Review the changes since that commit in depth, including how they interact with the rest of each supplied file, and report new defects in findings with a code quote from the supplied patch or file text. Do not repeat still-present previous findings in findings.',
 ].join('\n\n');
 
@@ -256,8 +257,6 @@ function renderReview(report, context, { complete = true } = {}) {
   if (partial.length) lines.push(`部分提供：${partial.slice(0, 20).map(file => `${code(file.file)}（${file.supplied_hunks}/${file.total_hunks} hunks）`).join('、')}。`);
   const afterImages = context.coverage.filter(file => file.supplied_hunks && file.mode === 'head_source');
   if (afterImages.length) lines.push(`以下文件提供固定 HEAD 的完整源码，未提供删除/base 侧：${afterImages.map(file => code(file.file)).join('、')}。`);
-  const windowed = context.coverage.filter(file => file.supplied_hunks && file.mode === 'patch+head_windows');
-  if (windowed.length) lines.push(`以下文件只提供了改动处前后的带行号片段，没有提供完整文本：${windowed.slice(0, 20).map(file => code(file.file)).join('、')}${windowed.length > 20 ? ' 等' : ''}。`);
   const issueGaps = (context.issues || []).filter(issue => ['excerpt', 'unavailable', 'budget_omitted'].includes(issue.state));
   if (issueGaps.length) lines.push(`Issue 材料限制：${issueGaps.map(issue => `#${issue.number} ${issue.state}`).join('、')}。`);
   for (const item of report.limitations) lines.push(`- ${safeText(item)}`);

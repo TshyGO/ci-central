@@ -138,18 +138,21 @@ test('replies are the author’s and members’ words after the review, never bo
 
 const lane = { id: 'A', primary: { id: 'muse-spark-1.3-contributor' }, fallbacks: [] };
 const plan = (overrides = {}) => planLane({ lane, state: state(), evidence: { head: older, status: 'valid', workflow }, base: 'main',
-  head, fingerprint: 'd'.repeat(64), promptVersion: 'review-contract-v1', manual: false, fullRequested: false, firstPassDue: false, ...overrides });
+  head, fingerprint: 'd'.repeat(64), promptVersion: 'review-contract-v1', manual: false, firstPassDue: false, ...overrides });
 test('an unchanged PR-own diff skips the model only when the visible evidence is that valid review', () => {
   assert.deepEqual(plan(), { mode: 'skip', reason: 'unchanged' });
-  assert.deepEqual(plan({ manual: true }), { mode: 'full', reason: 'unchanged-manual' });
   assert.deepEqual(plan({ evidence: { head: head, status: 'diagnostic', workflow } }), { mode: 'full', reason: 'unchanged-not-shown' });
   assert.deepEqual(plan({ evidence: { head, status: 'valid', workflow } }), { mode: 'full', reason: 'unchanged-not-shown' });
+});
+// Peter, 2026-10-19: a review someone asks for by hand is always a full review on the current version.
+test('a manual /review is always a full review, changed diff or not', () => {
+  assert.deepEqual(plan({ manual: true }), { mode: 'full', reason: 'manual' });
+  assert.deepEqual(plan({ manual: true, fingerprint: 'e'.repeat(64) }), { mode: 'full', reason: 'manual' });
+  assert.deepEqual(plan({ manual: true, state: null }), { mode: 'full', reason: 'manual' });
 });
 test('a changed diff on a trusted state is an incremental candidate unless a full pass is due', () => {
   const changed = { fingerprint: 'e'.repeat(64) };
   assert.deepEqual(plan(changed), { mode: 'incremental', reason: 'changed' });
-  assert.deepEqual(plan({ ...changed, manual: true }), { mode: 'incremental', reason: 'changed' });
-  assert.deepEqual(plan({ ...changed, fullRequested: true }), { mode: 'full', reason: 'full-requested' });
   assert.deepEqual(plan({ ...changed, firstPassDue: true }), { mode: 'full', reason: 'first-pass-due' });
   assert.deepEqual(plan({ ...changed, evidence: { head, status: 'diagnostic', workflow } }), { mode: 'incremental', reason: 'changed' },
     'a later failed round keeps the last valid review as the base');
@@ -165,12 +168,20 @@ test('no state, another contract version or a model the lane no longer runs mean
     { mode: 'incremental', reason: 'changed' }, 'a first-pass review is a trusted base for the lane primary');
 });
 
-test('incremental review is chosen only when it is materially smaller than a full one', () => {
+// Quality first: the change since the review plus the complete text of every changed file is sent
+// whole, and when that is more than the full review's material the full review runs instead.
+test('incremental review is chosen only for a small change whose whole-file material is no larger than a full review', () => {
   const sized = (overrides) => chooseIncremental({ changedFiles: 2, sincePatchChars: 2000, fullPatchChars: 40000,
     materialChars: 9000, fullMaterialChars: 40000, ...overrides });
   assert.deepEqual(sized({}), { incremental: true });
   assert.deepEqual(sized({ sincePatchChars: 30000 }), { incremental: false, reason: 'large-change' });
-  assert.deepEqual(sized({ materialChars: 39000 }), { incremental: false, reason: 'not-smaller' });
+  assert.deepEqual(sized({ materialChars: 40000 }), { incremental: true }, 'as large as the full review is still no larger');
+  assert.deepEqual(sized({ materialChars: 40001 }), { incremental: false, reason: 'not-smaller' });
+  // Never less than the whole text of a changed file: a text that could not be read, or that does
+  // not fit the model's budget, means the full review instead.
+  assert.deepEqual(sized({ missingText: 1 }), { incremental: false, reason: 'text-unavailable' });
+  assert.deepEqual(sized({ omitted: 1 }), { incremental: false, reason: 'over-budget' });
+  assert.deepEqual(sized({ sincePatchChars: 30000, missingText: 1 }), { incremental: false, reason: 'large-change' });
   assert.deepEqual(sized({ changedFiles: 0 }), { incremental: false, reason: 'nothing-changed' });
 });
 

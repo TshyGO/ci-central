@@ -205,35 +205,36 @@ function collectReplies({ pull, since, comments = [], reviews = [], reviewCommen
   return { items, omitted: candidates.length - items.length };
 }
 
-// The decision before any material is fetched. Reusing the visible review needs it to be the
-// recorded one; reviewing incrementally needs a record this version can read, made under the
-// same report contract, by a model the lane still runs.
-function planLane({ lane, state, evidence, base, fingerprint, promptVersion, manual, fullRequested, firstPassDue }) {
+// The decision before any material is fetched. A review someone asks for by hand is always a full
+// review on the current version. Reusing the visible review needs it to be the recorded one;
+// reviewing incrementally needs a record this version can read, made under the same report
+// contract, by a model the lane still runs.
+function planLane({ lane, state, evidence, base, fingerprint, promptVersion, manual, firstPassDue }) {
+  if (manual) return { mode: 'full', reason: 'manual' };
   if (!state) return { mode: 'full', reason: 'no-previous-review' };
   const models = [lane.first_pass, lane.primary, ...(lane.fallbacks || [])].filter(Boolean).map((model) => model.id);
   if (state.prompt !== promptVersion || !models.includes(state.model)) return { mode: 'full', reason: 'untrusted-state' };
   // Retargeting a PR changes its whole diff, while its commits since the review may look linear.
   if (state.base !== base) return { mode: 'full', reason: 'base-changed' };
   if (state.fp === fingerprint) {
-    if (manual) return { mode: 'full', reason: 'unchanged-manual' };
     // A later failed round replaced the comment text, so there is no review left to point at.
     if (evidence?.status !== 'valid' || evidence.head !== state.head) return { mode: 'full', reason: 'unchanged-not-shown' };
     return { mode: 'skip', reason: 'unchanged' };
   }
-  if (fullRequested) return { mode: 'full', reason: 'full-requested' };
   if (firstPassDue) return { mode: 'full', reason: 'first-pass-due' };
   return { mode: 'incremental', reason: 'changed' };
 }
 
-// A change since the review that is a large share of the PR is reviewed in full, and so is one
-// whose material (since-review patches plus the full text of changed files) is not clearly
-// smaller than the full review's.
+// Quality first (Peter, 2026-10-19): an incremental review sends the change since the review and the
+// complete current text of every changed file, never less. A change that is more than half of the
+// PR is reviewed in full, and so is one whose material would be larger than the full review's.
 const INCREMENTAL_SHARE_LIMIT = 0.5;
-const INCREMENTAL_SIZE_LIMIT = 0.5;
-function chooseIncremental({ changedFiles, sincePatchChars, fullPatchChars, materialChars, fullMaterialChars }) {
+function chooseIncremental({ changedFiles, sincePatchChars, fullPatchChars, materialChars, fullMaterialChars, missingText = 0, omitted = 0 }) {
   if (!changedFiles) return { incremental: false, reason: 'nothing-changed' };
   if (sincePatchChars > INCREMENTAL_SHARE_LIMIT * fullPatchChars) return { incremental: false, reason: 'large-change' };
-  if (materialChars >= INCREMENTAL_SIZE_LIMIT * fullMaterialChars) return { incremental: false, reason: 'not-smaller' };
+  if (missingText) return { incremental: false, reason: 'text-unavailable' };
+  if (omitted) return { incremental: false, reason: 'over-budget' };
+  if (materialChars > fullMaterialChars) return { incremental: false, reason: 'not-smaller' };
   return { incremental: true };
 }
 
@@ -266,4 +267,4 @@ function nextFindings({ previous = [], statuses = [], fresh = [], laneId, next =
 }
 
 module.exports = { STATE_VERSION, diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies,
-  planLane, chooseIncremental, nextFindings, INCREMENTAL_SHARE_LIMIT, INCREMENTAL_SIZE_LIMIT };
+  planLane, chooseIncremental, nextFindings, INCREMENTAL_SHARE_LIMIT };

@@ -241,37 +241,6 @@ test('when space is short the since-review patch is kept and the full text is le
   assert.equal(packed.omittedHunks, 1);
 });
 
-// The surrounding text must not cost more than it saves: full text goes in, smallest files first,
-// while it fits the context limit; a file that does not fit gets numbered windows around its
-// changes; when even those do not fit, the hunks alone are sent.
-const bigText = Array.from({ length: 400 }, (_, i) => `line ${i + 1}();`).join('\n');
-const bigChange = { filename: 'src/big.js', status: 'modified', additions: 1, deletions: 1,
-  patch: '@@ -200,3 +200,3 @@\n line 200();\n-old();\n+line 201();\n line 202();', full_text: bigText };
-test('a file too large for the context limit gets numbered windows around its change', () => {
-  const packed = packIncremental([bigChange], 100000, { contextLimit: 3000, windowLines: 20 });
-  assert.ok(!packed.text.includes('1 | line 1();'), 'the whole file is not sent');
-  assert.ok(packed.text.includes('[Lines 180-222 of the current text of src/big.js at the head commit'));
-  assert.ok(packed.text.includes('180 | line 180();') && packed.text.includes('222 | line 222();') && !packed.text.includes('223 | line 223();'));
-  assert.equal(packed.coverage[0].mode, 'patch+head_windows');
-  const quote = (line, evidence) => ({ summary: 's', reviewed_files: ['src/big.js'], limitations: [], findings: [{ priority: 'P2', file: 'src/big.js',
-    side: 'new', line, title: 't', confidence: 'low', trigger: 't', impact: 'i', evidence, suggestion: 's' }] });
-  assert.equal(parseReview(JSON.stringify(quote(185, 'line 185();')), packed).findings.length, 1, 'code inside a window can be quoted');
-  assert.equal(parseReview(JSON.stringify(quote(300, 'line 300();')), packed).findings.length, 0, 'code outside every window cannot');
-  const rendered = renderReview(parseReview(JSON.stringify(quote(185, 'line 185();')), packed),
-    { ...packed, incremental: { since: 'b'.repeat(40), previous: [], changedFiles: 1, unchangedFiles: 0 } });
-  assert.ok(rendered.includes('以下文件只提供了改动处前后的带行号片段，没有提供完整文本：` src/big.js `'));
-});
-test('full text goes to the smallest files first and the hunks alone when nothing else fits', () => {
-  const small = { ...sinceReview };
-  const packed = packIncremental([bigChange, small], 100000, { contextLimit: 1600, windowLines: 20 });
-  assert.equal(packed.coverage.find((file) => file.file === 'src/auth.js').mode, 'patch+head_text');
-  assert.equal(packed.coverage.find((file) => file.file === 'src/big.js').mode, 'patch+head_windows');
-  const tight = packIncremental([bigChange, small], 100000, { contextLimit: 200, windowLines: 20 });
-  assert.ok(tight.coverage.every((file) => file.mode === 'patch'));
-  assert.ok(tight.text.includes('+line 201();') && tight.text.includes('+  persist(user);'));
-  assert.ok(tight.packedChars <= packIncremental([bigChange, small], 100000, { contextLimit: 0 }).packedChars + 1);
-});
-
 // Incremental re-review: the model re-checks the previous round's findings and reviews only the
 // change since then. Its verdicts are claims, so they are read leniently but never invented.
 const previousHead = 'b'.repeat(40);
@@ -290,6 +259,8 @@ test('an incremental prompt asks for verdicts on previous findings and keeps eve
   assert.ok(system.includes('previous_findings'));
   assert.ok(/fixed, still_present, answered or unclear/.test(system));
   assert.ok(/unless the new code contradicts/.test(system));
+  // Files unchanged since that commit are not supplied; a finding about them cannot be called fixed.
+  assert.ok(/mark it unclear/.test(system) && /cannot see code that was not supplied/.test(system));
   assert.ok(!buildSystemPrompt('Repository-specific boundaries.', 'A').includes('previous_findings'), 'a full review is unchanged');
 });
 test('previous-finding verdicts are read for known ids only, and a missing verdict keeps the finding open', () => {

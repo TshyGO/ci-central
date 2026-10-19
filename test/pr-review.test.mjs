@@ -1300,6 +1300,11 @@ check('an unrecognised quota window or reset time is never echoed', !r.error
   && laneComment(r, 'C').includes('额度用尽，不是限流：`command-code` 的套餐用量上限已用完（供应商未给出重置时间）')
   && !r.posted.some((body) => body.includes('<img') || body.includes('soon'))
   && !r.statusUpdates.some((body) => body.includes('<img') || body.includes('soon')));
+// An inherited property name must not be taken for a window; looking it up would crash the lane.
+r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(quotaError({ window: 'constructor', resetAt: '2026-10-22T08:56:41.040Z' }))
+  : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call));
+check('an inherited property name is not taken for a quota window', !r.error
+  && laneComment(r, 'C').includes('`command-code` 的套餐用量上限已用完，2026-10-22T08:56:41Z（北京时间 2026-10-22 16:56）重置'));
 // A capacity 429 that is not a plan limit keeps its old wording.
 r = await scenario((call) => lunaOnCommandCode(call) ? Promise.reject(unserved(429, { providerType: 'rate_limit_error', providerCode: 'RATE_LIMITED' }))
   : lunaOnGo(call) ? reply(503, '{"error":"unavailable"}') : healthy(call));
@@ -1873,9 +1878,18 @@ for (const useBundle of [false, true]) {
   r = await scenario(() => { throw new Error('model should not run'); }, {}, atHead(H2, { files: mergedMainFiles, commits: mergedTo(H2), comments: roundOne, useBundle }));
   check(`source/bundle ${useBundle} merging main without touching the PR's own lines skips every lane without a model call`, !r.error
     && r.captured.length === 0 && r.posted.length === 0
-    && r.statusUpdates.at(-1).includes(`| A | muse-spark-1.3-contributor | 复用此前提交的有效证据，未请求模型（提交 ${H1.slice(0, 7)} 的审核；PR 自身改动未变，期间合并了其他分支，如 main） | muse-spark-1.3-contributor |`)
+    && r.statusUpdates.at(-1).includes(`| A | muse-spark-1.3-contributor | 复用此前提交的有效证据，未请求模型（提交 ${H1.slice(0, 7)} 的审核，中央版本 ${workflowSha.slice(0, 7)}；PR 自身改动未变，期间合并了其他分支，如 main） | muse-spark-1.3-contributor |`)
     && r.statusUpdates.at(-1).includes('有效发布：3/3') && r.logs.some((line) => line.includes('[Lane A] plan=skip')));
 }
+// Approved 2026-10-19: a trusted record from an older central version is reused when the PR's own
+// patch is identical, and the status table names that version next to the current one.
+const olderCentral = '0123abc'.padEnd(40, '0');
+r = await scenario(roundOneRoute, { PR_REVIEW_WORKFLOW_SHA: olderCentral }, atHead(H1, { files: [srcFile(), testFile(), otherFile()] }));
+const olderRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+r = await scenario(() => { throw new Error('model should not run'); }, {}, atHead(H2, { files: mergedMainFiles, commits: mergedTo(H2), comments: olderRoundOne }));
+check('an identical PR patch reuses a trusted record from an older central version and says which version', !r.error
+  && r.captured.length === 0 && r.posted.length === 0
+  && r.statusUpdates.at(-1).includes(`提交 ${H1.slice(0, 7)} 的审核，中央版本 0123abc（当前 ${workflowSha.slice(0, 7)}）；PR 自身改动未变`));
 r = await scenario(() => { throw new Error('model should not run'); }, {}, atHead(H2, { files: mergedMainFiles, commits: [one(H2, [root])], comments: roundOne }));
 check('a rebase that re-pushes the same PR-own change is skipped and says the history was rewritten', !r.error && r.captured.length === 0
   && r.statusUpdates.at(-1).includes('PR 自身改动未变，提交历史被改写（变基或重推）'));
@@ -1917,6 +1931,7 @@ for (const useBundle of [false, true]) {
     && !userText(laneA).includes('+test2();') && userText(laneA).includes('tests/a.test.ts')
     && userText(laneA).includes('"id":"A1"') && userText(laneA).includes('"title":"运行时缺少租户"')
     && systemText(laneA).includes('previous_findings') && userText(laneA).trimEnd().endsWith('a Markdown review cannot be accepted.')
+    && userText(laneA).includes('- src/a.ts: the change since the reviewed commit and its complete current text')
     && r.apiCalls.includes(`compare ${H1}...${H2}`) && r.apiCalls.includes(`content src/a.ts@${H2}`));
   check(`source/bundle ${useBundle} only the author's and members' replies since the review reach the model`,
     userText(laneA).includes('A1：已改为传入租户。')
@@ -1938,15 +1953,18 @@ check('an unanswered previous finding stays open next to a new finding with the 
   && laneComment(r, 'A').includes('#### P1 · A2 · 租户未校验') && laneComment(r, 'A').includes('#### P1 · A1 · 待复核 · 运行时缺少租户')
   && laneComment(r, 'A').includes('`A1` P1 · 运行时缺少租户：本轮未能确认，继续保留。')
   && readState(laneComment(r, 'A'), 'A')?.findings.map(({ id, status }) => `${id}:${status}`).join() === 'A1:open,A2:open');
-// A failed compare or file read degrades the material, never the run.
-r = await scenario(verdictA, {}, linearRound({ compare: {}, contents: {} }));
-check('when the compare and the file text are unavailable the record of per-file changes still keeps the review incremental', !r.error
+// A failed compare falls back to the per-file record; a changed file whose text cannot be read means
+// the full review, because an incremental one would see less of it.
+r = await scenario(verdictA, {}, linearRound({ compare: {} }));
+check('when the compare is unavailable the per-file record keeps the review incremental, with whole texts', !r.error
   && r.captured.every(isIncremental) && userText(r.captured.find(({ lane }) => lane === 'A').body).includes('+run(user, tenant);')
-  && !userText(r.captured.find(({ lane }) => lane === 'A').body).includes('3 | run(user, tenant);'));
+  && userText(r.captured.find(({ lane }) => lane === 'A').body).includes('3 | run(user, tenant);'));
+r = await scenario(healthy, {}, linearRound({ contents: {} }));
+check('a changed file whose current text cannot be read makes the lane review in full', !r.error && !r.captured.some(isIncremental)
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=text-unavailable')));
 
-// A large changed file gets numbered windows around the change instead of its whole text, so the
-// incremental material stays well under the full review's (2026-10-19 replay: whole-file text made
-// the median re-review larger than a full one on NebulaLab).
+// Quality first (Peter, 2026-10-19): a changed file's whole text is never cut down. When the whole
+// text makes the incremental material larger than the full review's, the full review runs.
 const bigText = (call) => Array.from({ length: 2000 }, (_, i) => (i + 1 === 1001 ? call : `const v${i + 1} = step(${i + 1});`)).join('\n');
 const bigSrc = (call) => ({ filename: 'src/big.ts', status: 'modified', additions: 1, deletions: 1,
   patch: `@@ -1000,3 +1000,3 @@\n const v1000 = step(1000);\n-old();\n+${call}\n const v1002 = step(1002);` });
@@ -1959,10 +1977,9 @@ r = await scenario(wideRoute, {}, atHead(H2, { files: [bigSrc('b();'), wide], co
   compare: { [`${H1}...${H2}`]: { status: 'ahead', merge_base_commit: { sha: H1 }, files: [{ filename: 'src/big.ts', status: 'modified',
     additions: 1, deletions: 1, patch: '@@ -1001,1 +1001,1 @@\n-a();\n+b();' }] } }, contents: { 'src/big.ts': bigText('b();') } }));
 const windowedA = userText(r.captured.find(({ lane }) => lane === 'A')?.body);
-check('a large changed file is sent as numbered windows around its change, not as its whole text', !r.error && r.captured.every(isIncremental)
-  && windowedA.includes('[Lines 941-1061 of the current text of src/big.ts at the head commit') && windowedA.includes('1001 | b();')
-  && !windowedA.includes('1 | const v1 = step(1);') && !windowedA.includes('+export const wide0')
-  && laneComment(r, 'A').includes('以下文件只提供了改动处前后的带行号片段'));
+check('a changed file whose whole text is larger than the full review falls back to the full review, never to excerpts', !r.error
+  && !r.captured.some(isIncremental) && windowedA.includes('+export const wide0') && !windowedA.includes('[Lines ')
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=not-smaller')));
 
 // After a merge from main the since-review compare would include main's changes, so each changed
 // file is sent as its whole PR change instead, and files only main touched are never sent.
@@ -1981,13 +1998,14 @@ r = await scenario(healthy, {}, atHead(H3, { files: [srcFile(), testFile(), othe
 check('a change since the review that is most of the PR gets a full review', !r.error && r.captured.length === 3
   && !r.captured.some(isIncremental) && r.logs.some((line) => line.includes('[Lane A] plan=full reason=large-change')));
 r = await scenario(healthy, {}, { ...linearRound(), ...manualAt(H2, '/review full') });
-check('/review full asks for a full pass on every lane', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental)
-  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=full-requested')));
+check('/review full is a full pass on every lane', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental)
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=manual')));
 r = await scenario(healthy, {}, linearRound({ pulls: [{ ...pull, base: { ref: 'release/1.0' }, head: { ...pull.head, sha: H2 } }] }));
 check('a PR retargeted to another base branch gets a full review', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental)
   && r.logs.some((line) => line.includes('[Lane A] plan=full reason=base-changed')));
 r = await scenario(verdictA, {}, { ...linearRound(), ...manualAt(H2, '/review') });
-check('a plain manual /review reviews the change since the last review incrementally', !r.error && r.captured.length === 3 && r.captured.every(isIncremental));
+check('a plain manual /review is a full review on the current version even when the diff changed', !r.error && r.captured.length === 3
+  && !r.captured.some(isIncremental) && r.logs.some((line) => line.includes('[Lane A] plan=full reason=manual')));
 const renamedModel = structuredClone(centralConfig);
 renamedModel.lanes[0].primary.id = 'muse-spark-1.4-contributor';
 r = await scenario(healthy, { PR_REVIEW_CONFIG: JSON.stringify(renamedModel) }, linearRound());

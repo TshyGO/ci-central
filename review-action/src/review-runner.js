@@ -5,7 +5,7 @@ const { packDiff, packIncremental, collectIssues, enrichWorkflows } = require('.
 const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
 const { diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies, planLane, chooseIncremental,
-  nextFindings, INCREMENTAL_SIZE_LIMIT } = require('./review-incremental.js');
+  nextFindings } = require('./review-incremental.js');
 
 // Verified with final model output from the self-hosted CN runner. Keep unknown
 // models (including Muse) on the approved proxy; never retry across egress paths.
@@ -145,12 +145,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const match = comment && firstPassPattern.exec(comment.body || '');
     return match && match[1] === lane.id ? { head: match[2], model: match[3], review: match[4] } : null;
   }
+  // A review someone asks for by hand ("/review") is always a full review of every lane on the
+  // current version: no reuse, no skip and no incremental round (Peter, 2026-10-19).
   const isManualReview = context.eventName === 'issue_comment';
-  // "/review full" (or --full, 全量, 完整) asks every lane for a full pass. A plain "/review" still
-  // makes every lane run, incrementally where the lane can.
-  const reviewArgs = isManualReview
-    ? /^\/review(?:[ \t]+([^\r\n]*))?$/i.exec(String(context.payload.comment?.body ?? '').split(/\r?\n/, 1)[0].trim())?.[1] ?? '' : '';
-  const fullRequested = reviewArgs.toLowerCase().split(/\s+/).some((word) => ['full', '--full', '全量', '完整'].includes(word));
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   let statusPublisher;
   const publisherFor = (initial = new Map()) => createStatusPublisher({ github, owner, repo, pullNumber, head: reviewHeadSha,
@@ -180,7 +177,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     return;
   }
   if (isManualReview) {
-    console.log(`Manual /review bypasses same-HEAD evidence reuse and forces every configured Lane to run${fullRequested ? ' as a full review' : ''}.`);
+    console.log('Manual /review bypasses same-HEAD evidence reuse and forces every configured Lane to run a full review.');
   }
 
   const files = await github.paginate(github.rest.pulls.listFiles, {
@@ -202,7 +199,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     }
     const record = laneRecords.get(lane.id);
     plans.set(lane.id, planLane({ lane, state: record?.state ?? null, evidence: record?.evidence ?? null, base: pull.base.ref, fingerprint: identity.fingerprint,
-      promptVersion: PROMPT_VERSION, manual: isManualReview, fullRequested, firstPassDue: Boolean(lane.first_pass) && !priorFirstPass(lane) }));
+      promptVersion: PROMPT_VERSION, manual: isManualReview, firstPassDue: Boolean(lane.first_pass) && !priorFirstPass(lane) }));
   }
   const skipReason = (state) => {
     const scope = sinceReviewScope({ commits: prCommits, reviewedHead: state.head });
@@ -216,8 +213,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     if (plans.get(lane.id).mode !== 'skip') continue;
     const { state } = laneRecords.get(lane.id);
     const why = skipReason(state);
-    initialStatus.set(lane.id, { state: 'unchanged', served: state.model, detail: `提交 ${state.head.slice(0, 7)} 的审核；PR 自身改动未变，${why}` });
-    console.log(`[Lane ${lane.id}] plan=skip reason=unchanged reviewed=${state.head.slice(0, 7)} (${why}); the PR's own diff is identical, so no model is called.`);
+    const central = `中央版本 ${state.workflow.slice(0, 7)}${state.workflow === workflowSha ? '' : `（当前 ${workflowSha.slice(0, 7)}）`}`;
+    initialStatus.set(lane.id, { state: 'unchanged', served: state.model, detail: `提交 ${state.head.slice(0, 7)} 的审核，${central}；PR 自身改动未变，${why}` });
+    console.log(`[Lane ${lane.id}] plan=skip reason=unchanged reviewed=${state.head.slice(0, 7)} workflow=${state.workflow.slice(0, 7)} (${why}); the PR's own diff is identical, so no model is called.`);
   }
   if (lanes.every((lane) => ['reuse', 'skip'].includes(plans.get(lane.id).mode))) {
     statusPublisher = publisherFor(initialStatus);
@@ -381,6 +379,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     incremental.since.unchanged.length ? incremental.since.unchanged.slice(0, 200).join('\n') : '[none]',
     ...(incremental.since.dropped ? [`Files the previous round reviewed that this PR no longer changes: ${incremental.since.dropped}.`] : []),
     '',
+    'What was supplied for each file changed since that commit (nothing else of these files was supplied):',
+    ...pack.coverage.map((file) => `- ${file.file}: ${file.mode === 'patch+head_text'
+      ? `${incremental.since.kind === 'pr' ? 'its complete PR change' : 'the change since the reviewed commit'} and its complete current text`
+      : file.status === 'removed' ? 'deleted; only the removed lines are shown' : 'no text to show (binary, rename only or unavailable)'}`),
+    '',
     'Coverage manifest (untrusted metadata; omitted material was not inspected):',
     JSON.stringify({ prompt_version: PROMPT_VERSION, head: reviewHeadSha, reviewed_head: incremental.state.head, files: pack.manifest,
       issues: issues.manifest, omitted_issue_references: issues.omitted_references }),
@@ -392,17 +395,13 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     '',
     `End of supplied material. Reply with only the single JSON object defined by ${PROMPT_VERSION} in the system message, including previous_findings; a Markdown review cannot be accepted.`,
   ].join('\n');
-  // The surrounding text an incremental review may add: whatever keeps its material within
-  // INCREMENTAL_SIZE_LIMIT of this model's full-review material, the findings and replies included.
-  const contextLimitFor = (model, incremental) => Math.max(0, INCREMENTAL_SIZE_LIMIT * fullContextFor(model).pack.packedChars
-    - incremental.previousJson.length - incremental.repliesJson.length);
   // Material for one lane and model: that lane's incremental review, or the full review.
   function contextFor(model, laneId = model.review_lane_id) {
     const incremental = laneId === undefined ? undefined : incrementalContexts.get(laneId);
     if (!incremental) return fullContextFor(model);
     const budget = budgetOf(model);
     if (!incremental.packs.has(budget)) {
-      const pack = packIncremental(incremental.since.changes, budget, { contextLimit: contextLimitFor(model, incremental) });
+      const pack = packIncremental(incremental.since.changes, budget);
       incremental.packs.set(budget, { pack, user: buildIncrementalUser(incremental, pack) });
     }
     return incremental.packs.get(budget);
@@ -410,9 +409,11 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   let replySources;
   const sinceByHead = new Map();
   const fullPatchChars = files.reduce((sum, file) => sum + (file.patch?.length ?? 0), 0);
-  const fullReasons = { 'no-previous-review': '', 'untrusted-state': '', 'unchanged-manual': '', 'unchanged-not-shown': '', 'base-changed': '目标分支已变更，完整审核',
-    'full-requested': '按 /review full 完整审核', 'first-pass-due': '首审', 'large-change': '自上次审核以来改动较大，完整审核',
-    'not-smaller': '增量材料不比完整审核小，完整审核', 'nothing-changed': '', 'no-file-record': '合并后无法逐文件比对，完整审核' };
+  const fullReasons = { 'no-previous-review': '', 'untrusted-state': '', 'unchanged-not-shown': '', 'nothing-changed': '', 'no-material': '',
+    manual: '手动 /review，完整审核', 'base-changed': '目标分支已变更，完整审核', 'first-pass-due': '首审',
+    'large-change': '自上次审核以来改动超过 PR 的一半，完整审核', 'not-smaller': '改动文件的完整文本比完整审核还大，完整审核',
+    'text-unavailable': '有改动文件读不到完整文本，完整审核', 'over-budget': '改动文件的完整文本超出模型预算，完整审核',
+    'no-file-record': '合并后无法逐文件比对，完整审核' };
   for (const lane of lanes) {
     const plan = plans.get(lane.id);
     if (plan.mode === 'incremental') {
@@ -428,17 +429,20 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const previousJson = JSON.stringify(previousForPrompt(state.findings));
       const repliesJson = JSON.stringify(replies.items);
       const fullPack = fullContextFor(lane.primary).pack;
-      // Decided on the since-review hunks alone; the surrounding text is then fitted to the limit.
-      const sincePack = since.changes ? packIncremental(since.changes, budgetOf(lane.primary), { contextLimit: 0 }) : null;
+      // Every model the lane may ask must take the whole material: the change since the review and
+      // the complete text of each changed file. Nothing is cut down; otherwise the lane reviews in full.
+      const sincePack = since.changes ? packIncremental(since.changes, Math.min(...[lane.primary, ...lane.fallbacks].map(budgetOf))) : null;
       const sincePatchChars = since.changes ? since.changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0) : 0;
+      const missingText = since.changes ? since.changes.filter((change) => change.status !== 'removed'
+        && typeof change.patch === 'string' && change.patch && typeof change.full_text !== 'string').length : 0;
       const decision = !since.changes ? { incremental: false, reason: since.reason }
-        // Nothing inspectable changed (a binary file, say): the full review is the honest one.
-        : since.changes.length && !hasMaterial(sincePack) ? { incremental: false, reason: 'no-material' }
-          : chooseIncremental({ changedFiles: since.changes.length, sincePatchChars, fullPatchChars,
-            materialChars: sincePack.packedChars + previousJson.length + repliesJson.length, fullMaterialChars: fullPack.packedChars });
+        : chooseIncremental({ changedFiles: since.changes.length, sincePatchChars, fullPatchChars, missingText,
+          omitted: sincePack.omittedHunks, materialChars: sincePack.packedChars, fullMaterialChars: fullPack.packedChars });
+      // Nothing inspectable changed (a binary file, say): the full review is the honest one.
+      if (decision.incremental && !hasMaterial(sincePack)) Object.assign(decision, { incremental: false, reason: 'no-material' });
       console.log(`[Lane ${lane.id}] plan=${decision.incremental ? 'incremental' : 'full'} reason=${decision.reason ?? 'changed'} reviewed=${state.head.slice(0, 7)}`
         + `${since.changes ? ` files=${since.changes.length}/${files.length} kind=${since.kind} since_patch_chars=${sincePatchChars}/${fullPatchChars}`
-          + ` material_chars=${sincePack.packedChars + previousJson.length + repliesJson.length}/${fullPack.packedChars}` : ''}`
+          + ` material_chars=${sincePack.packedChars}/${fullPack.packedChars} missing_text=${missingText}` : ''}`
         + ` previous_findings=${state.findings.length} replies=${replies.items.length}`);
       if (decision.incremental) {
         incrementalContexts.set(lane.id, { state, since, replies, previousJson, repliesJson, packs: new Map() });

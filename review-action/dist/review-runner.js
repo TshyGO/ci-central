@@ -326,32 +326,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
         full_text: true
       };
     }
-    function changedSpans(patch) {
-      return [...String(patch ?? "").matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)].map((match) => [Number(match[1]), Number(match[1]) + Math.max(1, match[2] === void 0 ? 1 : Number(match[2])) - 1]);
-    }
-    function windowHunks(file, windowLines) {
-      const code = file.full_text.split("\n");
-      const merged = [];
-      for (const [start, end] of changedSpans(file.patch).map(([start2, end2]) => [Math.max(1, start2 - windowLines), Math.min(code.length, end2 + windowLines)]).filter(([start2, end2]) => start2 <= end2).sort((a, b) => a[0] - b[0])) {
-        if (merged.length && start <= merged.at(-1)[1] + 1) merged.at(-1)[1] = Math.max(merged.at(-1)[1], end);
-        else merged.push([start, end]);
-      }
-      return merged.map(([start, end]) => {
-        const lines = code.slice(start - 1, end);
-        return {
-          text: `[Lines ${start}-${end} of the current text of ${file.filename} at the head commit; the rest of the file is not supplied.]
-` + lines.map((line, index) => `${start + index} | ${line}`).join("\n"),
-          complete: true,
-          ranges: [[start, end]],
-          old_ranges: [],
-          code: lines,
-          new_code: lines,
-          old_code: []
-        };
-      });
-    }
-    var CONTEXT_WINDOW_LINES = 60;
-    function packIncremental2(files, budget, { contextLimit = Infinity, windowLines = CONTEXT_WINDOW_LINES } = {}) {
+    function packIncremental2(files, budget) {
       const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
       const prefix = (file) => `File: ${file.filename}
 Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "pr" ? " (the complete PR change to this file: the base branch was merged since the reviewed commit)" : " (change since the reviewed commit)"}
@@ -364,7 +339,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "p
         selected: []
       }));
       let used = 0;
-      const cost = (plan, hunk, extra = 0) => (plan.selected.length + extra ? 1 : prefix(plan.file).length + (used ? SEPARATOR.length : 0)) + hunk.text.length;
+      const cost = (plan, hunk) => (plan.selected.length ? 1 : prefix(plan.file).length + (used ? SEPARATOR.length : 0)) + hunk.text.length;
       for (const plan of plans) {
         for (const hunk of plan.patch) {
           if (hunk.complete === false || used + cost(plan, hunk) > budget) continue;
@@ -372,25 +347,20 @@ Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "p
           plan.selected.push(hunk);
         }
       }
-      const limit = Math.min(budget, contextLimit);
       for (const plan of plans.filter(({ text: text2 }) => text2).sort((a, b) => a.file.full_text.length - b.file.full_text.length)) {
-        for (const candidate of [[plan.text], windowHunks(plan.file, windowLines)]) {
-          const total = candidate.reduce((sum, hunk, index) => sum + cost(plan, hunk, index), 0);
-          if (!candidate.length || used + total > limit) continue;
-          used += total;
-          plan.selected.push(...candidate);
-          plan.context = candidate;
-          break;
-        }
+        if (used + cost(plan, plan.text) > budget) continue;
+        used += cost(plan, plan.text);
+        plan.selected.push(plan.text);
+        plan.context = [plan.text];
       }
       const blocks = plans.filter((plan) => plan.selected.length).map((plan) => prefix(plan.file) + plan.selected.map((hunk) => hunk.text).join("\n"));
       const coverage = plans.map(({ file, patch, text: text2, context, selected }) => ({
         file: file.filename,
         status: file.status,
         supplied_hunks: selected.length,
-        total_hunks: patch.length + (text2 ? Math.max(1, context.length) : 0),
+        total_hunks: patch.length + (text2 ? 1 : 0),
         patch_available: Boolean(file.patch || text2),
-        mode: !context.length ? "patch" : context[0] === text2 ? "patch+head_text" : "patch+head_windows",
+        mode: context.length ? "patch+head_text" : "patch",
         ranges: selected.flatMap((hunk) => hunk.ranges),
         old_ranges: selected.flatMap((hunk) => hunk.old_ranges),
         hunks: selected.map(({ text: hunkText, ...evidence }) => evidence),
@@ -511,6 +481,7 @@ var require_review_report = __commonJS({
       "This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round's findings, replies the PR author or maintainers posted since, the PR's own changes since that commit, and the complete current text of the files those changes touch.",
       "Re-check every previous finding against the current code and the replies, and give each one a verdict in previous_findings with status fixed, still_present, answered or unclear. Use answered only when a reply gives concrete evidence that holds against the current code; an assertion without evidence is not an answer.",
       "Do not report again, as a new finding, an issue that was answered with evidence, unless the new code contradicts that answer; then mark it still_present and say why.",
+      "The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing.",
       "Review the changes since that commit in depth, including how they interact with the rest of each supplied file, and report new defects in findings with a code quote from the supplied patch or file text. Do not repeat still-present previous findings in findings."
     ].join("\n\n");
     function buildSystemPrompt2(repositoryPrompt, lane, { incremental = false } = {}) {
@@ -770,8 +741,6 @@ ${delimiter}`;
       if (partial.length) lines.push(`\u90E8\u5206\u63D0\u4F9B\uFF1A${partial.slice(0, 20).map((file) => `${code(file.file)}\uFF08${file.supplied_hunks}/${file.total_hunks} hunks\uFF09`).join("\u3001")}\u3002`);
       const afterImages = context.coverage.filter((file) => file.supplied_hunks && file.mode === "head_source");
       if (afterImages.length) lines.push(`\u4EE5\u4E0B\u6587\u4EF6\u63D0\u4F9B\u56FA\u5B9A HEAD \u7684\u5B8C\u6574\u6E90\u7801\uFF0C\u672A\u63D0\u4F9B\u5220\u9664/base \u4FA7\uFF1A${afterImages.map((file) => code(file.file)).join("\u3001")}\u3002`);
-      const windowed = context.coverage.filter((file) => file.supplied_hunks && file.mode === "patch+head_windows");
-      if (windowed.length) lines.push(`\u4EE5\u4E0B\u6587\u4EF6\u53EA\u63D0\u4F9B\u4E86\u6539\u52A8\u5904\u524D\u540E\u7684\u5E26\u884C\u53F7\u7247\u6BB5\uFF0C\u6CA1\u6709\u63D0\u4F9B\u5B8C\u6574\u6587\u672C\uFF1A${windowed.slice(0, 20).map((file) => code(file.file)).join("\u3001")}${windowed.length > 20 ? " \u7B49" : ""}\u3002`);
       const issueGaps = (context.issues || []).filter((issue) => ["excerpt", "unavailable", "budget_omitted"].includes(issue.state));
       if (issueGaps.length) lines.push(`Issue \u6750\u6599\u9650\u5236\uFF1A${issueGaps.map((issue) => `#${issue.number} ${issue.state}`).join("\u3001")}\u3002`);
       for (const item of report.limitations) lines.push(`- ${safeText(item)}`);
@@ -1053,26 +1022,26 @@ var require_review_incremental = __commonJS({
       }
       return { items, omitted: candidates.length - items.length };
     }
-    function planLane2({ lane, state, evidence, base, fingerprint, promptVersion, manual, fullRequested, firstPassDue }) {
+    function planLane2({ lane, state, evidence, base, fingerprint, promptVersion, manual, firstPassDue }) {
+      if (manual) return { mode: "full", reason: "manual" };
       if (!state) return { mode: "full", reason: "no-previous-review" };
       const models = [lane.first_pass, lane.primary, ...lane.fallbacks || []].filter(Boolean).map((model) => model.id);
       if (state.prompt !== promptVersion || !models.includes(state.model)) return { mode: "full", reason: "untrusted-state" };
       if (state.base !== base) return { mode: "full", reason: "base-changed" };
       if (state.fp === fingerprint) {
-        if (manual) return { mode: "full", reason: "unchanged-manual" };
         if (evidence?.status !== "valid" || evidence.head !== state.head) return { mode: "full", reason: "unchanged-not-shown" };
         return { mode: "skip", reason: "unchanged" };
       }
-      if (fullRequested) return { mode: "full", reason: "full-requested" };
       if (firstPassDue) return { mode: "full", reason: "first-pass-due" };
       return { mode: "incremental", reason: "changed" };
     }
     var INCREMENTAL_SHARE_LIMIT = 0.5;
-    var INCREMENTAL_SIZE_LIMIT2 = 0.5;
-    function chooseIncremental2({ changedFiles, sincePatchChars, fullPatchChars, materialChars, fullMaterialChars }) {
+    function chooseIncremental2({ changedFiles, sincePatchChars, fullPatchChars, materialChars, fullMaterialChars, missingText = 0, omitted = 0 }) {
       if (!changedFiles) return { incremental: false, reason: "nothing-changed" };
       if (sincePatchChars > INCREMENTAL_SHARE_LIMIT * fullPatchChars) return { incremental: false, reason: "large-change" };
-      if (materialChars >= INCREMENTAL_SIZE_LIMIT2 * fullMaterialChars) return { incremental: false, reason: "not-smaller" };
+      if (missingText) return { incremental: false, reason: "text-unavailable" };
+      if (omitted) return { incremental: false, reason: "over-budget" };
+      if (materialChars > fullMaterialChars) return { incremental: false, reason: "not-smaller" };
       return { incremental: true };
     }
     var STORED_FIELDS = ["priority", "file", "side", "line", "title", "confidence", "trigger", "impact", "evidence", "suggestion"];
@@ -1109,8 +1078,7 @@ var require_review_incremental = __commonJS({
       planLane: planLane2,
       chooseIncremental: chooseIncremental2,
       nextFindings: nextFindings2,
-      INCREMENTAL_SHARE_LIMIT,
-      INCREMENTAL_SIZE_LIMIT: INCREMENTAL_SIZE_LIMIT2
+      INCREMENTAL_SHARE_LIMIT
     };
   }
 });
@@ -1129,8 +1097,7 @@ var {
   collectReplies,
   planLane,
   chooseIncremental,
-  nextFindings,
-  INCREMENTAL_SIZE_LIMIT
+  nextFindings
 } = require_review_incremental();
 var DIRECT_GO_MODELS = /* @__PURE__ */ new Set(["kimi-k2.7-code", "glm-5.3", "hy3"]);
 var QUOTA_WINDOWS = { "5h": ["5-hour", "5 \u5C0F\u65F6"], weekly: ["weekly", "\u5468"], monthly: ["monthly", "\u6708"], daily: ["daily", "\u65E5"] };
@@ -1251,8 +1218,6 @@ async function runReview({
     return match && match[1] === lane.id ? { head: match[2], model: match[3], review: match[4] } : null;
   }
   const isManualReview = context.eventName === "issue_comment";
-  const reviewArgs = isManualReview ? /^\/review(?:[ \t]+([^\r\n]*))?$/i.exec(String(context.payload.comment?.body ?? "").split(/\r?\n/, 1)[0].trim())?.[1] ?? "" : "";
-  const fullRequested = reviewArgs.toLowerCase().split(/\s+/).some((word) => ["full", "--full", "\u5168\u91CF", "\u5B8C\u6574"].includes(word));
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   let statusPublisher;
   const publisherFor = (initial = /* @__PURE__ */ new Map()) => createStatusPublisher({
@@ -1293,7 +1258,7 @@ async function runReview({
     return;
   }
   if (isManualReview) {
-    console.log(`Manual /review bypasses same-HEAD evidence reuse and forces every configured Lane to run${fullRequested ? " as a full review" : ""}.`);
+    console.log("Manual /review bypasses same-HEAD evidence reuse and forces every configured Lane to run a full review.");
   }
   const files = await github.paginate(github.rest.pulls.listFiles, {
     owner,
@@ -1318,7 +1283,6 @@ async function runReview({
       fingerprint: identity.fingerprint,
       promptVersion: PROMPT_VERSION,
       manual: isManualReview,
-      fullRequested,
       firstPassDue: Boolean(lane.first_pass) && !priorFirstPass(lane)
     }));
   }
@@ -1331,8 +1295,9 @@ async function runReview({
     if (plans.get(lane.id).mode !== "skip") continue;
     const { state } = laneRecords.get(lane.id);
     const why = skipReason(state);
-    initialStatus.set(lane.id, { state: "unchanged", served: state.model, detail: `\u63D0\u4EA4 ${state.head.slice(0, 7)} \u7684\u5BA1\u6838\uFF1BPR \u81EA\u8EAB\u6539\u52A8\u672A\u53D8\uFF0C${why}` });
-    console.log(`[Lane ${lane.id}] plan=skip reason=unchanged reviewed=${state.head.slice(0, 7)} (${why}); the PR's own diff is identical, so no model is called.`);
+    const central = `\u4E2D\u592E\u7248\u672C ${state.workflow.slice(0, 7)}${state.workflow === workflowSha ? "" : `\uFF08\u5F53\u524D ${workflowSha.slice(0, 7)}\uFF09`}`;
+    initialStatus.set(lane.id, { state: "unchanged", served: state.model, detail: `\u63D0\u4EA4 ${state.head.slice(0, 7)} \u7684\u5BA1\u6838\uFF0C${central}\uFF1BPR \u81EA\u8EAB\u6539\u52A8\u672A\u53D8\uFF0C${why}` });
+    console.log(`[Lane ${lane.id}] plan=skip reason=unchanged reviewed=${state.head.slice(0, 7)} workflow=${state.workflow.slice(0, 7)} (${why}); the PR's own diff is identical, so no model is called.`);
   }
   if (lanes.every((lane) => ["reuse", "skip"].includes(plans.get(lane.id).mode))) {
     statusPublisher = publisherFor(initialStatus);
@@ -1506,6 +1471,9 @@ ${issueContext}` : "Referenced issues: none.",
     incremental.since.unchanged.length ? incremental.since.unchanged.slice(0, 200).join("\n") : "[none]",
     ...incremental.since.dropped ? [`Files the previous round reviewed that this PR no longer changes: ${incremental.since.dropped}.`] : [],
     "",
+    "What was supplied for each file changed since that commit (nothing else of these files was supplied):",
+    ...pack.coverage.map((file) => `- ${file.file}: ${file.mode === "patch+head_text" ? `${incremental.since.kind === "pr" ? "its complete PR change" : "the change since the reviewed commit"} and its complete current text` : file.status === "removed" ? "deleted; only the removed lines are shown" : "no text to show (binary, rename only or unavailable)"}`),
+    "",
     "Coverage manifest (untrusted metadata; omitted material was not inspected):",
     JSON.stringify({
       prompt_version: PROMPT_VERSION,
@@ -1521,13 +1489,12 @@ ${issueContext}` : "Referenced issues: none.",
     "",
     `End of supplied material. Reply with only the single JSON object defined by ${PROMPT_VERSION} in the system message, including previous_findings; a Markdown review cannot be accepted.`
   ].join("\n");
-  const contextLimitFor = (model, incremental) => Math.max(0, INCREMENTAL_SIZE_LIMIT * fullContextFor(model).pack.packedChars - incremental.previousJson.length - incremental.repliesJson.length);
   function contextFor(model, laneId = model.review_lane_id) {
     const incremental = laneId === void 0 ? void 0 : incrementalContexts.get(laneId);
     if (!incremental) return fullContextFor(model);
     const budget = budgetOf(model);
     if (!incremental.packs.has(budget)) {
-      const pack = packIncremental(incremental.since.changes, budget, { contextLimit: contextLimitFor(model, incremental) });
+      const pack = packIncremental(incremental.since.changes, budget);
       incremental.packs.set(budget, { pack, user: buildIncrementalUser(incremental, pack) });
     }
     return incremental.packs.get(budget);
@@ -1538,14 +1505,16 @@ ${issueContext}` : "Referenced issues: none.",
   const fullReasons = {
     "no-previous-review": "",
     "untrusted-state": "",
-    "unchanged-manual": "",
     "unchanged-not-shown": "",
-    "base-changed": "\u76EE\u6807\u5206\u652F\u5DF2\u53D8\u66F4\uFF0C\u5B8C\u6574\u5BA1\u6838",
-    "full-requested": "\u6309 /review full \u5B8C\u6574\u5BA1\u6838",
-    "first-pass-due": "\u9996\u5BA1",
-    "large-change": "\u81EA\u4E0A\u6B21\u5BA1\u6838\u4EE5\u6765\u6539\u52A8\u8F83\u5927\uFF0C\u5B8C\u6574\u5BA1\u6838",
-    "not-smaller": "\u589E\u91CF\u6750\u6599\u4E0D\u6BD4\u5B8C\u6574\u5BA1\u6838\u5C0F\uFF0C\u5B8C\u6574\u5BA1\u6838",
     "nothing-changed": "",
+    "no-material": "",
+    manual: "\u624B\u52A8 /review\uFF0C\u5B8C\u6574\u5BA1\u6838",
+    "base-changed": "\u76EE\u6807\u5206\u652F\u5DF2\u53D8\u66F4\uFF0C\u5B8C\u6574\u5BA1\u6838",
+    "first-pass-due": "\u9996\u5BA1",
+    "large-change": "\u81EA\u4E0A\u6B21\u5BA1\u6838\u4EE5\u6765\u6539\u52A8\u8D85\u8FC7 PR \u7684\u4E00\u534A\uFF0C\u5B8C\u6574\u5BA1\u6838",
+    "not-smaller": "\u6539\u52A8\u6587\u4EF6\u7684\u5B8C\u6574\u6587\u672C\u6BD4\u5B8C\u6574\u5BA1\u6838\u8FD8\u5927\uFF0C\u5B8C\u6574\u5BA1\u6838",
+    "text-unavailable": "\u6709\u6539\u52A8\u6587\u4EF6\u8BFB\u4E0D\u5230\u5B8C\u6574\u6587\u672C\uFF0C\u5B8C\u6574\u5BA1\u6838",
+    "over-budget": "\u6539\u52A8\u6587\u4EF6\u7684\u5B8C\u6574\u6587\u672C\u8D85\u51FA\u6A21\u578B\u9884\u7B97\uFF0C\u5B8C\u6574\u5BA1\u6838",
     "no-file-record": "\u5408\u5E76\u540E\u65E0\u6CD5\u9010\u6587\u4EF6\u6BD4\u5BF9\uFF0C\u5B8C\u6574\u5BA1\u6838"
   };
   for (const lane of lanes) {
@@ -1563,16 +1532,20 @@ ${issueContext}` : "Referenced issues: none.",
       const previousJson = JSON.stringify(previousForPrompt(state.findings));
       const repliesJson = JSON.stringify(replies.items);
       const fullPack = fullContextFor(lane.primary).pack;
-      const sincePack = since.changes ? packIncremental(since.changes, budgetOf(lane.primary), { contextLimit: 0 }) : null;
+      const sincePack = since.changes ? packIncremental(since.changes, Math.min(...[lane.primary, ...lane.fallbacks].map(budgetOf))) : null;
       const sincePatchChars = since.changes ? since.changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0) : 0;
-      const decision = !since.changes ? { incremental: false, reason: since.reason } : since.changes.length && !hasMaterial(sincePack) ? { incremental: false, reason: "no-material" } : chooseIncremental({
+      const missingText = since.changes ? since.changes.filter((change) => change.status !== "removed" && typeof change.patch === "string" && change.patch && typeof change.full_text !== "string").length : 0;
+      const decision = !since.changes ? { incremental: false, reason: since.reason } : chooseIncremental({
         changedFiles: since.changes.length,
         sincePatchChars,
         fullPatchChars,
-        materialChars: sincePack.packedChars + previousJson.length + repliesJson.length,
+        missingText,
+        omitted: sincePack.omittedHunks,
+        materialChars: sincePack.packedChars,
         fullMaterialChars: fullPack.packedChars
       });
-      console.log(`[Lane ${lane.id}] plan=${decision.incremental ? "incremental" : "full"} reason=${decision.reason ?? "changed"} reviewed=${state.head.slice(0, 7)}${since.changes ? ` files=${since.changes.length}/${files.length} kind=${since.kind} since_patch_chars=${sincePatchChars}/${fullPatchChars} material_chars=${sincePack.packedChars + previousJson.length + repliesJson.length}/${fullPack.packedChars}` : ""} previous_findings=${state.findings.length} replies=${replies.items.length}`);
+      if (decision.incremental && !hasMaterial(sincePack)) Object.assign(decision, { incremental: false, reason: "no-material" });
+      console.log(`[Lane ${lane.id}] plan=${decision.incremental ? "incremental" : "full"} reason=${decision.reason ?? "changed"} reviewed=${state.head.slice(0, 7)}${since.changes ? ` files=${since.changes.length}/${files.length} kind=${since.kind} since_patch_chars=${sincePatchChars}/${fullPatchChars} material_chars=${sincePack.packedChars}/${fullPack.packedChars} missing_text=${missingText}` : ""} previous_findings=${state.findings.length} replies=${replies.items.length}`);
       if (decision.incremental) {
         incrementalContexts.set(lane.id, { state, since, replies, previousJson, repliesJson, packs: /* @__PURE__ */ new Map() });
         initialStatus.set(lane.id, { state: "incremental", detail: `\u81EA ${state.head.slice(0, 7)}` });

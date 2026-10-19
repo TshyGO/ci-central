@@ -13,7 +13,7 @@ const STATE_LINE = /^<!-- ai-pr-review-state:v1 (\{.*\}) -->$/;
 const STATE_LIMIT = 24000;
 const SHA = /^[0-9a-f]{40}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
-const MODEL_ID = /^[A-Za-z0-9._/-]{1,120}$/;
+const MODEL_ID = /^[\w.:@/+-]{1,200}$/;
 const MAX_STATE_FINDINGS = 100;
 // 14 bytes per file (6 of the path hash, 8 of the change hash); about 11 KB of state at this cap.
 const MAX_FILE_HASHES = 600;
@@ -182,7 +182,7 @@ function collectReplies({ pull, since, comments = [], reviews = [], reviewCommen
     ...reviewComments.map((item) => ({ item, at: item?.created_at })),
   ].filter(({ item, at }) => item && typeof item.body === 'string' && !isBot(item.user) && typeof item.user?.login === 'string'
     && (item.user.login === author || MEMBER_ROLES.has(item.author_association))
-    && Number.isFinite(Date.parse(at)) && Date.parse(at) > after)
+    && Number.isFinite(Date.parse(at)) && Date.parse(at) >= after)
     .map(({ item, at }) => ({
       author: item.user.login,
       role: [MEMBER_ROLES.has(item.author_association) ? item.author_association : '', item.user.login === author ? 'PR author' : '']

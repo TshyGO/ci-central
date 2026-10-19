@@ -232,6 +232,32 @@ test('a quote found in both the patch and the full text is one location, so a sl
   assert.equal(parsed.findings.length, 1);
   assert.equal(parsed.findings[0].line, 9);
 });
+// Review finding (2026-10-19): with the whole file supplied, a quote that also appears elsewhere in
+// the file made an off-by-one line ambiguous, and the finding was withheld although the patch alone
+// pins it. The changed hunks decide such a tie.
+test('a repeated quote with a slightly wrong line is repaired from the changed hunk when the whole file is supplied', () => {
+  const text = ['function a() {', '  if (!x) return null;', '}', '', 'function b() {', '  load();', '  const y = 1;', '  if (!x) return null;', '}'].join('\n');
+  const change = { filename: 'src/r.js', status: 'modified', additions: 1, deletions: 0,
+    patch: '@@ -6,3 +6,4 @@\n   load();\n   const y = 1;\n+  if (!x) return null;\n }', full_text: text };
+  const packed = packIncremental([change], 20000);
+  const finding = (line) => ({ summary: 's', reviewed_files: ['src/r.js'], limitations: [], findings: [{ priority: 'P2', file: 'src/r.js',
+    side: 'new', line, title: 't', confidence: 'low', trigger: 't', impact: 'i', evidence: 'if (!x) return null;', suggestion: 's' }] });
+  for (const line of [7, 9]) {
+    const parsed = parseReview(JSON.stringify(finding(line)), packed);
+    assert.equal(parsed.findings.length, 1, `line ${line}`);
+    assert.equal(parsed.findings[0].line, 8);
+  }
+  // Outside the changed hunk the whole file decides: a unique quote is repaired, a repeated one is
+  // genuinely ambiguous and withheld, as a full review (which lacks those lines) would withhold it.
+  const unique = finding(2);
+  unique.findings[0].evidence = 'function a() {';
+  assert.equal(parseReview(JSON.stringify(unique), packed).findings[0].line, 1);
+  assert.equal(parseReview(JSON.stringify(finding(3)), packed).findings.length, 0);
+});
+test('a file whose only supplied hunk is a placeholder is not inspectable material', () => {
+  const packed = packIncremental([{ filename: 'icon.png', status: 'modified', additions: 0, deletions: 0 }], 20000);
+  assert.equal(packed.coverage[0].patch_available, false);
+});
 test('when space is short the since-review patch is kept and the full text is left out and disclosed', () => {
   const packed = packIncremental([sinceReview], 300);
   assert.ok(packed.text.includes('+  persist(user);'));

@@ -226,7 +226,7 @@ for (const [name, implementation] of [
     { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
     ['Go usage limit with retry-after', 429, { 'retry-after': '48358' }, { type: 'error',
       error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' }, metadata: { workspace: 'wrk_PRIVATE', limitName: 'weekly' } },
-    { exhausted: true, window: undefined, resetInSeconds: 48358 }],
+    { exhausted: true, window: 'weekly', resetInSeconds: 48358 }],
     ['an OpenAI insufficient_quota', 429, {}, { error: { code: 'insufficient_quota', type: 'insufficient_quota',
       message: 'You exceeded your current quota, please check your plan and billing details. PRIVATE' } },
     { exhausted: true, window: undefined, resetAt: undefined }],
@@ -260,6 +260,16 @@ for (const [name, implementation] of [
       const finished = f.logs.find((entry) => entry.event === 'finished');
       assert.equal(finished.quota_exhausted ?? false, expected.exhausted);
       assert.ok(!JSON.stringify(f.logs).includes('PRIVATE'));
+    });
+  }
+  for (const [limitName, window] of [['rolling_5h', '5h'], ['7d', 'weekly'], ['24h', 'daily'], ['monthly', 'monthly']]) {
+    test(`${name}: Go's limitName ${limitName} names the ${window} window`, async (t) => {
+      const f = await fixture(t, implementation, async (_req, res) => {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '600' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' }, metadata: { workspace: 'wrk_PRIVATE', limitName } }));
+      });
+      await assert.rejects(f.invoke({ protocol: 'openai-responses', payload: { model: 'muse-spark-1.3-contributor', input: 'synthetic code', max_output_tokens: 16, store: false } }),
+        (error) => error.quotaExhausted === true && error.quotaWindow === window && !JSON.stringify(error).includes('PRIVATE'));
     });
   }
   test(`${name}: Anthropic Messages Go usage limit keeps its window from the plan metadata`, async (t) => {

@@ -56,6 +56,10 @@ test('the review state round-trips through the comment header and nowhere else',
     '## AI PR Review · Lane A · Muse', '```', line, '```'].join('\n');
   assert.equal(readState(quoted, 'A'), null);
   assert.equal(readState(body('B', line), 'B'), null, 'a state is bound to its own lane');
+  assert.equal(readState(['<!-- ai-pr-review-bot:lane-A -->', 'not the evidence line', line, '## AI PR Review'].join('\n'), 'A'), null,
+    'the record counts only under the lane\'s v2 evidence line');
+  const vendorModel = state({ model: 'vendor/model:latest@2026' });
+  assert.deepEqual(readState(body('A', encodeState(vendorModel)), 'A'), vendorModel, 'a model id with : or @ is still a model id');
 });
 
 test('a malformed or tampered state is not trusted', () => {
@@ -129,6 +133,9 @@ test('replies are the author’s and members’ words after the review, never bo
     comment('author', '2026-10-19T08:40:00Z', '/review'),
   ] });
   assert.deepEqual(replies.items.map(({ author, text }) => [author, text]), [['author', 'A1: fixed in abc'], ['maintainer', 'A2 is intended: see the README']]);
+  // A reply in the very second the previous round read the comments may not have been seen: keep it.
+  assert.deepEqual(collectReplies({ pull, since: '2026-10-19T08:00:00Z', comments: [comment('author', '2026-10-19T08:00:00Z', 'same second')] })
+    .items.map(({ text }) => text), ['same second']);
   const many = collectReplies({ pull, since: '2026-10-19T07:00:00Z', budget: 1000, excerptChars: 400,
     comments: Array.from({ length: 8 }, (_, i) => comment('author', `2026-10-19T08:0${i}:00Z`, `${i} ${'x'.repeat(600)}`)) });
   assert.ok(JSON.stringify(many.items).length <= 1300);

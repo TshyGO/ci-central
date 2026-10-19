@@ -1840,7 +1840,7 @@ check('NebulaLab: without the Lane C slot an exhausted credit says so', laneBBod
 // ---------------------------------------------------------------------------------------------
 // Incremental re-review and repeat-review skipping (2026-10-19). On NebulaLab 68% of the runs that
 // reached a model re-reviewed a PR that already had a review, each sending the whole PR again.
-const { readState } = localRequire('../review-action/src/review-incremental.js');
+const { readState, encodeState } = localRequire('../review-action/src/review-incremental.js');
 const H1 = 'a1'.repeat(20), H2 = 'b2'.repeat(20), H3 = 'c3'.repeat(20);
 const atHead = (sha, extra = {}) => ({ pulls: [{ ...pull, head: { ...pull.head, sha } }],
   context: { ...context, payload: { pull_request: { number: 42, head: { sha } } } }, ...extra });
@@ -1854,6 +1854,8 @@ const otherFile = (header = '@@ -0,0 +1,120 @@') => ({ filename: 'src/other.ts',
   patch: [header, ...Array.from({ length: 120 }, (_, i) => `+export const value${i} = compute(${i});`)].join('\n') });
 const one = (sha, parents) => ({ sha, parents: parents.map((parent) => ({ sha: parent })), commit: { message: 'change' } });
 const root = '0'.repeat(40);
+const linearCompare = (base, head, files, extra = {}) => ({ status: 'ahead', merge_base_commit: { sha: base }, total_commits: 1,
+  commits: [{ sha: head, parents: [{ sha: base }] }], files, ...extra });
 const linearTo = (sha) => [one(H1, [root]), one(sha, [H1])];
 const mergedTo = (sha) => [one(H1, [root]), one(sha, [H1, 'f'.repeat(40)])];
 const report = (content) => reply(200, JSON.stringify({ model: 'provider/x', usage: { prompt_tokens: 1 },
@@ -1908,8 +1910,8 @@ r = await scenario((call) => call.lane === 'C' || call.lane === 'A' ? reply(503,
 check('skipped lanes count as valid evidence for the quorum', !r.error && r.logs.some((line) => line.includes('Quorum gate: 2/3')));
 
 // Change 1: a small linear push is reviewed incrementally.
-const sinceH1 = { status: 'ahead', merge_base_commit: { sha: H1 }, files: [{ filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 1,
-  patch: '@@ -4,1 +4,1 @@\n-run(user);\n+run(user, tenant);' }] };
+const sinceH1 = linearCompare(H1, H2, [{ filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 1,
+  patch: '@@ -4,1 +4,1 @@\n-run(user);\n+run(user, tenant);' }]);
 const srcText = 'import x;\nguard();\nrun(user, tenant);\nend();';
 const replies = [
   { id: 101, user: { login: 'octocat', type: 'User' }, author_association: 'OWNER', created_at: '2099-01-01T00:00:00Z', body: 'A1：已改为传入租户。' },
@@ -1931,7 +1933,7 @@ for (const useBundle of [false, true]) {
     && !userText(laneA).includes('+test2();') && userText(laneA).includes('tests/a.test.ts')
     && userText(laneA).includes('"id":"A1"') && userText(laneA).includes('"title":"运行时缺少租户"')
     && systemText(laneA).includes('previous_findings') && userText(laneA).trimEnd().endsWith('a Markdown review cannot be accepted.')
-    && userText(laneA).includes('- src/a.ts: the change since the reviewed commit and its complete current text')
+    && userText(laneA).includes('What was supplied for each file changed since that commit (nothing else of these files was supplied):\n- src/a.ts: the change since the reviewed commit and its complete current text')
     && r.apiCalls.includes(`compare ${H1}...${H2}`) && r.apiCalls.includes(`content src/a.ts@${H2}`));
   check(`source/bundle ${useBundle} only the author's and members' replies since the review reach the model`,
     userText(laneA).includes('A1：已改为传入租户。')
@@ -1940,6 +1942,7 @@ for (const useBundle of [false, true]) {
   check(`source/bundle ${useBundle} the incremental comment says what it covered and records the re-check for the next round`,
     incrementalA.includes('status=valid') && incrementalA.includes('## AI PR Review · Lane A · Muse Spark 1.3 Contributor · 增量')
     && incrementalA.includes(`增量审核：只审查自上次有效审核（提交 \`${H1.slice(0, 7)}\`）以来 PR 自身的改动`)
+    && incrementalA.includes('附每个文件的完整当前文本') && incrementalA.includes('需要完整审核时评论 `/review`。')
     && incrementalA.includes('`A1` P1 · 运行时缺少租户：已修复。已传入租户')
     && readState(incrementalA, 'A')?.head === H2 && readState(incrementalA, 'A')?.mode === 'incremental'
     && readState(incrementalA, 'A')?.findings.length === 0 && readState(incrementalA, 'A')?.next === 2
@@ -1974,12 +1977,33 @@ const wideRoute = () => report({ summary: '无问题', reviewed_files: ['src/big
 r = await scenario(wideRoute, {}, atHead(H1, { files: [bigSrc('a();'), wide] }));
 const wideRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
 r = await scenario(wideRoute, {}, atHead(H2, { files: [bigSrc('b();'), wide], commits: linearTo(H2), comments: wideRoundOne,
-  compare: { [`${H1}...${H2}`]: { status: 'ahead', merge_base_commit: { sha: H1 }, files: [{ filename: 'src/big.ts', status: 'modified',
-    additions: 1, deletions: 1, patch: '@@ -1001,1 +1001,1 @@\n-a();\n+b();' }] } }, contents: { 'src/big.ts': bigText('b();') } }));
+  compare: { [`${H1}...${H2}`]: linearCompare(H1, H2, [{ filename: 'src/big.ts', status: 'modified',
+    additions: 1, deletions: 1, patch: '@@ -1001,1 +1001,1 @@\n-a();\n+b();' }]) }, contents: { 'src/big.ts': bigText('b();') } }));
 const windowedA = userText(r.captured.find(({ lane }) => lane === 'A')?.body);
 check('a changed file whose whole text is larger than the full review falls back to the full review, never to excerpts', !r.error
   && !r.captured.some(isIncremental) && windowedA.includes('+export const wide0') && !windowedA.includes('[Lines ')
   && r.logs.some((line) => line.includes('[Lane A] plan=full reason=not-smaller')));
+
+// Each lane decides against its own model budget: Lane C's 260,000 characters cannot take two
+// changed files of about 160,000 characters whole, so C reviews in full while A and B (1.2 million)
+// review incrementally. Cut to fit, C's pack would lose a whole text and still look smaller.
+const hugeText = (name) => Array.from({ length: 4000 }, (_, i) => `export const ${name}${i} = compute(${i}); // pad`).join('\n');
+const hugeSrc = (name, call) => ({ filename: `src/${name}.ts`, status: 'modified', additions: 1, deletions: 1,
+  patch: [`@@ -10,3 +10,3 @@`, ` export const ${name}8 = compute(8); // pad`, `-${call === 'a' ? 'old' : 'a'}();`, `+${call}();`,
+    ` export const ${name}10 = compute(10); // pad`].join('\n') });
+const bulk = { filename: 'src/bulk.ts', status: 'added', additions: 9000, deletions: 0,
+  patch: ['@@ -0,0 +1,9000 @@', ...Array.from({ length: 9000 }, (_, i) => `+export const bulk${i} = compute(${i}); // bulk`)].join('\n') };
+const bulkRoute = () => report({ summary: '无问题', reviewed_files: ['src/one.ts', 'src/two.ts', 'src/bulk.ts'], findings: [], limitations: [] });
+r = await scenario(bulkRoute, {}, atHead(H1, { files: [hugeSrc('one', 'a'), hugeSrc('two', 'a'), bulk] }));
+const bulkRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+const hugeSince = (name) => ({ filename: `src/${name}.ts`, status: 'modified', additions: 1, deletions: 1, patch: '@@ -11,1 +11,1 @@\n-a();\n+b();' });
+r = await scenario(bulkRoute, {}, atHead(H2, { files: [hugeSrc('one', 'b'), hugeSrc('two', 'b'), bulk], commits: linearTo(H2), comments: bulkRoundOne,
+  compare: { [`${H1}...${H2}`]: linearCompare(H1, H2, [hugeSince('one'), hugeSince('two')]) },
+  contents: { 'src/one.ts': hugeText('one'), 'src/two.ts': hugeText('two') } }));
+check('a lane whose model budget cannot take the changed files whole reviews in full while the others go incremental', !r.error
+  && hugeText('one').length > 130000 && hugeText('one').length < 200000
+  && isIncremental(r.captured.find(({ lane }) => lane === 'A')) && isIncremental(r.captured.find(({ lane }) => lane === 'B'))
+  && !isIncremental(r.captured.find(({ lane }) => lane === 'C')) && r.logs.some((line) => line.includes('[Lane C] plan=full reason=over-budget')));
 
 // After a merge from main the since-review compare would include main's changes, so each changed
 // file is sent as its whole PR change instead, and files only main touched are never sent.
@@ -1987,16 +2011,17 @@ r = await scenario(healthy, {}, atHead(H2, { files: [srcFile('run(user, tenant)'
   commits: mergedTo(H2), contents: { 'src/a.ts': srcText }, comments: roundOne }));
 check('after a main merge only files whose PR-own change differs are re-sent, each as its whole PR change', !r.error
   && r.captured.every(isIncremental) && !r.apiCalls.some((call) => call.startsWith('compare'))
-  && userText(r.captured[0].body).includes('the base branch was merged since the reviewed commit')
+  && userText(r.captured[0].body).includes('the commits since the reviewed one could not be compared on their own')
   && userText(r.captured[0].body).includes('+run(user, tenant);') && !userText(r.captured[0].body).includes('+test2();'));
 
 // Fallbacks to a full review.
 const bigFile = { filename: 'src/big.ts', status: 'added', additions: 400, deletions: 0,
   patch: `@@ -0,0 +1,400 @@\n${Array.from({ length: 400 }, (_, i) => `+line${i}();`).join('\n')}` };
 r = await scenario(healthy, {}, atHead(H3, { files: [srcFile(), testFile(), otherFile(), bigFile], commits: linearTo(H3),
-  compare: { [`${H1}...${H3}`]: { status: 'ahead', merge_base_commit: { sha: H1 }, files: [bigFile] } }, comments: roundOne }));
-check('a change since the review that is most of the PR gets a full review', !r.error && r.captured.length === 3
-  && !r.captured.some(isIncremental) && r.logs.some((line) => line.includes('[Lane A] plan=full reason=large-change')));
+  compare: { [`${H1}...${H3}`]: linearCompare(H1, H3, [bigFile]) }, comments: roundOne }));
+check('a change since the review that is most of the PR gets a full review, decided before any file text is fetched', !r.error && r.captured.length === 3
+  && !r.captured.some(isIncremental) && r.logs.some((line) => line.includes('[Lane A] plan=full reason=large-change'))
+  && !r.apiCalls.some((call) => call.startsWith('content ')));
 r = await scenario(healthy, {}, { ...linearRound(), ...manualAt(H2, '/review full') });
 check('/review full is a full pass on every lane', !r.error && r.captured.length === 3 && !r.captured.some(isIncremental)
   && r.logs.some((line) => line.includes('[Lane A] plan=full reason=manual')));
@@ -2023,6 +2048,43 @@ r = await scenario(healthy, {}, linearRound({ comments: roundOne.map(({ body }) 
 check('a record in a comment the workflow did not write is ignored', !r.error && !r.captured.some(isIncremental));
 r = await scenario(healthy, {}, linearRound({ comments: roundOne.map(({ body }) => ({ body: body.replace('"fp":"', '"fp":"zz') })) }));
 check('a corrupted record falls back to a full review', !r.error && !r.captured.some(isIncremental));
+
+// The compare is used only when its own commits show a plain fast-forward from the reviewed head:
+// a merge among them, or another merge base, sends each changed file as its whole PR change.
+for (const [label, compare] of [
+  ['a merge commit among the compared commits', linearCompare(H1, H2, sinceH1.files, { commits: [{ sha: H2, parents: [{ sha: H1 }, { sha: 'f'.repeat(40) }] }] })],
+  ['a merge base other than the reviewed head', linearCompare(H1, H2, sinceH1.files, { merge_base_commit: { sha: root } })],
+]) {
+  r = await scenario(healthy, {}, linearRound({ compare: { [`${H1}...${H2}`]: compare } }));
+  check(`${label} is not taken as the PR's own change since the review`, !r.error && r.captured.every(isIncremental)
+    && userText(r.captured.find(({ lane }) => lane === 'A').body).includes('the commits since the reviewed one could not be compared on their own')
+    && r.logs.some((line) => line.includes('[Lane A] plan=incremental') && line.includes('kind=pr')));
+}
+// A reply posted in the very second the previous round read the comments may not have been seen by it.
+const recordAt = readState(roundOne[0].body, 'A').at;
+r = await scenario(verdictA, {}, linearRound({ comments: [...roundOne, { id: 105, user: { login: 'octocat', type: 'User' },
+  author_association: 'OWNER', created_at: recordAt, body: 'REPLY AT THE CUTOFF' }] }));
+check('a reply posted as the previous round read the comments still reaches the next round', !r.error
+  && userText(r.captured.find(({ lane }) => lane === 'A').body).includes('REPLY AT THE CUTOFF'));
+// Per-file hashes are the same for every lane that reviewed a head; one lane's record losing them to
+// the size limit must not force the others into a full review.
+const withRecord = (body, lane, mutate) => { const lines = body.split(String.fromCharCode(10)); const record = readState(body, lane); mutate(record);
+  lines[2] = encodeState(record); return { body: lines.join(String.fromCharCode(10)) }; };
+const mergedRound = (comments) => atHead(H2, { files: [srcFile('run(user, tenant)', '@@ -40,3 +41,4 @@'), testFile('@@ -7,1 +9,2 @@'), otherFile()],
+  commits: mergedTo(H2), contents: { 'src/a.ts': srcText }, comments });
+r = await scenario(healthy, {}, mergedRound([withRecord(roundOne[0].body, 'A', (record) => { record.files = null; }), roundOne[1], roundOne[2]]));
+check('a lane whose record lost its per-file hashes uses those of another lane for the same head', !r.error && r.captured.every(isIncremental));
+r = await scenario(healthy, {}, mergedRound(roundOne.map(({ body }, i) => withRecord(body, 'ABC'[i], (record) => { record.files = null; }))));
+check('without any per-file hashes a merged round is reviewed in full', !r.error && !r.captured.some(isIncremental)
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=no-file-record')));
+// Only a binary file changed since the review: there is nothing to review incrementally.
+const icon = (sha) => ({ filename: 'img/icon.png', status: 'modified', additions: 0, deletions: 0, sha });
+r = await scenario(healthy, {}, atHead(H1, { files: [srcFile(), testFile(), otherFile(), icon('1'.repeat(40))] }));
+const iconRoundOne = ['A', 'B', 'C'].map((lane) => ({ body: laneComment(r, lane) }));
+r = await scenario(healthy, {}, atHead(H2, { files: [srcFile(), testFile(), otherFile(), icon('2'.repeat(40))], commits: linearTo(H2),
+  compare: { [`${H1}...${H2}`]: linearCompare(H1, H2, [icon('2'.repeat(40))]) }, comments: iconRoundOne }));
+check('a round where only a binary file changed is reviewed in full, not incrementally on nothing', !r.error && !r.captured.some(isIncremental)
+  && r.logs.some((line) => line.includes('[Lane A] plan=full reason=no-material')));
 
 // A failed round keeps the last valid record, so the next round still builds on it.
 r = await scenario((call) => call.lane === 'A' || call.model.startsWith('meta/') ? reply(503, 'unavailable') : healthy(call), {}, linearRound());

@@ -329,7 +329,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
     function packIncremental2(files, budget) {
       const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
       const prefix = (file) => `File: ${file.filename}
-Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "pr" ? " (the complete PR change to this file: the base branch was merged since the reviewed commit)" : " (change since the reviewed commit)"}
+Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "pr" ? " (its complete PR change: the commits since the reviewed one could not be compared on their own)" : " (change since the reviewed commit)"}
 `;
       const plans = ordered.map((file) => ({
         file,
@@ -359,7 +359,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "p
         status: file.status,
         supplied_hunks: selected.length,
         total_hunks: patch.length + (text2 ? 1 : 0),
-        patch_available: Boolean(file.patch || text2),
+        patch_available: Boolean(file.patch) || context.length > 0,
         mode: context.length ? "patch+head_text" : "patch",
         ranges: selected.flatMap((hunk) => hunk.ranges),
         old_ranges: selected.flatMap((hunk) => hunk.old_ranges),
@@ -595,13 +595,19 @@ var require_review_report = __commonJS({
         const side = Object.hasOwn(sideNames, rawSide) ? sideNames[rawSide] : rawSide;
         if (!["new", "old"].includes(side) || !Number.isSafeInteger(finding.line) || finding.line < 1 || !(side === "old" ? file.old_ranges : file.ranges).some(([start, end]) => finding.line >= start && finding.line <= end)) throw new Error("Review contract: line is outside supplied hunks.");
         const evidence = plain(finding.evidence, "evidence");
-        const locations = [...new Map(file.hunks.flatMap((hunk) => {
+        const locate = (hunks) => [...new Map(hunks.flatMap((hunk) => {
           const ranges = side === "old" ? hunk.old_ranges : hunk.ranges;
           if (!ranges.some(([start, end]) => finding.line >= start && finding.line <= end)) return [];
           return quoteLocations(side === "old" ? hunk.old_code : hunk.new_code, ranges[0][0], evidence);
         }).map((location) => [location.join(":"), location])).values()];
+        let locations = locate(file.hunks);
         if (!locations.length) throw new Error("Review contract: code quote was not supplied on that side of the hunk.");
-        const aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
+        let aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
+        if (!aligned && locations.length !== 1) {
+          const inChanges = locate(file.hunks.filter((hunk) => hunk.full_text !== true));
+          if (inChanges.length === 1) locations = inChanges;
+          aligned = void 0;
+        }
         if (!aligned && locations.length !== 1) throw new Error("Review contract: code quote location is ambiguous.");
         const line = aligned ? finding.line : locations[0][0];
         const checked = {
@@ -876,7 +882,7 @@ var require_review_incremental = __commonJS({
     var STATE_LIMIT = 24e3;
     var SHA = /^[0-9a-f]{40}$/;
     var ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
-    var MODEL_ID = /^[A-Za-z0-9._/-]{1,120}$/;
+    var MODEL_ID = /^[\w.:@/+-]{1,200}$/;
     var MAX_STATE_FINDINGS = 100;
     var MAX_FILE_HASHES = 600;
     var FILE_HASH_BYTES = 14;
@@ -1004,7 +1010,7 @@ var require_review_incremental = __commonJS({
         ...comments.map((item) => ({ item, at: item?.created_at })),
         ...reviews.map((item) => ({ item, at: item?.submitted_at })),
         ...reviewComments.map((item) => ({ item, at: item?.created_at }))
-      ].filter(({ item, at }) => item && typeof item.body === "string" && !isBot(item.user) && typeof item.user?.login === "string" && (item.user.login === author || MEMBER_ROLES.has(item.author_association)) && Number.isFinite(Date.parse(at)) && Date.parse(at) > after).map(({ item, at }) => ({
+      ].filter(({ item, at }) => item && typeof item.body === "string" && !isBot(item.user) && typeof item.user?.login === "string" && (item.user.login === author || MEMBER_ROLES.has(item.author_association)) && Number.isFinite(Date.parse(at)) && Date.parse(at) >= after).map(({ item, at }) => ({
         author: item.user.login,
         role: [MEMBER_ROLES.has(item.author_association) ? item.author_association : "", item.user.login === author ? "PR author" : ""].filter(Boolean).join(", "),
         at,
@@ -1035,10 +1041,10 @@ var require_review_incremental = __commonJS({
       if (firstPassDue) return { mode: "full", reason: "first-pass-due" };
       return { mode: "incremental", reason: "changed" };
     }
-    var INCREMENTAL_SHARE_LIMIT = 0.5;
+    var INCREMENTAL_SHARE_LIMIT2 = 0.5;
     function chooseIncremental2({ changedFiles, sincePatchChars, fullPatchChars, materialChars, fullMaterialChars, missingText = 0, omitted = 0 }) {
       if (!changedFiles) return { incremental: false, reason: "nothing-changed" };
-      if (sincePatchChars > INCREMENTAL_SHARE_LIMIT * fullPatchChars) return { incremental: false, reason: "large-change" };
+      if (sincePatchChars > INCREMENTAL_SHARE_LIMIT2 * fullPatchChars) return { incremental: false, reason: "large-change" };
       if (missingText) return { incremental: false, reason: "text-unavailable" };
       if (omitted) return { incremental: false, reason: "over-budget" };
       if (materialChars > fullMaterialChars) return { incremental: false, reason: "not-smaller" };
@@ -1078,7 +1084,7 @@ var require_review_incremental = __commonJS({
       planLane: planLane2,
       chooseIncremental: chooseIncremental2,
       nextFindings: nextFindings2,
-      INCREMENTAL_SHARE_LIMIT
+      INCREMENTAL_SHARE_LIMIT: INCREMENTAL_SHARE_LIMIT2
     };
   }
 });
@@ -1097,7 +1103,8 @@ var {
   collectReplies,
   planLane,
   chooseIncremental,
-  nextFindings
+  nextFindings,
+  INCREMENTAL_SHARE_LIMIT
 } = require_review_incremental();
 var DIRECT_GO_MODELS = /* @__PURE__ */ new Set(["kimi-k2.7-code", "glm-5.3", "hy3"]);
 var QUOTA_WINDOWS = { "5h": ["5-hour", "5 \u5C0F\u65F6"], weekly: ["weekly", "\u5468"], monthly: ["monthly", "\u6708"], daily: ["daily", "\u65E5"] };
@@ -1179,13 +1186,13 @@ async function runReview({
     console.log(`Skip stale review before context collection: event=${eventHeadSha.slice(0, 7)} current=${reviewHeadSha.slice(0, 7)}.`);
     return;
   }
+  const contextAt = new Date(Date.now() - 6e4).toISOString().replace(/\.\d{3}Z$/, "Z");
   const existingComments = await github.paginate(github.rest.issues.listComments, {
     owner,
     repo,
     issue_number: pullNumber,
     per_page: 100
   });
-  const contextAt = (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
   const evidencePattern = /<!-- ai-pr-review-evidence:v2 lane=([A-C]) head=([0-9a-f]{40}) workflow=([0-9a-f]{40}) status=(valid|diagnostic|partial) -->/i;
   const reusableLaneIds = /* @__PURE__ */ new Set();
   const laneRecords = /* @__PURE__ */ new Map();
@@ -1389,6 +1396,7 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
   const incrementalContexts = /* @__PURE__ */ new Map();
   const FULL_TEXT_FILES = 40;
   const FULL_TEXT_MAX_BYTES = 2e5;
+  const recordedFiles = (head) => lanes.map((lane) => laneRecords.get(lane.id)?.state).find((state) => state?.head === head && typeof state.files === "string")?.files ?? null;
   async function sinceReviewMaterial(state) {
     const scope = sinceReviewScope({ commits: prCommits, reviewedHead: state.head });
     let changes = null;
@@ -1396,7 +1404,8 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
     if (scope === "linear") {
       try {
         const { data } = await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${state.head}...${reviewHeadSha}`, per_page: 100 });
-        if (data?.status === "ahead" && data.merge_base_commit?.sha === state.head && Array.isArray(data.files) && data.files.length < 300) {
+        const fastForward = data?.status === "ahead" && data.merge_base_commit?.sha === state.head && Array.isArray(data.commits) && data.commits.length === data.total_commits && data.commits.every((commit) => Array.isArray(commit?.parents) && commit.parents.length === 1);
+        if (fastForward && Array.isArray(data.files) && data.files.length < 300) {
           changes = data.files.map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch, scope: "since" }));
         }
       } catch {
@@ -1404,13 +1413,22 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
       }
     }
     if (!changes) {
-      const diff = changedSince(state.files, identity);
+      const diff = changedSince(recordedFiles(state.head), identity);
       if (!diff) return { reason: "no-file-record" };
       dropped = diff.dropped;
       changes = files.filter((file) => diff.changed.includes(file.filename)).map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch, scope: "pr" }));
     }
+    const changed = new Set(changes.map(({ filename }) => filename));
+    return {
+      changes,
+      kind: changes.some(({ scope: kind }) => kind === "pr") ? "pr" : "since",
+      dropped,
+      unchanged: files.map(({ filename }) => filename).filter((filename) => !changed.has(filename))
+    };
+  }
+  async function fetchTexts(since) {
     let fetched = 0;
-    for (const change of changes) {
+    for (const change of since.changes) {
       if (change.status === "removed" || fetched >= FULL_TEXT_FILES) continue;
       fetched++;
       try {
@@ -1420,16 +1438,9 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
           if (!text.includes("\0")) change.full_text = text;
         }
       } catch {
-        console.log("A changed file's current text is unavailable; its since-review patch is supplied without it.");
+        console.log("A changed file's current text is unavailable; the lane will review in full.");
       }
     }
-    const changed = new Set(changes.map(({ filename }) => filename));
-    return {
-      changes,
-      kind: changes.some(({ scope: kind }) => kind === "pr") ? "pr" : "since",
-      dropped,
-      unchanged: files.map(({ filename }) => filename).filter((filename) => !changed.has(filename))
-    };
   }
   const previousForPrompt = (findings) => findings.map(({ id, status, priority, file, side, line, head, title, trigger, impact, evidence, suggestion, note }) => ({
     id,
@@ -1484,7 +1495,7 @@ ${issueContext}` : "Referenced issues: none.",
       omitted_issue_references: issues.omitted_references
     }),
     "",
-    incremental.since.kind === "pr" ? "Changed files (the base branch was merged since the reviewed commit, so each file whose PR change differs is given as its complete PR change), each followed by its complete current text:" : "Changes since the reviewed commit (the PR's own commits only), each followed by the file's complete current text:",
+    incremental.since.kind === "pr" ? "Changed files (the commits since the reviewed one could not be compared on their own, for example after a merge or a rebase, so each file whose PR change differs is given as its complete PR change), each followed by its complete current text:" : "Changes since the reviewed commit (the PR's own commits only), each followed by the file's complete current text:",
     pack.text || "[No diff available]",
     "",
     `End of supplied material. Reply with only the single JSON object defined by ${PROMPT_VERSION} in the system message, including previous_findings; a Markdown review cannot be accepted.`
@@ -1515,7 +1526,7 @@ ${issueContext}` : "Referenced issues: none.",
     "not-smaller": "\u6539\u52A8\u6587\u4EF6\u7684\u5B8C\u6574\u6587\u672C\u6BD4\u5B8C\u6574\u5BA1\u6838\u8FD8\u5927\uFF0C\u5B8C\u6574\u5BA1\u6838",
     "text-unavailable": "\u6709\u6539\u52A8\u6587\u4EF6\u8BFB\u4E0D\u5230\u5B8C\u6574\u6587\u672C\uFF0C\u5B8C\u6574\u5BA1\u6838",
     "over-budget": "\u6539\u52A8\u6587\u4EF6\u7684\u5B8C\u6574\u6587\u672C\u8D85\u51FA\u6A21\u578B\u9884\u7B97\uFF0C\u5B8C\u6574\u5BA1\u6838",
-    "no-file-record": "\u5408\u5E76\u540E\u65E0\u6CD5\u9010\u6587\u4EF6\u6BD4\u5BF9\uFF0C\u5B8C\u6574\u5BA1\u6838"
+    "no-file-record": "\u65E0\u6CD5\u5355\u72EC\u6BD4\u8F83\u6B64\u540E\u7684\u63D0\u4EA4\uFF0C\u4E5F\u6CA1\u6709\u9010\u6587\u4EF6\u8BB0\u5F55\uFF0C\u5B8C\u6574\u5BA1\u6838"
   };
   for (const lane of lanes) {
     const plan = plans.get(lane.id);
@@ -1532,8 +1543,9 @@ ${issueContext}` : "Referenced issues: none.",
       const previousJson = JSON.stringify(previousForPrompt(state.findings));
       const repliesJson = JSON.stringify(replies.items);
       const fullPack = fullContextFor(lane.primary).pack;
-      const sincePack = since.changes ? packIncremental(since.changes, Math.min(...[lane.primary, ...lane.fallbacks].map(budgetOf))) : null;
       const sincePatchChars = since.changes ? since.changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0) : 0;
+      if (since.changes?.length && sincePatchChars <= INCREMENTAL_SHARE_LIMIT * fullPatchChars) await (since.texts ??= fetchTexts(since));
+      const sincePack = since.changes ? packIncremental(since.changes, Math.min(...[lane.primary, ...lane.fallbacks].map(budgetOf))) : null;
       const missingText = since.changes ? since.changes.filter((change) => change.status !== "removed" && typeof change.patch === "string" && change.patch && typeof change.full_text !== "string").length : 0;
       const decision = !since.changes ? { incremental: false, reason: since.reason } : chooseIncremental({
         changedFiles: since.changes.length,
@@ -2092,7 +2104,7 @@ ${fence}
     const incremental = status === "valid" ? incrementalContexts.get(lane.id) : void 0;
     if (incremental) {
       const { state, since, replies } = incremental;
-      banner.push(`> \u267B\uFE0F \u589E\u91CF\u5BA1\u6838\uFF1A\u53EA\u5BA1\u67E5\u81EA\u4E0A\u6B21\u6709\u6548\u5BA1\u6838\uFF08\u63D0\u4EA4 \`${state.head.slice(0, 7)}\`\uFF09\u4EE5\u6765 PR \u81EA\u8EAB\u7684\u6539\u52A8\uFF0C\u5171 ${since.changes.length} \u4E2A\u6587\u4EF6${since.kind === "pr" ? "\uFF08\u671F\u95F4\u5408\u5E76\u8FC7\u5176\u4ED6\u5206\u652F\uFF0C\u8FD9\u4E9B\u6587\u4EF6\u6309\u5B8C\u6574 PR \u6539\u52A8\u63D0\u4F9B\uFF09" : "\uFF08\u4E0D\u542B\u4ECE\u5176\u4ED6\u5206\u652F\u5408\u5165\u7684\u6539\u52A8\uFF09"}\uFF0C\u5E76\u590D\u6838\u4E0A\u4E00\u8F6E\u7684 ${state.findings.length} \u6761\u53D1\u73B0${replies.items.length ? `\u4E0E ${replies.items.length} \u6761\u4F5C\u8005\u6216\u7EF4\u62A4\u8005\u56DE\u590D` : ""}\u3002\u9700\u8981\u5B8C\u6574\u5BA1\u6838\u65F6\u8BC4\u8BBA \`/review full\`\u3002`);
+      banner.push(`> \u267B\uFE0F \u589E\u91CF\u5BA1\u6838\uFF1A\u53EA\u5BA1\u67E5\u81EA\u4E0A\u6B21\u6709\u6548\u5BA1\u6838\uFF08\u63D0\u4EA4 \`${state.head.slice(0, 7)}\`\uFF09\u4EE5\u6765 PR \u81EA\u8EAB\u7684\u6539\u52A8\uFF0C\u5171 ${since.changes.length} \u4E2A\u6587\u4EF6\uFF0C\u9644\u6BCF\u4E2A\u6587\u4EF6\u7684\u5B8C\u6574\u5F53\u524D\u6587\u672C${since.kind === "pr" ? "\uFF08\u6B64\u540E\u7684\u63D0\u4EA4\u65E0\u6CD5\u5355\u72EC\u6BD4\u8F83\uFF0C\u4F8B\u5982\u671F\u95F4\u5408\u5E76\u6216\u53D8\u57FA\u8FC7\uFF0C\u8FD9\u4E9B\u6587\u4EF6\u6309\u5B8C\u6574 PR \u6539\u52A8\u63D0\u4F9B\uFF09" : "\uFF08\u4E0D\u542B\u4ECE\u5176\u4ED6\u5206\u652F\u5408\u5165\u7684\u6539\u52A8\uFF09"}\uFF0C\u5E76\u590D\u6838\u4E0A\u4E00\u8F6E\u7684 ${state.findings.length} \u6761\u53D1\u73B0${replies.items.length ? `\u4E0E ${replies.items.length} \u6761\u4F5C\u8005\u6216\u7EF4\u62A4\u8005\u56DE\u590D` : ""}\u3002\u9700\u8981\u5B8C\u6574\u5BA1\u6838\u65F6\u8BC4\u8BBA \`/review\`\u3002`);
     }
     if (banner.length) banner.push("");
     const record = status === "valid" && result.record ? {

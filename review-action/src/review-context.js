@@ -94,7 +94,7 @@ function fullTextHunk(file) {
 function packIncremental(files, budget) {
   const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
   const prefix = (file) => `File: ${file.filename}\nStatus: ${file.status}; +${file.additions} -${file.deletions}`
-    + `${file.scope === 'pr' ? ' (the complete PR change to this file: the base branch was merged since the reviewed commit)' : ' (change since the reviewed commit)'}\n`;
+    + `${file.scope === 'pr' ? ' (its complete PR change: the commits since the reviewed one could not be compared on their own)' : ' (change since the reviewed commit)'}\n`;
   const plans = ordered.map((file) => ({ file, patch: hunks({ filename: file.filename, patch: file.patch }),
     text: typeof file.full_text === 'string' ? fullTextHunk(file) : null, context: [], selected: [] }));
   let used = 0;
@@ -114,7 +114,7 @@ function packIncremental(files, budget) {
   }
   const blocks = plans.filter((plan) => plan.selected.length).map((plan) => prefix(plan.file) + plan.selected.map((hunk) => hunk.text).join('\n'));
   const coverage = plans.map(({ file, patch, text, context, selected }) => ({ file: file.filename, status: file.status, supplied_hunks: selected.length,
-    total_hunks: patch.length + (text ? 1 : 0), patch_available: Boolean(file.patch || text),
+    total_hunks: patch.length + (text ? 1 : 0), patch_available: Boolean(file.patch) || context.length > 0,
     mode: context.length ? 'patch+head_text' : 'patch',
     ranges: selected.flatMap((hunk) => hunk.ranges), old_ranges: selected.flatMap((hunk) => hunk.old_ranges),
     hunks: selected.map(({ text: hunkText, ...evidence }) => evidence), code: selected.flatMap((hunk) => hunk.code) }));

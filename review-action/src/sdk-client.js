@@ -85,10 +85,14 @@ function usageCounts(usage) {
 // Command Code answers it as 429 RATE_LIMITED and says "weekly usage limit ... resets at <time>"
 // only in the message; Go names a *UsageLimitError and puts the wait in retry-after. Only a
 // boolean, a closed-vocabulary window and a checked timestamp leave; never the message itself.
-const QUOTA_WINDOWS = [['5h', /\b(?:5|five)[- ]?h(?:ou)?rs?\b/i], ['weekly', /\bweek(?:ly)?\b|\b7[- ]day\b/i],
-  ['monthly', /\bmonth(?:ly)?\b/i], ['daily', /\bdaily\b|\b24[- ]?h(?:ou)?rs?\b/i]];
+// Long and short forms alike: "5-hour", "5 hours", "5h", "rolling_5h"; "weekly", "7-day", "7d".
+const QUOTA_WINDOWS = [['5h', /\b(?:5|five)[- ]?h(?:(?:ou)?rs?)?\b/i], ['weekly', /\bweek(?:ly)?\b|\b7[- ]?d(?:ays?)?\b/i],
+  ['monthly', /\bmonth(?:ly)?\b|\b30[- ]?d(?:ays?)?\b/i], ['daily', /\bdaily\b|\b24[- ]?h(?:(?:ou)?rs?)?\b/i]];
 const QUOTA_RESET_HORIZON_MS = 45 * 86400000;
-function planQuota(error, providerError, body) {
+// Go puts the plan window in a top-level metadata.limitName that the OpenAI SDK drops from its error
+// (it keeps only body.error), so the client reads that one field from the raw error body.
+const ERROR_BODY_PEEK_BYTES = 65536;
+function planQuota(error, providerError, body, peekedLimitName) {
   if (![402, 403, 429].includes(error?.status)) return { exhausted: false };
   const words = [providerError?.message, error?.message].filter((value) => typeof value === 'string')
     .map((value) => value.slice(0, 4000)).join('\n');
@@ -97,7 +101,8 @@ function planQuota(error, providerError, body) {
   const exhausted = named || /\busage limit\b/i.test(words) || /insufficient[_ ]quota|exceeded your current quota/i.test(words)
     || /\bquota\b[^.\n]{0,60}\b(?:exhausted|exceeded|reached|used up|depleted)\b/i.test(words);
   if (!exhausted) return { exhausted: false };
-  const limitName = typeof body?.metadata?.limitName === 'string' ? body.metadata.limitName.replace(/[_-]/g, ' ') : '';
+  const rawLimitName = typeof body?.metadata?.limitName === 'string' ? body.metadata.limitName : peekedLimitName;
+  const limitName = typeof rawLimitName === 'string' ? rawLimitName.slice(0, 80).replace(/[_-]/g, ' ') : '';
   // The word right before "usage limit" names the window; a later "resets in 5 hours" does not.
   const statedWindow = /([\w-]+)\s+(?:usage\s+)?limit\b/i.exec(words)?.[1] ?? '';
   const window = [limitName, statedWindow, words]
@@ -210,6 +215,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
   let dispatcher;
   let content = '';
   let usage;
+  let peekedLimitName;
   const progressTimer = setInterval(() => {
     timing.elapsed_ms = Date.now() - started;
     report({ ...timing, event: 'progress' });
@@ -262,6 +268,27 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
       timing.headers_ms = Date.now() - started;
       timing.status = response.status;
       report({ ...timing, event: 'headers' });
+      if (response.status >= 400 && response.body) {
+        // An error body is small and final. A bounded copy is read here so that Go's plan window
+        // (metadata.limitName) survives the SDK; only that one short field is kept.
+        const reader = response.body.getReader();
+        const chunks = [];
+        let size = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+          size += value.byteLength;
+          if (size >= ERROR_BODY_PEEK_BYTES) { reader.cancel().catch(() => {}); break; }
+        }
+        const text = Buffer.concat(chunks).subarray(0, ERROR_BODY_PEEK_BYTES).toString('utf8');
+        try {
+          const limitName = JSON.parse(text)?.metadata?.limitName;
+          if (typeof limitName === 'string') peekedLimitName = limitName.slice(0, 80);
+        } catch { /* Not JSON: there is no plan metadata to keep. */ }
+        timing.bytes += size;
+        return new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers });
+      }
       // Bound the raw bytes, including malformed/unframed SSE, before the SDK
       // decoder buffers them, and record how the body itself ended. Framing and
       // JSON parsing remain the SDK's job.
@@ -495,7 +522,7 @@ return async function requestChatCompletion({ apiKey, baseURL, payload, signal, 
     sanitized.creditExhausted = sanitized.status === 402 || providerError?.type === 'billing_error'
       || /credit balance is too low/i.test(typeof providerError?.message === 'string' ? providerError.message : '');
     // The Anthropic SDK keeps the whole error body, where Go adds the plan metadata.
-    const quota = planQuota(error, providerError, error.error);
+    const quota = planQuota(error, providerError, error.error, peekedLimitName);
     sanitized.quotaExhausted = quota.exhausted;
     sanitized.quotaWindow = quota.window;
     sanitized.quotaResetAt = quota.resetAt;

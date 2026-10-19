@@ -129,13 +129,21 @@ function parseReview(text, context, { previous } = {}) {
     const evidence = plain(finding.evidence, 'evidence');
     // An incremental review supplies a changed hunk and the whole file it sits in, so the same
     // place can be found twice; it is still one place.
-    const locations = [...new Map(file.hunks.flatMap(hunk => {
+    const locate = (hunks) => [...new Map(hunks.flatMap(hunk => {
       const ranges = side === 'old' ? hunk.old_ranges : hunk.ranges;
       if (!ranges.some(([start, end]) => finding.line >= start && finding.line <= end)) return [];
       return quoteLocations(side === 'old' ? hunk.old_code : hunk.new_code, ranges[0][0], evidence);
     }).map((location) => [location.join(':'), location])).values()];
+    let locations = locate(file.hunks);
     if (!locations.length) throw new Error('Review contract: code quote was not supplied on that side of the hunk.');
-    const aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
+    let aligned = locations.find(([start, end]) => finding.line >= start && finding.line <= end);
+    // A quote repeated elsewhere in a whole supplied file must not make a slightly wrong line
+    // ambiguous when the changed hunks alone pin it, as they would in a full review.
+    if (!aligned && locations.length !== 1) {
+      const inChanges = locate(file.hunks.filter((hunk) => hunk.full_text !== true));
+      if (inChanges.length === 1) locations = inChanges;
+      aligned = undefined;
+    }
     if (!aligned && locations.length !== 1) throw new Error('Review contract: code quote location is ambiguous.');
     const line = aligned ? finding.line : locations[0][0];
     const checked = { priority, file: finding.file, line, reported_line: line !== finding.line ? finding.line : undefined,

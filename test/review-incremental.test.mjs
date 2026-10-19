@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const incremental = require('../review-action/src/review-incremental.js');
 const { diffIdentity, encodeState, readState, changedSince, sinceReviewScope, collectReplies, planLane,
-  chooseIncremental, nextFindings } = incremental;
+  chooseIncremental, nextFindings, sinceLines } = incremental;
 
 const head = 'a'.repeat(40);
 const older = 'b'.repeat(40);
@@ -108,6 +108,21 @@ test('only files whose PR-own change differs since the review are reported as ch
     patch('src/b.js', '@@ -1 +1 @@\n-a\n+c'), patch('src/added.js', '@@ -0,0 +1 @@\n+z', { status: 'added' })]);
   assert.deepEqual(changedSince(reviewed.files, now), { changed: ['src/added.js', 'src/b.js'], dropped: 1 });
   assert.equal(changedSince(null, now), null, 'no recorded file hashes means no file-level comparison');
+});
+
+// ci-central#72 review: a linear round still sends each changed file's whole PR change, as a full
+// review shows it, and names the lines the PR's own commits changed since the reviewed one, in the
+// current text's numbering. A replacement is a rewrite; only a bare removal is named as one.
+test('the lines changed since the reviewed commit are named in the current text\'s numbering', () => {
+  assert.equal(sinceLines('@@ -2,7 +2,8 @@ fn\n a\n b\n c\n-d\n+D\n+E\n f\n g\n h'), 'added or rewritten lines 5-6');
+  assert.equal(sinceLines('@@ -1,4 +1,3 @@\n a\n-b\n c\n d\n@@ -20,3 +19,4 @@\n x\n+y\n z\n w\n\\ No newline at end of file'),
+    'added or rewritten lines 20; lines removed after line 1');
+  assert.equal(sinceLines('@@ -1,3 +1,4 @@\n a\n+b\n c\n+d'), 'added or rewritten lines 2, 4');
+  assert.equal(sinceLines('@@ -1,2 +1,1 @@\n a\n-b'), 'lines removed after line 1');
+  assert.equal(sinceLines(undefined), '');
+  assert.equal(sinceLines('@@ -1 +1 @@\n a'), '');
+  const many = ['@@ -1,70 +1,105 @@', ...Array.from({ length: 35 }, (_, i) => [` c${i}`, `+n${i}`, ` d${i}`]).flat()].join('\n');
+  assert.equal(sinceLines(many), `added or rewritten lines ${Array.from({ length: 30 }, (_, i) => 3 * i + 2).join(', ')} and 5 more ranges`);
 });
 
 const commit = (sha, parents = 1) => ({ sha, parents: Array.from({ length: parents }, (_, i) => ({ sha: `${i}`.repeat(40) })) });

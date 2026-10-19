@@ -329,7 +329,7 @@ Status: ${file.status}; +${file.additions} -${file.deletions}
     function packIncremental2(files, budget) {
       const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
       const prefix = (file) => `File: ${file.filename}
-Status: ${file.status}; +${file.additions} -${file.deletions}${file.scope === "pr" ? " (its complete PR change: the commits since the reviewed one could not be compared on their own)" : " (change since the reviewed commit)"}
+Status: ${file.status}; +${file.additions} -${file.deletions} (its complete PR change${file.scope === "pr" ? ": the commits since the reviewed one could not be compared on their own" : file.since ? `; since the reviewed commit: ${file.since}` : ""})
 `;
       const plans = ordered.map((file) => ({
         file,
@@ -478,7 +478,7 @@ var require_review_report = __commonJS({
     };
     var incrementalSchema = { ...schema, previous_findings: [{ id: "A1", status: "still_present", reason: "\u5BF9\u7167\u5F53\u524D\u4EE3\u7801\u4E0E\u56DE\u590D\u7684\u590D\u6838\u7406\u7531" }] };
     var incrementalContract = [
-      "This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round's findings, replies the PR author or maintainers posted since, the PR's own changes since that commit, and the complete current text of the files those changes touch.",
+      "This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round's findings, replies the PR author or maintainers posted since, and every file the pull request has changed since that commit, each as its complete PR change and its complete current text; where the commits since then can be told apart, the lines they changed are named with the file.",
       "Re-check every previous finding against the current code and the replies, and give each one a verdict in previous_findings with status fixed, still_present, answered or unclear. Use answered only when a reply gives concrete evidence that holds against the current code; an assertion without evidence is not an answer.",
       "Do not report again, as a new finding, an issue that was answered with evidence, unless the new code contradicts that answer; then mark it still_present and say why.",
       "The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing. When a change could affect code in files that were not supplied (callers, implementations, tests, configuration), name those files and the risk in limitations instead of assuming they still fit.",
@@ -524,7 +524,7 @@ var require_review_report = __commonJS({
         const status = VERDICTS[typeof item.status === "string" ? item.status.trim().toLowerCase() : ""];
         if (!status) continue;
         const reason = typeof item.reason === "string" ? item.reason.trim().slice(0, 600) : "";
-        given.set(item.id, { id: item.id, status: status === "answered" && !reason ? "unclear" : status, reason });
+        given.set(item.id, { id: item.id, status: ["fixed", "answered"].includes(status) && !reason ? "unclear" : status, reason });
       }
       const verdicts = previous.map((finding) => given.get(finding.id) ?? { id: finding.id, status: "unclear", reason: "" });
       const unanswered = previous.filter((finding) => finding.status === "open" && !given.has(finding.id)).length;
@@ -1100,6 +1100,41 @@ var require_review_incremental = __commonJS({
         ...open.length < allOpen.length ? { lossy: true } : {}
       };
     }
+    var SINCE_RANGES_SHOWN = 30;
+    function sinceLines2(patch) {
+      if (typeof patch !== "string") return "";
+      const added = [];
+      const removedAfter = [];
+      let line = 0;
+      let removal = null;
+      const settle = () => {
+        if (removal !== null && removedAfter.at(-1) !== removal) removedAfter.push(removal);
+        removal = null;
+      };
+      for (const text of patch.split("\n")) {
+        const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(text);
+        if (header) {
+          settle();
+          line = Number(header[1]) + (header[2] === "0" ? 1 : 0);
+        } else if (text.startsWith("+")) {
+          removal = null;
+          if (added.at(-1)?.[1] === line - 1) added.at(-1)[1] = line;
+          else added.push([line, line]);
+          line++;
+        } else if (text.startsWith("-")) {
+          removal ??= line - 1;
+        } else if (!text.startsWith("\\")) {
+          settle();
+          line++;
+        }
+      }
+      settle();
+      const list = (items, format, noun) => items.slice(0, SINCE_RANGES_SHOWN).map(format).join(", ") + (items.length > SINCE_RANGES_SHOWN ? ` and ${items.length - SINCE_RANGES_SHOWN} more ${noun}` : "");
+      return [
+        added.length ? `added or rewritten lines ${list(added, ([start, end]) => start === end ? `${start}` : `${start}-${end}`, "ranges")}` : "",
+        removedAfter.length ? `lines removed after line ${list(removedAfter, String, "places")}` : ""
+      ].filter(Boolean).join("; ");
+    }
     module2.exports = {
       STATE_VERSION,
       diffIdentity: diffIdentity2,
@@ -1111,6 +1146,7 @@ var require_review_incremental = __commonJS({
       planLane: planLane2,
       chooseIncremental: chooseIncremental2,
       nextFindings: nextFindings2,
+      sinceLines: sinceLines2,
       INCREMENTAL_SHARE_LIMIT: INCREMENTAL_SHARE_LIMIT2
     };
   }
@@ -1131,6 +1167,7 @@ var {
   planLane,
   chooseIncremental,
   nextFindings,
+  sinceLines,
   INCREMENTAL_SHARE_LIMIT
 } = require_review_incremental();
 var DIRECT_GO_MODELS = /* @__PURE__ */ new Set(["kimi-k2.7-code", "glm-5.3", "hy3"]);
@@ -1428,12 +1465,19 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
     const scope = sinceReviewScope({ commits: prCommits, reviewedHead: state.head });
     let changes = null;
     let dropped = 0;
+    let sinceChars = 0;
     if (scope === "linear") {
       try {
         const { data } = await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${state.head}...${reviewHeadSha}`, per_page: 100 });
         const fastForward = data?.status === "ahead" && data.merge_base_commit?.sha === state.head && Array.isArray(data.commits) && data.commits.length === data.total_commits && data.commits.every((commit) => Array.isArray(commit?.parents) && commit.parents.length === 1);
         if (fastForward && Array.isArray(data.files) && data.files.length < 300) {
-          changes = data.files.map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch, scope: "since" }));
+          const own = new Map(files.map((file) => [file.filename, file]));
+          sinceChars = data.files.reduce((sum, file) => sum + (file.patch?.length ?? 0), 0);
+          dropped = data.files.filter(({ filename }) => !own.has(filename)).length;
+          changes = data.files.filter(({ filename }) => own.has(filename)).map(({ filename, patch }) => {
+            const { status, additions, deletions, patch: whole } = own.get(filename);
+            return { filename, status, additions, deletions, patch: whole, scope: "since", since: sinceLines(patch) };
+          });
         }
       } catch {
         console.log(`Compare ${state.head.slice(0, 7)}...${reviewHeadSha.slice(0, 7)} is unavailable; using the recorded per-file changes.`);
@@ -1444,12 +1488,14 @@ ${options.issueText ?? issueContext}` : "Referenced issues: none.",
       if (!diff) return { reason: "no-file-record" };
       dropped = diff.dropped;
       changes = files.filter((file) => diff.changed.includes(file.filename)).map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch, scope: "pr" }));
+      sinceChars = changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0);
     }
     const changed = new Set(changes.map(({ filename }) => filename));
     return {
       changes,
       kind: changes.some(({ scope: kind }) => kind === "pr") ? "pr" : "since",
       dropped,
+      sinceChars,
       unchanged: files.map(({ filename }) => filename).filter((filename) => !changed.has(filename))
     };
   }
@@ -1510,7 +1556,7 @@ ${issueContext}` : "Referenced issues: none.",
     ...incremental.since.dropped ? [`Files the previous round reviewed that this PR no longer changes: ${incremental.since.dropped}.`] : [],
     "",
     "What was supplied for each file changed since that commit (nothing else of these files was supplied):",
-    ...pack.coverage.map((file) => `- ${file.file}: ${file.mode === "patch+head_text" ? `${incremental.since.kind === "pr" ? "its complete PR change" : "the change since the reviewed commit"} and its complete current text` : file.status === "removed" ? "deleted; only the removed lines are shown" : "no text to show (binary, rename only or unavailable)"}`),
+    ...pack.coverage.map((file) => `- ${file.file}: ${file.mode === "patch+head_text" ? "its complete PR change and its complete current text" : file.status === "removed" ? "deleted; only the removed lines are shown" : "no text to show (binary, rename only or unavailable)"}`),
     "",
     "Coverage manifest (untrusted metadata; omitted material was not inspected):",
     JSON.stringify({
@@ -1522,7 +1568,7 @@ ${issueContext}` : "Referenced issues: none.",
       omitted_issue_references: issues.omitted_references
     }),
     "",
-    incremental.since.kind === "pr" ? "Changed files (the commits since the reviewed one could not be compared on their own, for example after a merge or a rebase, so each file whose PR change differs is given as its complete PR change), each followed by its complete current text:" : "Changes since the reviewed commit (the PR's own commits only), each followed by the file's complete current text:",
+    incremental.since.kind === "pr" ? "Changed files (the commits since the reviewed one could not be compared on their own, for example after a merge or a rebase, so each file whose PR change differs is given as its complete PR change), each followed by its complete current text:" : "Files the PR's own commits changed since the reviewed commit, each as its complete PR change (as a full review shows it, with the lines changed since that commit named in its header), followed by the file's complete current text:",
     pack.text || "[No diff available]",
     "",
     `End of supplied material. Reply with only the single JSON object defined by ${PROMPT_VERSION} in the system message, including previous_findings; a Markdown review cannot be accepted.`
@@ -1571,7 +1617,7 @@ ${issueContext}` : "Referenced issues: none.",
       const previousJson = JSON.stringify(previousForPrompt(state.findings));
       const repliesJson = JSON.stringify(replies.items);
       const fullPack = fullContextFor(lane.primary).pack;
-      const sincePatchChars = since.changes ? since.changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0) : 0;
+      const sincePatchChars = since.changes ? since.sinceChars : 0;
       if (since.changes?.length && sincePatchChars <= INCREMENTAL_SHARE_LIMIT * fullPatchChars) await (since.texts ??= fetchTexts(since));
       const sincePack = since.changes ? packIncremental(since.changes, Math.min(...[lane.primary, ...lane.fallbacks].map(budgetOf))) : null;
       const missingText = since.changes ? since.changes.filter((change) => change.status !== "removed" && typeof change.patch === "string" && change.patch && typeof change.full_text !== "string").length : 0;
@@ -2002,9 +2048,8 @@ ${requestError || ""}`;
         lastOutcome = "";
         const quotaNote = outcome.quota ? quotaWording(route.provider, outcome.quota) : null;
         if (!crossing) ownQuota = quotaNote;
-        if (quotaNote && !quotaNotes.some((note) => note.provider === route.provider && note.headline === quotaNote.headline)) {
-          quotaNotes.push({ provider: route.provider, ...quotaNote });
-        }
+        const quotaKey = outcome.quota && `${route.provider}:${outcome.quota.credit ? "credit" : outcome.quota.window ?? "plan"}`;
+        if (quotaNote && !quotaNotes.some((note) => note.key === quotaKey)) quotaNotes.push({ key: quotaKey, provider: route.provider, ...quotaNote });
         if (response?.ok && !requestError && failureKind !== "gateway-blocked") {
           try {
             const { review: review2, record, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
@@ -2134,7 +2179,7 @@ ${fence}
     const incremental = status === "valid" ? incrementalContexts.get(lane.id) : void 0;
     if (incremental) {
       const { state, since, replies } = incremental;
-      banner.push(`> \u267B\uFE0F \u589E\u91CF\u5BA1\u6838\uFF1A\u53EA\u5BA1\u67E5\u81EA\u4E0A\u6B21\u6709\u6548\u5BA1\u6838\uFF08\u63D0\u4EA4 \`${state.head.slice(0, 7)}\`\uFF09\u4EE5\u6765 PR \u81EA\u8EAB\u7684\u6539\u52A8\uFF0C\u5171 ${since.changes.length} \u4E2A\u6587\u4EF6\uFF0C\u9644\u6BCF\u4E2A\u6587\u4EF6\u7684\u5B8C\u6574\u5F53\u524D\u6587\u672C${since.kind === "pr" ? "\uFF08\u6B64\u540E\u7684\u63D0\u4EA4\u65E0\u6CD5\u5355\u72EC\u6BD4\u8F83\uFF0C\u4F8B\u5982\u671F\u95F4\u5408\u5E76\u6216\u53D8\u57FA\u8FC7\uFF0C\u8FD9\u4E9B\u6587\u4EF6\u6309\u5B8C\u6574 PR \u6539\u52A8\u63D0\u4F9B\uFF09" : "\uFF08\u4E0D\u542B\u4ECE\u5176\u4ED6\u5206\u652F\u5408\u5165\u7684\u6539\u52A8\uFF09"}\uFF0C\u5E76\u590D\u6838\u4E0A\u4E00\u8F6E\u7684 ${state.findings.length} \u6761\u53D1\u73B0${replies.items.length ? `\u4E0E ${replies.items.length} \u6761\u4F5C\u8005\u6216\u7EF4\u62A4\u8005\u56DE\u590D` : ""}\u3002\u9700\u8981\u5B8C\u6574\u5BA1\u6838\u65F6\u8BC4\u8BBA \`/review\`\u3002`);
+      banner.push(`> \u267B\uFE0F \u589E\u91CF\u5BA1\u6838\uFF1A\u53EA\u5BA1\u67E5\u81EA\u4E0A\u6B21\u6709\u6548\u5BA1\u6838\uFF08\u63D0\u4EA4 \`${state.head.slice(0, 7)}\`\uFF09\u4EE5\u6765 PR \u81EA\u8EAB\u7684\u6539\u52A8\uFF0C\u5171 ${since.changes.length} \u4E2A\u6587\u4EF6\uFF0C\u6BCF\u4E2A\u6587\u4EF6\u9644\u5B8C\u6574\u7684 PR \u6539\u52A8\u548C\u5B8C\u6574\u5F53\u524D\u6587\u672C${since.kind === "pr" ? "\uFF08\u6B64\u540E\u7684\u63D0\u4EA4\u65E0\u6CD5\u5355\u72EC\u6BD4\u8F83\uFF0C\u4F8B\u5982\u671F\u95F4\u5408\u5E76\u6216\u53D8\u57FA\u8FC7\uFF09" : "\uFF08\u4E0D\u542B\u4ECE\u5176\u4ED6\u5206\u652F\u5408\u5165\u7684\u6539\u52A8\uFF0C\u5E76\u6807\u51FA\u6B64\u540E\u6539\u52A8\u7684\u884C\uFF09"}\uFF0C\u5E76\u590D\u6838\u4E0A\u4E00\u8F6E\u7684 ${state.findings.length} \u6761\u53D1\u73B0${replies.items.length ? `\u4E0E ${replies.items.length} \u6761\u4F5C\u8005\u6216\u7EF4\u62A4\u8005\u56DE\u590D` : ""}\u3002\u9700\u8981\u5B8C\u6574\u5BA1\u6838\u65F6\u8BC4\u8BBA \`/review\`\u3002`);
     }
     if (banner.length) banner.push("");
     const record = status === "valid" && result.record ? {

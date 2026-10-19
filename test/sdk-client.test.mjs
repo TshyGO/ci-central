@@ -244,6 +244,22 @@ for (const [name, implementation] of [
       message: 'usage limit exceeded per minute. PRIVATE' } }, { exhausted: false }],
     ['a generic quota message that names no plan, reset or window', 429, {}, { error: { code: 'too_many_requests', type: 'rate_limit_error',
       message: 'Quota exceeded, please slow down. PRIVATE' } }, { exhausted: false }],
+    // Plan and reset wording do not turn a per-minute limit into a spent plan.
+    ['a per-minute plan limit that says when it resets', 429, { 'retry-after': '20' }, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: 'Your plan allows 60 requests per minute; this usage limit resets in 20 seconds. PRIVATE' } }, { exhausted: false }],
+    ['a quota_exceeded code for a per-minute limit', 429, {}, { error: { code: 'quota_exceeded', type: 'rate_limit_error',
+      message: 'Too many requests per minute. PRIVATE' } }, { exhausted: false }],
+    ['a per-minute limit named in TPM', 429, {}, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error',
+      message: "Your plan's usage limit of 90000 TPM was exceeded; it resets shortly. PRIVATE" } }, { exhausted: false }],
+    ['a bare quota_exceeded code', 429, {}, { error: { code: 'quota_exceeded', type: 'invalid_request_error', message: 'Request denied. PRIVATE' } },
+      { exhausted: true, window: undefined, resetAt: undefined }],
+    // ci-central#72 review: an explicit plan window or reset time outweighs per-minute wording elsewhere in the text.
+    ['a weekly limit that also mentions RPM', 429, {}, { error: { code: 'RATE_LIMITED', type: 'rate_limit_error',
+      message: `You've reached your weekly usage limit. Resets at ${inThreeDays}. Upgrade for higher RPM. PRIVATE` } },
+    { exhausted: true, window: 'weekly', resetAt: inThreeDays }],
+    ['a plan error code with per-minute wording', 429, { 'retry-after': '600' }, { type: 'error',
+      error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded (60 requests per minute). PRIVATE' }, metadata: { limitName: 'weekly' } },
+    { exhausted: true, window: 'weekly', resetInSeconds: 600 }],
   ]) {
     test(`${name}: Responses ${label} ${expected.exhausted ? 'is' : 'is not'} reported as an exhausted plan quota, without its text`, async (t) => {
       const f = await fixture(t, implementation, async (_req, res) => {

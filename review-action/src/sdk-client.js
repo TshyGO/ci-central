@@ -107,15 +107,17 @@ function planQuota(error, providerError, body, peekedLimitName) {
   const quotaCode = codes.some((value) => /^quota_exceeded$/i.test(value));
   const rawLimitName = typeof body?.metadata?.limitName === 'string' ? body.metadata.limitName : peekedLimitName;
   const limitName = typeof rawLimitName === 'string' ? rawLimitName.slice(0, 80).replace(/[_-]/g, ' ') : '';
-  const planWorded = PLAN_WORDING.test(words) || [limitName, words].some((text) => QUOTA_WINDOWS.some(([, pattern]) => pattern.test(text)));
+  const windowOf = (text) => QUOTA_WINDOWS.find(([, pattern]) => pattern.test(text))?.[0];
+  // The window the provider names for the limit: Go's limitName, or the word right before "usage
+  // limit" ("weekly usage limit"); a later "resets in 5 hours" does not name it.
+  const namedWindow = windowOf(limitName) ?? windowOf(/([\w-]+)\s+(?:usage\s+)?limit\b/i.exec(words)?.[1] ?? '');
+  const planWorded = Boolean(namedWindow) || PLAN_WORDING.test(words) || Boolean(windowOf(words));
   const quotaWorded = /\busage limit\b|insufficient[_ ]quota|exceeded your current quota/i.test(words)
     || /\bquota\b[^.\n]{0,60}\b(?:exhausted|exceeded|reached|used up|depleted)\b/i.test(words);
-  const exhausted = planCode || (!RATE_WINDOW.test(words) && (quotaCode || (quotaWorded && planWorded)));
+  // Per-minute wording makes it a rate limit, unless the provider named a plan window for the limit.
+  const exhausted = planCode || ((quotaCode || (quotaWorded && planWorded)) && (Boolean(namedWindow) || !RATE_WINDOW.test(words)));
   if (!exhausted) return { exhausted: false };
-  // The word right before "usage limit" names the window; a later "resets in 5 hours" does not.
-  const statedWindow = /([\w-]+)\s+(?:usage\s+)?limit\b/i.exec(words)?.[1] ?? '';
-  const window = [limitName, statedWindow, words]
-    .map((text) => QUOTA_WINDOWS.find(([, pattern]) => pattern.test(text))?.[0]).find(Boolean);
+  const window = namedWindow ?? windowOf(words);
   const stated = /\breset[s]?\b[^\n]{0,40}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:?\d{2}))/i.exec(words)?.[1];
   const retryAfter = String(error?.headers?.get?.('retry-after') ?? '').trim();
   const reset = stated ? Date.parse(stated)

@@ -19,7 +19,7 @@ const focus = {
 // read for known ids only, never turned into evidence by itself.
 const incrementalSchema = { ...schema, previous_findings: [{ id: 'A1', status: 'still_present', reason: '对照当前代码与回复的复核理由' }] };
 const incrementalContract = [
-  'This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round\'s findings, replies the PR author or maintainers posted since, the PR\'s own changes since that commit, and the complete current text of the files those changes touch.',
+  'This is an incremental re-review. This lane already reviewed the pull request at an earlier commit. You receive that round\'s findings, replies the PR author or maintainers posted since, and every file the pull request has changed since that commit, each as its complete PR change and its complete current text; where the commits since then can be told apart, the lines they changed are named with the file.',
   'Re-check every previous finding against the current code and the replies, and give each one a verdict in previous_findings with status fixed, still_present, answered or unclear. Use answered only when a reply gives concrete evidence that holds against the current code; an assertion without evidence is not an answer.',
   'Do not report again, as a new finding, an issue that was answered with evidence, unless the new code contradicts that answer; then mark it still_present and say why.',
   'The material lists what was supplied for each changed file; files this pull request has not changed since that commit are not supplied. You cannot see code that was not supplied: mark a previous finding fixed only when the supplied material shows the fix, and when it points at code you were not given or the material cannot settle it, mark it unclear and say what is missing. When a change could affect code in files that were not supplied (callers, implementations, tests, configuration), name those files and the risk in limitations instead of assuming they still fit.',
@@ -59,8 +59,8 @@ function readVerdicts(report, previous) {
     const status = VERDICTS[typeof item.status === 'string' ? item.status.trim().toLowerCase() : ''];
     if (!status) continue;
     const reason = typeof item.reason === 'string' ? item.reason.trim().slice(0, 600) : '';
-    // An answer the model cannot explain does not close a finding; it stays open as unclear.
-    given.set(item.id, { id: item.id, status: status === 'answered' && !reason ? 'unclear' : status, reason });
+    // A fix or an answer the model cannot explain does not close a finding; it stays open as unclear.
+    given.set(item.id, { id: item.id, status: ['fixed', 'answered'].includes(status) && !reason ? 'unclear' : status, reason });
   }
   const verdicts = previous.map((finding) => given.get(finding.id) ?? { id: finding.id, status: 'unclear', reason: '' });
   const unanswered = previous.filter((finding) => finding.status === 'open' && !given.has(finding.id)).length;

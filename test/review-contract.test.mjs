@@ -209,22 +209,25 @@ test('removed-file findings can cite base lines without inventing head locations
   assert.deepEqual(withheld.findings, []);
   assert.ok(withheld.limitations.at(-1).includes('outside supplied hunks'));
 });
-// An incremental review supplies the change since the reviewed commit and the file's whole
-// current text, so a finding may quote code outside the changed hunks.
+// An incremental review supplies each changed file's PR change and its whole current text, so a
+// finding may quote code outside the changed hunks.
 const currentText = ['import { load } from "./db";', '', 'export function check(user, tenant) {', '  if (!user) throw new Error();',
   '  return user.tenant === tenant;', '}', '', 'export function save(user) {', '  persist(user);', '}'].join('\n');
 const sinceReview = { filename: 'src/auth.js', status: 'modified', additions: 1, deletions: 1,
   patch: '@@ -8,3 +8,3 @@ export function save(user) {\n export function save(user) {\n-  persist();\n+  persist(user);\n }', full_text: currentText };
-test('incremental material carries the since-review patch and the numbered current text of each changed file', () => {
+test('incremental material carries the PR patch and the numbered current text of each changed file', () => {
   const packed = packIncremental([sinceReview], 20000);
   assert.ok(packed.text.includes('+  persist(user);'));
+  // ci-central#72 review: the lines changed since the reviewed commit are named with the file.
+  assert.ok(packIncremental([{ ...sinceReview, since: 'added or rewritten lines 9' }], 20000).text
+    .includes('File: src/auth.js\nStatus: modified; +1 -1 (its complete PR change; since the reviewed commit: added or rewritten lines 9)'));
   assert.ok(packed.text.includes('1 | import { load } from "./db";') && packed.text.includes('10 | }'));
   assert.equal(packed.coverage[0].supplied_hunks, 2);
   const outside = { summary: 's', reviewed_files: ['src/auth.js'], limitations: [], findings: [{ priority: 'P2', file: 'src/auth.js', side: 'new',
     line: 5, title: 'outside the hunk', confidence: 'low', trigger: 't', impact: 'i', evidence: 'return user.tenant === tenant;', suggestion: 's' }] };
   assert.equal(parseReview(JSON.stringify(outside), packed).findings.length, 1, 'code outside the changed hunk can be quoted from the full text');
 });
-test('a quote found in both the patch and the full text is one location, so a slightly wrong line is still repaired', () => {
+test('a quote found in both the patch and the full text is settled by the patch, so a slightly wrong line is still repaired', () => {
   const packed = packIncremental([sinceReview], 20000);
   const report = { summary: 's', reviewed_files: ['src/auth.js'], limitations: [], findings: [{ priority: 'P2', file: 'src/auth.js', side: 'new',
     line: 8, title: 't', confidence: 'low', trigger: 't', impact: 'i', evidence: 'persist(user);', suggestion: 's' }] };
@@ -302,10 +305,10 @@ test('previous-finding verdicts are read for known ids only, and a missing verdi
     { id: 'A1', status: 'fixed', reason: '已加入租户检查' }, { id: 'A2', status: 'unclear', reason: '' },
     { id: 'A3', status: 'still_present', reason: '新代码绕过了守卫' }]);
   assert.ok(parsed.limitations.some((item) => item.includes('1 条上一轮发现')));
-  // ci-central#72 review: an answer the model cannot explain keeps the finding open.
-  const bare = parseReview(JSON.stringify({ ...incrementalReport, previous_findings: [{ id: 'A1', status: 'answered' }, { id: 'A2', status: 'answered', reason: '  ' }] }),
-    context, { previous });
-  assert.deepEqual(bare.previous.slice(0, 2).map(({ status }) => status), ['unclear', 'unclear']);
+  // ci-central#72 review: an answer or a fix the model cannot explain keeps the finding open.
+  const bare = parseReview(JSON.stringify({ ...incrementalReport, previous_findings: [{ id: 'A1', status: 'answered' }, { id: 'A2', status: 'answered', reason: '  ' },
+    { id: 'A3', status: 'fixed' }] }), context, { previous });
+  assert.deepEqual(bare.previous.map(({ status }) => status), ['unclear', 'unclear', 'unclear']);
   assert.equal(parseReview(JSON.stringify(incrementalReport), context).previous, undefined, 'a full review ignores the field');
 });
 test('an incremental review renders new findings with ids and the re-check of every previous finding', () => {

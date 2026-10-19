@@ -275,5 +275,47 @@ function nextFindings({ previous = [], statuses = [], fresh = [], laneId, next =
     ...(open.length < allOpen.length ? { lossy: true } : {}) };
 }
 
+// The lines the PR's own commits changed since the reviewed commit, in the current text's numbering:
+// lines added or rewritten, and the places where lines were only removed. A linear round names them
+// next to each changed file's whole PR change, which is what a full review shows of that file.
+const SINCE_RANGES_SHOWN = 30;
+function sinceLines(patch) {
+  if (typeof patch !== 'string') return '';
+  const added = [];
+  const removedAfter = [];
+  let line = 0;
+  let removal = null;
+  const settle = () => {
+    if (removal !== null && removedAfter.at(-1) !== removal) removedAfter.push(removal);
+    removal = null;
+  };
+  for (const text of patch.split('\n')) {
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(text);
+    if (header) {
+      settle();
+      // A hunk with no new lines is numbered by the line before it.
+      line = Number(header[1]) + (header[2] === '0' ? 1 : 0);
+    } else if (text.startsWith('+')) {
+      // Lines removed right before added ones were rewritten, not removed.
+      removal = null;
+      if (added.at(-1)?.[1] === line - 1) added.at(-1)[1] = line;
+      else added.push([line, line]);
+      line++;
+    } else if (text.startsWith('-')) {
+      removal ??= line - 1;
+    } else if (!text.startsWith('\\')) {
+      settle();
+      line++;
+    }
+  }
+  settle();
+  const list = (items, format, noun) => items.slice(0, SINCE_RANGES_SHOWN).map(format).join(', ')
+    + (items.length > SINCE_RANGES_SHOWN ? ` and ${items.length - SINCE_RANGES_SHOWN} more ${noun}` : '');
+  return [
+    added.length ? `added or rewritten lines ${list(added, ([start, end]) => (start === end ? `${start}` : `${start}-${end}`), 'ranges')}` : '',
+    removedAfter.length ? `lines removed after line ${list(removedAfter, String, 'places')}` : '',
+  ].filter(Boolean).join('; ');
+}
+
 module.exports = { STATE_VERSION, diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies,
-  planLane, chooseIncremental, nextFindings, INCREMENTAL_SHARE_LIMIT };
+  planLane, chooseIncremental, nextFindings, sinceLines, INCREMENTAL_SHARE_LIMIT };

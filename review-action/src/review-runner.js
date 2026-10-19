@@ -5,7 +5,7 @@ const { packDiff, packIncremental, collectIssues, enrichWorkflows } = require('.
 const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
 const { diffIdentity, changedSince, sinceReviewScope, encodeState, readState, collectReplies, planLane, chooseIncremental,
-  nextFindings, INCREMENTAL_SHARE_LIMIT } = require('./review-incremental.js');
+  nextFindings, sinceLines, INCREMENTAL_SHARE_LIMIT } = require('./review-incremental.js');
 
 // Verified with final model output from the self-hosted CN runner. Keep unknown
 // models (including Muse) on the approved proxy; never retry across egress paths.
@@ -320,6 +320,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const scope = sinceReviewScope({ commits: prCommits, reviewedHead: state.head });
     let changes = null;
     let dropped = 0;
+    let sinceChars = 0;
     if (scope === 'linear') {
       // The compare is the PR's own change only when its own commits are a plain fast-forward from
       // the reviewed head: that head is the merge base, no merge commit is among them, none is cut off.
@@ -329,7 +330,15 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
           && Array.isArray(data.commits) && data.commits.length === data.total_commits
           && data.commits.every((commit) => Array.isArray(commit?.parents) && commit.parents.length === 1);
         if (fastForward && Array.isArray(data.files) && data.files.length < 300) {
-          changes = data.files.map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch, scope: 'since' }));
+          // The compare tells which files the PR's own commits changed since the review, and where. Each
+          // is still sent as its whole PR change, as a full review shows it, with those lines named.
+          const own = new Map(files.map((file) => [file.filename, file]));
+          sinceChars = data.files.reduce((sum, file) => sum + (file.patch?.length ?? 0), 0);
+          dropped = data.files.filter(({ filename }) => !own.has(filename)).length;
+          changes = data.files.filter(({ filename }) => own.has(filename)).map(({ filename, patch }) => {
+            const { status, additions, deletions, patch: whole } = own.get(filename);
+            return { filename, status, additions, deletions, patch: whole, scope: 'since', since: sinceLines(patch) };
+          });
         }
       } catch {
         console.log(`Compare ${state.head.slice(0, 7)}...${reviewHeadSha.slice(0, 7)} is unavailable; using the recorded per-file changes.`);
@@ -343,9 +352,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       dropped = diff.dropped;
       changes = files.filter((file) => diff.changed.includes(file.filename))
         .map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch, scope: 'pr' }));
+      sinceChars = changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0);
     }
     const changed = new Set(changes.map(({ filename }) => filename));
-    return { changes, kind: changes.some(({ scope: kind }) => kind === 'pr') ? 'pr' : 'since', dropped,
+    return { changes, kind: changes.some(({ scope: kind }) => kind === 'pr') ? 'pr' : 'since', dropped, sinceChars,
       unchanged: files.map(({ filename }) => filename).filter((filename) => !changed.has(filename)) };
   }
   // The complete current text of each changed file, read once per reviewed head, and only once the
@@ -395,7 +405,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     '',
     'What was supplied for each file changed since that commit (nothing else of these files was supplied):',
     ...pack.coverage.map((file) => `- ${file.file}: ${file.mode === 'patch+head_text'
-      ? `${incremental.since.kind === 'pr' ? 'its complete PR change' : 'the change since the reviewed commit'} and its complete current text`
+      ? 'its complete PR change and its complete current text'
       : file.status === 'removed' ? 'deleted; only the removed lines are shown' : 'no text to show (binary, rename only or unavailable)'}`),
     '',
     'Coverage manifest (untrusted metadata; omitted material was not inspected):',
@@ -404,7 +414,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     '',
     incremental.since.kind === 'pr'
       ? 'Changed files (the commits since the reviewed one could not be compared on their own, for example after a merge or a rebase, so each file whose PR change differs is given as its complete PR change), each followed by its complete current text:'
-      : 'Changes since the reviewed commit (the PR\'s own commits only), each followed by the file\'s complete current text:',
+      : 'Files the PR\'s own commits changed since the reviewed commit, each as its complete PR change (as a full review shows it, with the lines changed since that commit named in its header), followed by the file\'s complete current text:',
     pack.text || '[No diff available]',
     '',
     `End of supplied material. Reply with only the single JSON object defined by ${PROMPT_VERSION} in the system message, including previous_findings; a Markdown review cannot be accepted.`,
@@ -444,7 +454,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const previousJson = JSON.stringify(previousForPrompt(state.findings));
       const repliesJson = JSON.stringify(replies.items);
       const fullPack = fullContextFor(lane.primary).pack;
-      const sincePatchChars = since.changes ? since.changes.reduce((sum, change) => sum + (change.patch?.length ?? 0), 0) : 0;
+      // The size of the change since the review, not of the whole PR changes sent for those files.
+      const sincePatchChars = since.changes ? since.sinceChars : 0;
       // A change that is most of the PR is decided before any file text is read.
       if (since.changes?.length && sincePatchChars <= INCREMENTAL_SHARE_LIMIT * fullPatchChars) await (since.texts ??= fetchTexts(since));
       // Every model the lane may ask must take the whole material: the change since the review and
@@ -926,10 +937,10 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         lastOutcome = '';
         const quotaNote = outcome.quota ? quotaWording(route.provider, outcome.quota) : null;
         if (!crossing) ownQuota = quotaNote;
-        // A plan that stopped several models of the lane is named once.
-        if (quotaNote && !quotaNotes.some((note) => note.provider === route.provider && note.headline === quotaNote.headline)) {
-          quotaNotes.push({ provider: route.provider, ...quotaNote });
-        }
+        // A plan that stopped several models of the lane is named once, with its first reset time:
+        // Go's reset is the request time plus retry-after, so two hits may differ by a second.
+        const quotaKey = outcome.quota && `${route.provider}:${outcome.quota.credit ? 'credit' : outcome.quota.window ?? 'plan'}`;
+        if (quotaNote && !quotaNotes.some((note) => note.key === quotaKey)) quotaNotes.push({ key: quotaKey, provider: route.provider, ...quotaNote });
         if (response?.ok && !requestError && failureKind !== 'gateway-blocked') {
           try {
             const { review, record, reasoningLength, reasoningUnit, complete, finishReason } = extractReview(lane, model, responseText);
@@ -1093,8 +1104,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const incremental = status === 'valid' ? incrementalContexts.get(lane.id) : undefined;
     if (incremental) {
       const { state, since, replies } = incremental;
-      banner.push(`> ♻️ 增量审核：只审查自上次有效审核（提交 \`${state.head.slice(0, 7)}\`）以来 PR 自身的改动，共 ${since.changes.length} 个文件，附每个文件的完整当前文本`
-        + `${since.kind === 'pr' ? '（此后的提交无法单独比较，例如期间合并或变基过，这些文件按完整 PR 改动提供）' : '（不含从其他分支合入的改动）'}，`
+      banner.push(`> ♻️ 增量审核：只审查自上次有效审核（提交 \`${state.head.slice(0, 7)}\`）以来 PR 自身的改动，共 ${since.changes.length} 个文件，每个文件附完整的 PR 改动和完整当前文本`
+        + `${since.kind === 'pr' ? '（此后的提交无法单独比较，例如期间合并或变基过）' : '（不含从其他分支合入的改动，并标出此后改动的行）'}，`
         + `并复核上一轮的 ${state.findings.length} 条发现${replies.items.length ? `与 ${replies.items.length} 条作者或维护者回复` : ''}。需要完整审核时评论 \`/review\`。`);
     }
     if (banner.length) banner.push('');

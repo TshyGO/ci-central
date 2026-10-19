@@ -94,7 +94,8 @@ function fullTextHunk(file) {
 function packIncremental(files, budget) {
   const ordered = [...files].sort((a, b) => riskOrder(a.filename) - riskOrder(b.filename));
   const prefix = (file) => `File: ${file.filename}\nStatus: ${file.status}; +${file.additions} -${file.deletions}`
-    + `${file.scope === 'pr' ? ' (its complete PR change: the commits since the reviewed one could not be compared on their own)' : ' (change since the reviewed commit)'}\n`;
+    + ` (its complete PR change${file.scope === 'pr' ? ': the commits since the reviewed one could not be compared on their own'
+      : file.since ? `; since the reviewed commit: ${file.since}` : ''})\n`;
   const plans = ordered.map((file) => ({ file, patch: hunks({ filename: file.filename, patch: file.patch }),
     text: typeof file.full_text === 'string' ? fullTextHunk(file) : null, context: [], selected: [] }));
   let used = 0;

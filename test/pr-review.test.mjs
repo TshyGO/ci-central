@@ -1339,6 +1339,16 @@ check('a spent plan that stopped two models of the lane is named once', !r.error
   && twiceQuota.split('`opencode-go` 的周用量上限已用完').length === 2 && twiceQuota.split('`command-code` 的周用量上限已用完').length === 2
   && twiceQuota.split('the opencode-go plan quota is exhausted').length === 2 && twiceQuota.split('the command-code plan quota is exhausted').length === 2
   && r.statusUpdates.at(-1).includes('供应商额度用尽，审核未生成（opencode-go 周上限已用完，北京时间 2026-10-20 11:30 重置；command-code 周上限已用完，北京时间 2026-10-22 16:56 重置） |'));
+// Go's reset time is the request time plus retry-after, so two hits a second apart differ by a second;
+// the plan is still named once.
+r = await scenario((call) => call.lane === 'A'
+  ? Promise.reject(quotaError({ code: undefined, type: 'GoUsageLimitError', window: 'weekly',
+    resetAt: call.model === 'muse-spark-1.3-contributor' ? '2026-10-20T03:30:00.000Z' : '2026-10-20T03:30:01.000Z' }))
+  : call.model.startsWith('meta/muse-spark') ? Promise.reject(commandCodeWeekly) : healthy(call),
+{ PR_REVIEW_CONFIG: JSON.stringify(withFallbackConfig) });
+check('a spent plan is named once even when its reset times differ by a second', !r.error
+  && laneComment(r, 'A').split('`opencode-go` 的周用量上限已用完').length === 2
+  && laneComment(r, 'A').split('the opencode-go plan quota is exhausted').length === 2);
 // The cross-provider request gets a full model window of its own, even after a resend spent
 // part of the window on the lane's own provider.
 const resendThenQuotaConfig = structuredClone(centralConfig);
@@ -1927,7 +1937,7 @@ check('skipped lanes count as valid evidence for the quorum', !r.error && r.logs
 
 // Change 1: a small linear push is reviewed incrementally.
 const sinceH1 = linearCompare(H1, H2, [{ filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 1,
-  patch: '@@ -4,1 +4,1 @@\n-run(user);\n+run(user, tenant);' }]);
+  patch: '@@ -3,1 +3,1 @@\n-run(user);\n+run(user, tenant);' }]);
 const srcText = 'import x;\nguard();\nrun(user, tenant);\nend();';
 const replies = [
   { id: 101, user: { login: 'octocat', type: 'User' }, author_association: 'OWNER', created_at: '2099-01-01T00:00:00Z', body: 'A1：已改为传入租户。' },
@@ -1943,13 +1953,18 @@ const linearRound = (extra = {}) => atHead(H2, { files: [srcFile('run(user, tena
 for (const useBundle of [false, true]) {
   r = await scenario(verdictA, {}, linearRound({ useBundle }));
   const laneA = r.captured.find(({ lane }) => lane === 'A')?.body;
-  check(`source/bundle ${useBundle} a small linear push sends only the change since the reviewed head, the whole changed file and the previous findings`,
+  // ci-central#72 review: a changed file is sent as its whole PR change, as a full review shows it,
+  // so lines the PR removed before the reviewed commit (old();) stay visible; the lines changed
+  // since that commit are named with the file.
+  check(`source/bundle ${useBundle} a small linear push sends each file changed since the reviewed head whole, with the previous findings`,
     !r.error && r.captured.length === 3 && r.captured.every(isIncremental)
     && userText(laneA).includes('+run(user, tenant);') && userText(laneA).includes('3 | run(user, tenant);')
+    && userText(laneA).includes('-old();') && !userText(laneA).includes('-run(user);')
+    && userText(laneA).includes('File: src/a.ts\nStatus: modified; +2 -1 (its complete PR change; since the reviewed commit: added or rewritten lines 3)')
     && !userText(laneA).includes('+test2();') && userText(laneA).includes('tests/a.test.ts')
     && userText(laneA).includes('"id":"A1"') && userText(laneA).includes('"title":"运行时缺少租户"')
     && systemText(laneA).includes('previous_findings') && userText(laneA).trimEnd().endsWith('a Markdown review cannot be accepted.')
-    && userText(laneA).includes('What was supplied for each file changed since that commit (nothing else of these files was supplied):\n- src/a.ts: the change since the reviewed commit and its complete current text')
+    && userText(laneA).includes('What was supplied for each file changed since that commit (nothing else of these files was supplied):\n- src/a.ts: its complete PR change and its complete current text')
     && r.apiCalls.includes(`compare ${H1}...${H2}`) && r.apiCalls.includes(`content src/a.ts@${H2}`));
   check(`source/bundle ${useBundle} only the author's and members' replies since the review reach the model`,
     userText(laneA).includes('A1：已改为传入租户。')
@@ -1958,7 +1973,7 @@ for (const useBundle of [false, true]) {
   check(`source/bundle ${useBundle} the incremental comment says what it covered and records the re-check for the next round`,
     incrementalA.includes('status=valid') && incrementalA.includes('## AI PR Review · Lane A · Muse Spark 1.3 Contributor · 增量')
     && incrementalA.includes(`增量审核：只审查自上次有效审核（提交 \`${H1.slice(0, 7)}\`）以来 PR 自身的改动`)
-    && incrementalA.includes('附每个文件的完整当前文本') && incrementalA.includes('需要完整审核时评论 `/review`。')
+    && incrementalA.includes('每个文件附完整的 PR 改动和完整当前文本') && incrementalA.includes('需要完整审核时评论 `/review`。')
     && incrementalA.includes('`A1` P1 · 运行时缺少租户：模型复核认为已修复。已传入租户')
     && readState(incrementalA, 'A')?.head === H2 && readState(incrementalA, 'A')?.mode === 'incremental'
     && readState(incrementalA, 'A')?.findings.length === 0 && readState(incrementalA, 'A')?.next === 2
@@ -2121,7 +2136,7 @@ const failedA = laneComment(r, 'A');
 check('a diagnostic carries the last valid record forward unchanged', !r.error && failedA.includes('status=diagnostic')
   && readState(failedA, 'A')?.head === H1 && readState(failedA, 'A')?.findings.map(({ id }) => id).join() === 'A1');
 r = await scenario(healthy, {}, atHead(H3, { files: [srcFile('run(user, tenant, scope)'), testFile(), otherFile()], commits: [...linearTo(H2), one(H3, [H2])],
-  compare: { [`${H1}...${H3}`]: { ...sinceH1, files: [{ ...sinceH1.files[0], patch: '@@ -4,1 +4,1 @@\n-run(user);\n+run(user, tenant, scope);' }] } },
+  compare: { [`${H1}...${H3}`]: { ...sinceH1, files: [{ ...sinceH1.files[0], patch: '@@ -3,1 +3,1 @@\n-run(user);\n+run(user, tenant, scope);' }] } },
   contents: { 'src/a.ts': srcText }, comments: [{ body: failedA }, roundOne[1], roundOne[2]] }));
 check('after a failed round the next review is incremental from the last valid review', !r.error
   && isIncremental(r.captured.find(({ lane }) => lane === 'A')) && r.apiCalls.includes(`compare ${H1}...${H3}`));

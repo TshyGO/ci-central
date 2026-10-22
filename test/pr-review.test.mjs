@@ -1940,6 +1940,17 @@ check('NebulaLab: one key refused and one out of credit is not reported as every
   laneBBody(r).includes('status=diagnostic') && laneBKeys(r).endsWith('claude-haiku-5-5@anthropic-key-2')
   && laneBBody(r).includes('Anthropic API credit balance is exhausted') && !laneBBody(r).includes('every key in the Lane B slot'));
 
+// ci-central#73 review (C2/B5/A3): a cross-provider request uses the target slot's PR-number key, even
+// after the target lane spent that key in the same run, so the account never depends on lane timing.
+r = await scenario((call) => call.lane === 'B' ? reply(503, '{"error":"overloaded"}')
+  : call.lane === 'C' && call.model === 'gpt-6-luna' && keyOf(call) === 'lane-c-key-1'
+    ? reply(401, '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}') : healthy(call),
+{ ...twEgress, LANE_C_KEY: 'lane-c-key-1\nlane-c-key-2' });
+check('a cross-provider request uses the target slot key picked by PR number, not one the target lane skipped to', !r.error
+  && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'gpt-6-luna').map(keyOf).join(',') === 'lane-c-key-1,lane-c-key-2'
+  && r.captured.find(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5') && keyOf(r.captured.find(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5')) === 'lane-c-key-1'
+  && laneBBody(r).includes('status=valid'));
+
 // Without weights the keys share PRs equally, on any provider; a third key past the weights counts 1.
 const goTwoKeys = { LANE_B_KEY: 'go-key-1\ngo-key-2' };
 for (const [number, key] of [[42, 1], [43, 2]]) {

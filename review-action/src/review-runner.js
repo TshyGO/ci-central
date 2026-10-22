@@ -804,7 +804,9 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       console.log(`[Lane ${lane.id}/${model.id}] a cross-provider fallback is configured, but the Lane ${cross.credential_lane} secret slot is not provisioned.`);
       return null;
     }
-    return { provider: target.provider, credentialLane: target.id, modelId: cross.id, keyIndex: startKey(target.id) };
+    // The target slot's PR-number key, never one its own lane skipped to: lanes run in parallel, so
+    // that lane's spent keys would make the account depend on timing.
+    return { provider: target.provider, credentialLane: target.id, modelId: cross.id, keyIndex: pickedKey(target.id) };
   }
 
   // A complete report is checked against exactly what was supplied, its findings get the ids the

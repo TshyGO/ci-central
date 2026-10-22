@@ -1868,6 +1868,81 @@ check('a 402 billing_error from Go crosses once to the same model on Command Cod
 r = await scenario((call) => call.lane === 'B' ? reply(402, '{"type":"error","error":{"type":"billing_error"}}') : healthy(call),
   { ...twEgress, LANE_C_KEY: '', LANE_C_API_BASE: '' });
 check('NebulaLab: without the Lane C slot an exhausted credit says so', laneBBody(r).includes('Anthropic API credit balance is exhausted'));
+
+// Two Anthropic accounts share the one Lane B slot, one key per line (2026-10-23). A PR stays on
+// one account, chosen by its number and weighted 2:1 to the monthly budgets. A key that fails for
+// an account reason hands the same request to the other key before the lane crosses providers.
+const twoKeys = { ...twEgress, LANE_B_KEY: 'anthropic-key-1\r\n\n  anthropic-key-2  \n' };
+const prNumbered = (number, extra = {}) => ({ pulls: [{ ...pull, number }],
+  context: { ...context, payload: { pull_request: { number, head: { sha: headSha } } } }, ...extra });
+const keyOf = ({ headers }) => headers['x-api-key'] ?? headers.authorization?.replace(/^Bearer /, '');
+const laneBKeys = (result) => result.captured.filter(({ lane }) => lane === 'B').map((call) => `${call.model}@${keyOf(call)}`).join(',');
+const leaksKey = (result) => [...result.posted, ...result.statusUpdates, ...result.logs].some((text) => /anthropic-key-|go-key-/.test(text));
+r = await scenario(healthy, twEgress);
+check('NebulaLab: a single-key slot names no key in the comment', !r.error && laneBBody(r).includes('Lane B: claude-sonnet-5-5 (first pass) · Thinking')
+  && !laneBBody(r).includes('key 1/1'));
+for (const [number, key] of [[42, 1], [43, 1], [44, 2], [45, 1], [47, 2]]) {
+  r = await scenario(healthy, twoKeys, prNumbered(number));
+  check(`NebulaLab: PR #${number} is reviewed with Anthropic key ${key} of 2 (weights 2:1)`, !r.error
+    && laneBKeys(r) === `claude-sonnet-5-5@anthropic-key-${key}` && laneBBody(r).includes(`Lane B: claude-sonnet-5-5 (first pass) · key ${key}/2 ·`)
+    && r.logs.some((line) => line.includes(`[Lane B] the secret slot holds 2 keys, weights 2:1; PR #${number} starts on key ${key}.`))
+    && !leaksKey(r));
+}
+r = await scenario(healthy, twoKeys, prNumbered(44));
+const keyTwoFirstPass = laneBBody(r);
+r = await scenario(healthy, twoKeys, prNumbered(44, { ...commit(nextHead), pulls: [{ ...pull, number: 44, head: { ...pull.head, sha: nextHead } }],
+  context: { ...context, payload: { pull_request: { number: 44, head: { sha: nextHead } } } }, comments: [{ body: keyTwoFirstPass }] }));
+check('NebulaLab: later commits of a PR stay on its account', !r.error && laneBKeys(r) === 'claude-haiku-5-5@anthropic-key-2'
+  && laneBBody(r).includes('Lane B: claude-haiku-5-5 · key 2/2 ·'));
+
+const billing = () => reply(402, '{"type":"error","error":{"type":"billing_error","message":"insufficient credit"}}');
+for (const [label, failure, reason] of [
+  ['an exhausted credit (402)', billing, 'API 余额已用完'],
+  ['a rejected key (401)', () => reply(401, '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'), 'key 被拒绝'],
+  ['an account rate limit (429)', () => reply(429, '{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}'), '账号限流'],
+]) {
+  for (const useBundle of [false, true]) {
+    r = await scenario((call) => call.lane === 'B' && keyOf(call) === 'anthropic-key-1' ? failure() : healthy(call), twoKeys, { useBundle });
+    check(`NebulaLab: ${label} on key 1 sends the same Sonnet request once with key 2 (bundle ${useBundle})`, !r.error
+      && laneBKeys(r) === 'claude-sonnet-5-5@anthropic-key-1,claude-sonnet-5-5@anthropic-key-2'
+      && !r.captured.some(({ lane, model }) => lane === 'C' && model.startsWith('claude-'))
+      && laneBBody(r).includes('status=valid') && laneBBody(r).includes(firstPassMark(headSha))
+      && laneBBody(r).includes('Lane B: claude-sonnet-5-5 (first pass) · key 2/2 ·')
+      && laneBBody(r).includes(`> ℹ️ Lane B 的第 1 把 key 未能服务（${reason}），本条 review 由同一模型经同一 Secret 槽位的第 2 把 key 生成。`)
+      && r.statusUpdates.some((body) => body.includes('| B | claude-haiku-5-5 | key 未能服务，同模型换同一 Secret 槽位的下一把 key 运行中 | claude-sonnet-5-5 @ key 2 |'))
+      && r.logs.some((line) => line.includes('[Lane B/claude-sonnet-5-5] key 1 of 2 could not serve'))
+      && !leaksKey(r));
+  }
+}
+r = await scenario((call) => call.lane === 'B' && call.model === 'claude-sonnet-5-5' ? reply(529, '{"type":"error","error":{"type":"overloaded_error"}}') : healthy(call), twoKeys);
+check('NebulaLab: an Anthropic-side failure does not switch keys, and Haiku follows on the same key', !r.error
+  && laneBKeys(r) === 'claude-sonnet-5-5@anthropic-key-1,claude-haiku-5-5@anthropic-key-1' && !laneBBody(r).includes('把 key'));
+r = await scenario((call) => call.lane !== 'B' ? healthy(call) : keyOf(call) === 'anthropic-key-1' ? billing()
+  : call.model === 'claude-sonnet-5-5' ? reply(503, '{"error":"overloaded"}') : healthy(call), twoKeys);
+check('NebulaLab: once key 1 is out of credit, the next model starts on key 2', !r.error
+  && laneBKeys(r) === 'claude-sonnet-5-5@anthropic-key-1,claude-sonnet-5-5@anthropic-key-2,claude-haiku-5-5@anthropic-key-2'
+  && laneBBody(r).includes('Lane B: claude-haiku-5-5 · key 2/2 ·') && !r.captured.some(({ lane, model }) => lane === 'C' && model.startsWith('claude-')));
+r = await scenario((call) => call.lane === 'B' ? billing() : healthy(call), twoKeys);
+const crossedAfterBoth = r.captured.find(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5');
+check('NebulaLab: with both keys out of credit Haiku crosses to Command Code once, through the Lane C key', !r.error
+  && laneBKeys(r) === 'claude-sonnet-5-5@anthropic-key-1,claude-sonnet-5-5@anthropic-key-2,claude-haiku-5-5@anthropic-key-1'
+  && crossedAfterBoth?.headers['x-api-key'] === 'lane-c-key'
+  && r.captured.filter(({ lane, model }) => lane === 'C' && model === 'claude-haiku-5-5').length === 1
+  && laneBBody(r).includes('Lane B: claude-haiku-5-5 via command-code claude-haiku-5-5 (anthropic unavailable)') && !leaksKey(r));
+r = await scenario((call) => call.lane === 'B' ? billing() : healthy(call), { ...twoKeys, LANE_C_KEY: '', LANE_C_API_BASE: '' });
+check('NebulaLab: with both keys out of credit and no Lane C slot the comment says every key is spent',
+  laneBBody(r).includes('status=diagnostic') && laneBBody(r).includes('every key in the Lane B slot') && !leaksKey(r));
+
+// Without weights the keys share PRs equally, on any provider; a third key past the weights counts 1.
+const goTwoKeys = { LANE_B_KEY: 'go-key-1\ngo-key-2' };
+for (const [number, key] of [[42, 1], [43, 2]]) {
+  r = await scenario(healthy, goTwoKeys, prNumbered(number));
+  check(`unweighted keys: PR #${number} uses key ${key} of 2`, !r.error && laneBKeys(r) === `claude-haiku-5-5@go-key-${key}`
+    && r.logs.some((line) => line.includes(`weights 1:1; PR #${number} starts on key ${key}.`)) && !leaksKey(r));
+}
+r = await scenario(healthy, { ...twoKeys, LANE_B_KEY: 'anthropic-key-1\nanthropic-key-2\nanthropic-key-3' }, prNumbered(43));
+check('a key past the configured weights counts as weight 1', !r.error && laneBKeys(r) === 'claude-sonnet-5-5@anthropic-key-3'
+  && r.logs.some((line) => line.includes('weights 2:1:1; PR #43 starts on key 3.')));
 // ---------------------------------------------------------------------------------------------
 // Incremental re-review and repeat-review skipping (2026-10-19). On NebulaLab 68% of the runs that
 // reached a model re-reviewed a PR that already had a review, each sending the whole PR again.

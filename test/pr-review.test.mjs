@@ -1932,6 +1932,13 @@ check('NebulaLab: with both keys out of credit Haiku crosses to Command Code onc
 r = await scenario((call) => call.lane === 'B' ? billing() : healthy(call), { ...twoKeys, LANE_C_KEY: '', LANE_C_API_BASE: '' });
 check('NebulaLab: with both keys out of credit and no Lane C slot the comment says every key is spent',
   laneBBody(r).includes('status=diagnostic') && laneBBody(r).includes('every key in the Lane B slot') && !leaksKey(r));
+// ci-central#73 review (C1): a refused key is not a spent credit, so the lane must not claim every key is out of credit.
+r = await scenario((call) => call.lane !== 'B' ? healthy(call) : keyOf(call) === 'anthropic-key-1'
+  ? reply(401, '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}') : billing(),
+{ ...twoKeys, LANE_C_KEY: '', LANE_C_API_BASE: '' }, prNumbered(44));
+check('NebulaLab: one key refused and one out of credit is not reported as every key out of credit',
+  laneBBody(r).includes('status=diagnostic') && laneBKeys(r).endsWith('claude-haiku-5-5@anthropic-key-2')
+  && laneBBody(r).includes('Anthropic API credit balance is exhausted') && !laneBBody(r).includes('every key in the Lane B slot'));
 
 // Without weights the keys share PRs equally, on any provider; a third key past the weights counts 1.
 const goTwoKeys = { LANE_B_KEY: 'go-key-1\ngo-key-2' };

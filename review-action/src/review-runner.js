@@ -624,6 +624,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   // on one account. A key that failed for an account reason in this run is not started on again
   // while another key of the slot has not.
   const spentKeys = { A: new Set(), B: new Set(), C: new Set() };
+  // The spent keys whose credit or plan ran out, as opposed to a refused key.
+  const creditSpentKeys = { A: new Set(), B: new Set(), C: new Set() };
   const weightsOf = (laneId) => {
     const configured = lanes.find((lane) => lane.id === laneId)?.key_weights ?? [];
     return laneCredentials[laneId].keys.map((_, index) => configured[index] ?? 1);
@@ -1040,6 +1042,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         if (keyCount > 1 && accountFailure(outcome)) {
           // A rate limit passes; a spent credit or a refused key stays that way for this run.
           if (outcome.failureKind === 'quota-exhausted' || outcome.failureKind === 'authentication-failed') spentKeys[lane.id].add(key);
+          if (outcome.failureKind === 'quota-exhausted') creditSpentKeys[lane.id].add(key);
           const next = Array.from({ length: keyCount - 1 }, (_, step) => (key + step + 1) % keyCount)
             .find((index) => !keysTried.has(index) && !spentKeys[lane.id].has(index));
           if (next !== undefined) {
@@ -1089,7 +1092,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         ? 'Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner.'
         : lastFailureKind === 'quota-exhausted'
           ? (lastProvider === 'anthropic'
-            ? (keyCount > 1 && spentKeys[lane.id].size === keyCount
+            ? (keyCount > 1 && creditSpentKeys[lane.id].size === keyCount
               ? `Action needed: the Anthropic API credit balance is exhausted on every key in the Lane ${lane.id} slot. Wait for the next credit grant or add credit; another model on the same accounts cannot recover the review.`
               : 'Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review.')
             // Every provider whose plan was spent is named, each with its own reset.

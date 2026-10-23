@@ -117,6 +117,9 @@ var require_index = __commonJS({
         if (lane.resend_unserved !== void 0 && typeof lane.resend_unserved !== "boolean") {
           throw new Error(`${location}.resend_unserved must be a boolean.`);
         }
+        if (lane.key_weights !== void 0 && (!Array.isArray(lane.key_weights) || lane.key_weights.length < 2 || lane.key_weights.length > 4 || lane.key_weights.some((weight) => !Number.isInteger(weight) || weight < 1 || weight > 100))) {
+          throw new Error(`${location}.key_weights must be an array of 2 to 4 integers from 1 to 100.`);
+        }
         if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
         for (const field of ["request_timeout_ms", "model_budget_ms"]) {
           if (lane[field] !== void 0 && (!Number.isInteger(lane[field]) || lane[field] < 1)) {
@@ -786,6 +789,7 @@ var require_review_status = __commonJS({
       publication_failed: "\u7ED3\u679C\u53D1\u5E03\u5931\u8D25\uFF0C\u4E0D\u8BA1\u5165 quorum",
       resending: "\u6A21\u578B\u672A\u53D7\u7406\uFF0C\u6362\u4F1A\u8BDD\u91CD\u53D1\u4E00\u6B21\u4E2D",
       cross: "\u672C\u4F9B\u5E94\u5546\u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u540C\u6A21\u578B\u7ECF\u53E6\u4E00\u4F9B\u5E94\u5546\u8FD0\u884C\u4E2D",
+      account: "key \u672A\u80FD\u670D\u52A1\uFF0C\u540C\u6A21\u578B\u6362\u540C\u4E00 Secret \u69FD\u4F4D\u7684\u4E0B\u4E00\u628A key \u8FD0\u884C\u4E2D",
       quota: "\u4F9B\u5E94\u5546\u989D\u5EA6\u7528\u5C3D\uFF0C\u5BA1\u6838\u672A\u751F\u6210",
       unchanged: "\u590D\u7528\u6B64\u524D\u63D0\u4EA4\u7684\u6709\u6548\u8BC1\u636E\uFF0C\u672A\u8BF7\u6C42\u6A21\u578B",
       incremental: "\u589E\u91CF\u5BA1\u6838\u8FD0\u884C\u4E2D",
@@ -1231,19 +1235,14 @@ async function runReview({
   }
   const lanes = reviewConfig.lanes;
   const reviewPolicy = reviewConfig.review_policy;
+  const slot = (key, base) => {
+    const keys = String(key || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    return { apiKey: keys[0], keys, baseUrl: (base || "").replace(/\/$/, "") };
+  };
   const laneCredentials = {
-    A: {
-      apiKey: process2.env.LANE_A_KEY,
-      baseUrl: (process2.env.LANE_A_API_BASE || "").replace(/\/$/, "")
-    },
-    B: {
-      apiKey: process2.env.LANE_B_KEY,
-      baseUrl: (process2.env.LANE_B_API_BASE || "").replace(/\/$/, "")
-    },
-    C: {
-      apiKey: process2.env.LANE_C_KEY,
-      baseUrl: (process2.env.LANE_C_API_BASE || "").replace(/\/$/, "")
-    }
+    A: slot(process2.env.LANE_A_KEY, process2.env.LANE_A_API_BASE),
+    B: slot(process2.env.LANE_B_KEY, process2.env.LANE_B_API_BASE),
+    C: slot(process2.env.LANE_C_KEY, process2.env.LANE_C_API_BASE)
   };
   const { data: pull } = await github.rest.pulls.get({
     owner,
@@ -1746,7 +1745,28 @@ ${requestError || ""}`;
     const modelBudgetMs = Number(lane.model_budget_ms) || defaultModelBudgetMs;
     return Math.min(requestTimeoutMs, modelBudgetMs);
   }
-  const ownRoute = (lane, model) => ({ provider: lane.provider, credentialLane: lane.id, modelId: model.id });
+  const spentKeys = { A: /* @__PURE__ */ new Set(), B: /* @__PURE__ */ new Set(), C: /* @__PURE__ */ new Set() };
+  const creditSpentKeys = { A: /* @__PURE__ */ new Set(), B: /* @__PURE__ */ new Set(), C: /* @__PURE__ */ new Set() };
+  const weightsOf = (laneId) => {
+    const configured = lanes.find((lane) => lane.id === laneId)?.key_weights ?? [];
+    return laneCredentials[laneId].keys.map((_, index) => configured[index] ?? 1);
+  };
+  function pickedKey(laneId) {
+    const weights = weightsOf(laneId);
+    let rest = (Math.abs(Number(pullNumber)) || 0) % weights.reduce((sum, weight) => sum + weight, 0);
+    return Math.max(0, weights.findIndex((weight) => (rest -= weight) < 0));
+  }
+  function startKey(laneId) {
+    const count = laneCredentials[laneId].keys.length;
+    const picked = pickedKey(laneId);
+    for (let step = 0; step < count; step++) {
+      if (!spentKeys[laneId].has((picked + step) % count)) return (picked + step) % count;
+    }
+    return picked;
+  }
+  const accountFailure = (outcome) => outcome.failureKind === "quota-exhausted" || outcome.failureKind === "authentication-failed" || outcome.httpStatus === 429;
+  const accountReason = (outcome, provider) => outcome.failureKind === "quota-exhausted" ? quotaWording(provider, outcome.quota ?? {}).banner : outcome.failureKind === "authentication-failed" ? "key \u88AB\u62D2\u7EDD" : "\u8D26\u53F7\u9650\u6D41";
+  const ownRoute = (lane, model, keyIndex = startKey(lane.id)) => ({ provider: lane.provider, credentialLane: lane.id, modelId: model.id, keyIndex });
   async function callModel(lane, model, {
     windowMs = modelWindowMs(lane, model),
     sessionSuffix = "",
@@ -1767,6 +1787,7 @@ ${requestError || ""}`;
     let quota = null;
     try {
       const credentials = laneCredentials[route.credentialLane];
+      const apiKey = credentials.keys[route.keyIndex ?? 0];
       const goRoute = route.provider === "opencode-go";
       let proxyUrl;
       const directGoModel = process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(route.modelId);
@@ -1804,14 +1825,14 @@ ${requestError || ""}`;
         redirect: "error",
         signal: controller.signal,
         headers: {
-          "x-goog-api-key": credentials.apiKey,
+          "x-goog-api-key": apiKey,
           "content-type": "application/json",
           accept: "application/json",
           "user-agent": "GitHubActions-AI-PR-Review"
         },
         body: JSON.stringify(googlePayload({ ...model, review_lane_id: lane.id }))
       }) : await requestChatCompletion({
-        apiKey: credentials.apiKey,
+        apiKey,
         baseURL: protocol === "google-generate-content" ? goGoogleBase(credentials.baseUrl) : credentials.baseUrl,
         protocol,
         proxyUrl,
@@ -1887,7 +1908,7 @@ ${requestError || ""}`;
       console.log(`[Lane ${lane.id}/${model.id}] a cross-provider fallback is configured, but the Lane ${cross.credential_lane} secret slot is not provisioned.`);
       return null;
     }
-    return { provider: target.provider, credentialLane: target.id, modelId: cross.id };
+    return { provider: target.provider, credentialLane: target.id, modelId: cross.id, keyIndex: pickedKey(target.id) };
   }
   function validateAndRender(lane, text, model, complete, finishReason) {
     const supplied = contextFor(model, lane.id).pack;
@@ -2008,6 +2029,10 @@ ${requestError || ""}`;
         ].join("\n")
       };
     }
+    const keyCount = credentials.keys.length;
+    if (keyCount > 1) {
+      console.log(`[Lane ${lane.id}] the secret slot holds ${keyCount} keys, weights ${weightsOf(lane.id).join(":")}; PR #${pullNumber} starts on key ${pickedKey(lane.id) + 1}.`);
+    }
     const tried = [];
     let lastResponse;
     let lastResponseText = "";
@@ -2029,14 +2054,19 @@ ${requestError || ""}`;
         continue;
       }
       let ownQuota = null;
-      for (const crossing of [false, true]) {
+      const steps = [{ crossing: false, key: startKey(lane.id) }];
+      const keysTried = /* @__PURE__ */ new Set();
+      for (const { crossing, key, from } of steps) {
         const via = crossing ? crossRoute(lane, model) : null;
         if (crossing && !via) break;
         if (via) {
           console.log(`[Lane ${lane.id}/${model.id}] no usable review from ${lane.provider}; sending the same request once to ${via.modelId} on ${via.provider} through the Lane ${via.credentialLane} secret slot.`);
           await statusPublisher.update(lane.id, "cross", `${via.modelId} @ ${via.provider}`, ownQuota?.status);
         }
-        const route = via ?? ownRoute(lane, model);
+        if (from) await statusPublisher.update(lane.id, "account", `${model.id} @ key ${key + 1}`);
+        const route = via ?? ownRoute(lane, model, key);
+        const servedKey = !via && keyCount > 1 ? { index: key, count: keyCount, from } : null;
+        if (!via) keysTried.add(key);
         let outcome = await callModel(lane, model, { route });
         const resend = unservedResend(lane, model, outcome);
         if (resend) {
@@ -2045,7 +2075,7 @@ ${requestError || ""}`;
           await new Promise((resolve) => setTimeout(resolve, resend.delayMs));
           outcome = await callModel(lane, model, { route, windowMs: resend.windowMs, sessionSuffix: "-resend", attempt: 2 });
         }
-        const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : model.id;
+        const attemptLabel = via ? `${model.id} via ${via.provider} ${via.modelId}` : servedKey ? `${model.id} (key ${key + 1}/${keyCount})` : model.id;
         const { response, responseText, requestError, attempts, failureKind } = outcome;
         lastClosedStream = outcome.errorCode === "REVIEW_INCOMPLETE_STREAM" ? { httpStatus: outcome.httpStatus ?? 200, seconds: Math.round(outcome.elapsedMs / 1e3) } : null;
         lastProvider = route.provider;
@@ -2067,6 +2097,7 @@ ${requestError || ""}`;
                 primary,
                 servedBy: model,
                 servedVia: via,
+                servedKey,
                 // Why the lane's own provider could not serve, when it was a spent plan.
                 ownQuota: via ? ownQuota : null,
                 review: review2,
@@ -2086,6 +2117,7 @@ ${requestError || ""}`;
                 primary,
                 servedBy: model,
                 servedVia: via,
+                servedKey,
                 review: review2,
                 reasoningLength,
                 reasoningUnit,
@@ -2105,6 +2137,19 @@ ${requestError || ""}`;
         if (!quotaNote) onlyQuota = false;
         const failed = lastClosedStream ? `HTTP ${lastClosedStream.httpStatus}, stream closed before the model finished after ${lastClosedStream.seconds} s` : `HTTP ${response?.status ?? "request failed"}${quotaNote ? `, ${quotaNote.tried}` : ""}`;
         tried.push(`${attemptLabel} -> ${lastFailureKind === "report-invalid" ? `evidence contract rejected: ${lastReportError}` : lastOutcome || failed} (${attempts ?? 0} attempt(s))`);
+        if (crossing) continue;
+        if (keyCount > 1 && accountFailure(outcome)) {
+          if (outcome.failureKind === "quota-exhausted" || outcome.failureKind === "authentication-failed") spentKeys[lane.id].add(key);
+          if (outcome.failureKind === "quota-exhausted") creditSpentKeys[lane.id].add(key);
+          const next = Array.from({ length: keyCount - 1 }, (_, step) => (key + step + 1) % keyCount).find((index) => !keysTried.has(index) && !spentKeys[lane.id].has(index));
+          if (next !== void 0) {
+            const reason = accountReason(outcome, route.provider);
+            console.log(`[Lane ${lane.id}/${model.id}] key ${key + 1} of ${keyCount} could not serve (${outcome.failureKind || "rate limited"}, HTTP ${outcome.httpStatus ?? "none"}); sending the same request once with key ${next + 1} of the Lane ${lane.id} slot.`);
+            steps.push({ crossing: false, key: next, from: { index: key, reason } });
+            continue;
+          }
+        }
+        steps.push({ crossing: true });
       }
       if (model !== chain[chain.length - 1]) {
         console.log(`[Lane ${lane.id}/${primary.id}] falling back to the next model in the lane.`);
@@ -2134,7 +2179,7 @@ ${snippet}
 ${fence}
 </details>` : "",
       "",
-      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lastProvider === "anthropic" ? "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : quotaAction || `Action needed: the ${lastProvider} plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.` : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model and route.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : lastClosedStream ? `Action needed: this is not a rate limit, quota or authentication failure. ${lastProvider} accepted the request (HTTP ${lastClosedStream.httpStatus}) and streamed for ${lastClosedStream.seconds} s, then closed the stream before the model finished. Rerun with /review; a close at about the same time again points to a stream-length limit on that provider.` : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
+      gatewayBlocked ? "Action needed: use an API base URL that GitHub-hosted runners can reach without browser verification, or run this workflow on a self-hosted runner." : lastFailureKind === "quota-exhausted" ? lastProvider === "anthropic" ? keyCount > 1 && creditSpentKeys[lane.id].size === keyCount ? `Action needed: the Anthropic API credit balance is exhausted on every key in the Lane ${lane.id} slot. Wait for the next credit grant or add credit; another model on the same accounts cannot recover the review.` : "Action needed: the Anthropic API credit balance is exhausted. Wait for the next credit grant or add credit; another model on the same account cannot recover the review." : quotaAction || `Action needed: the ${lastProvider} plan quota is exhausted. Wait for its reset or replenish it; retrying another model on the same plan cannot recover the review.` : lastFailureKind === "authentication-failed" ? `Action needed: repair Lane ${lane.id} credentials or authentication configuration.` : lastFailureKind === "endpoint-unavailable" ? `Action needed: Lane ${lane.id} endpoint remained unreachable after one attempt per configured model and route.` : upstreamExhausted ? `Action needed: \`failover_exhausted\` means Lane ${lane.id} ran out of healthy upstreams. Inspect its central repository config and provider health.` : lastOutcome ? "Action needed: inspect finish_reason and token usage for the incomplete or empty final response. This is not an authentication/HTTP failure and does not by itself prove an input-context limit." : lastFailureKind === "report-invalid" ? "Action needed: inspect the local report-contract reason above. This is a report-format or code-evidence issue, not an authentication or HTTP failure; no parameter-repair resend was made." : lastClosedStream ? `Action needed: this is not a rate limit, quota or authentication failure. ${lastProvider} accepted the request (HTTP ${lastClosedStream.httpStatus}) and streamed for ${lastClosedStream.seconds} s, then closed the stream before the model finished. Rerun with /review; a close at about the same time again points to a stream-length limit on that provider.` : isServerSide ? "Action needed: a 5xx originates from the model gateway/account, not from GitHub access. Check the upstream response above \u2014 most often quota/balance exhausted, an invalid or expired key, a wrong model name, or a provider-side outage." : "Action needed: inspect the upstream response above to identify the request or auth problem."
     ].join("\n");
     return {
       lane,
@@ -2172,14 +2217,15 @@ ${fence}
       return;
     }
     const reviewedAt = (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const { servedBy, servedVia, review, reasoningLength, reasoningUnit, degraded, status, firstPass } = result;
-    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} unavailable)` : "";
+    const { servedBy, servedVia, servedKey, review, reasoningLength, reasoningUnit, degraded, status, firstPass } = result;
+    const viaText = servedVia ? ` via ${servedVia.provider} ${servedVia.modelId} (${lane.provider} unavailable)` : servedKey ? ` \xB7 key ${servedKey.index + 1}/${servedKey.count}` : "";
     const isFirstPass = firstPass === true && status === "valid";
     const prior = isFirstPass ? null : priorFirstPass(lane);
     const modelLine = degraded ? `Lane ${lane.id}: ${primary.id} unavailable -> served by ${servedBy.id}${viaText}` : `Lane ${lane.id}: ${servedBy?.id ?? primary.id}${isFirstPass ? " (first pass)" : ""}${viaText}`;
     const banner = [
       ...degraded ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${primary.label}\` \u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838\uFF0C\u672C\u6761 review \u7531\u540C\u901A\u9053\u5907\u7528\u6A21\u578B \`${servedBy.label}\` \u751F\u6210\u3002`] : [],
-      ...servedVia ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${servedBy.label}\` \u5728 \`${lane.provider}\` \u4E0A\u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838${result.ownQuota ? `\uFF08${result.ownQuota.banner}\uFF09` : ""}\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF \`${servedVia.provider}\`\uFF08Lane ${servedVia.credentialLane} \u7684\u56FA\u5B9A Secret \u69FD\u4F4D\uFF09\u751F\u6210\u3002`] : []
+      ...servedVia ? [`> \u2139\uFE0F Lane ${lane.id} \u7684 \`${servedBy.label}\` \u5728 \`${lane.provider}\` \u4E0A\u672A\u4EA7\u751F\u53EF\u7528\u5BA1\u6838${result.ownQuota ? `\uFF08${result.ownQuota.banner}\uFF09` : ""}\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF \`${servedVia.provider}\`\uFF08Lane ${servedVia.credentialLane} \u7684\u56FA\u5B9A Secret \u69FD\u4F4D\uFF09\u751F\u6210\u3002`] : [],
+      ...servedKey?.from ? [`> \u2139\uFE0F Lane ${lane.id} \u7684\u7B2C ${servedKey.from.index + 1} \u628A key \u672A\u80FD\u670D\u52A1\uFF08${servedKey.from.reason}\uFF09\uFF0C\u672C\u6761 review \u7531\u540C\u4E00\u6A21\u578B\u7ECF\u540C\u4E00 Secret \u69FD\u4F4D\u7684\u7B2C ${servedKey.index + 1} \u628A key \u751F\u6210\u3002`] : []
     ];
     if (isFirstPass) {
       banner.push(`> \u2139\uFE0F \u8FD9\u662F\u672C PR \u7684\u9996\u6B21\u5BA1\u6838\uFF0C\u7531 \`${servedBy.label}\` \u5B8C\u6210\uFF1B\u540E\u7EED\u63D0\u4EA4\u7531 \`${primary.label}\` \u5BA1\u6838\uFF0C\u672C\u6761\u9996\u5BA1\u4F1A\u6298\u53E0\u4FDD\u7559\u5728\u8BC4\u8BBA\u5E95\u90E8\u3002`);

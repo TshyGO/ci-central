@@ -120,6 +120,12 @@ function validateConfig(config, repository) {
     if (lane.resend_unserved !== undefined && typeof lane.resend_unserved !== 'boolean') {
       throw new Error(`${location}.resend_unserved must be a boolean.`);
     }
+    // A lane's secret slot may hold several keys of one provider, one per line (separate accounts).
+    // The weights split PRs between them in order; a key past the list counts 1.
+    if (lane.key_weights !== undefined && (!Array.isArray(lane.key_weights) || lane.key_weights.length < 2 || lane.key_weights.length > 4
+      || lane.key_weights.some((weight) => !Number.isInteger(weight) || weight < 1 || weight > 100))) {
+      throw new Error(`${location}.key_weights must be an array of 2 to 4 integers from 1 to 100.`);
+    }
     if (!ALLOWED_PROTOCOLS.has(lane.protocol)) throw new Error(`${location}.protocol is not supported.`);
     for (const field of ['request_timeout_ms', 'model_budget_ms']) {
       if (lane[field] !== undefined && (!Number.isInteger(lane[field]) || lane[field] < 1)) {

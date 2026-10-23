@@ -27,10 +27,10 @@ caller 不得传入模型、供应商、fallback、prompt、token/context 预算
 | Lane | 当前供应商 | 协议 | 模型链 | 是否阻塞 |
 |---|---|---|---|---|
 | A | OpenCode Go | OpenAI SDK / Responses SSE | Muse Spark 1.3 Contributor；失败时经 Lane C 槽位改问 Command Code 上的同一模型 | 计入两路 quorum |
-| B | Anthropic 官方 API（只经 szlab 台湾专用节点出口） | Anthropic SDK / Messages SSE | 每个 PR 的首次审核：Claude Sonnet 5.5（`first_pass`，effort high）；之后的提交：Claude Haiku 5.5（effort high）；Haiku 失败时经 Lane C 槽位改问 Command Code 上的 Haiku | 计入两路 quorum |
+| B | Anthropic 官方 API（只经 szlab 台湾专用节点出口；两个账号按 PR 号 2:1 分摊） | Anthropic SDK / Messages SSE | 每个 PR 的首次审核：Claude Sonnet 5.5（`first_pass`，effort high）；之后的提交：Claude Haiku 5.5（effort high）；Haiku 失败时经 Lane C 槽位改问 Command Code 上的 Haiku | 计入两路 quorum |
 | C | Command Code | OpenAI SDK / Responses SSE | GPT-6 Luna（`gpt-6-luna`，报告校准）；失败时经 Lane A 槽位改问 Go 上的同一模型（`gpt-6-luna`） | advisory；有效时计入 quorum |
 
-NebulaLab 的 Lane B 使用 Anthropic 官方 API（每月赠送额度）：首审由 Sonnet 5.5 完成，之后的提交由 Haiku 5.5 审核，首审结果折叠保留在同一条 Lane B 评论底部；2026-10-15 在 #1133/#1237/#1241 上实测，Sonnet 被核实的发现全部成立，Haiku 独有的发现（含两条 P1）全部是误报。首审时的 diff 中位数已是最终 diff 的 97%，因此每个 PR 只做一次首审。Haiku 在 Anthropic 上失败（额度耗尽、出口被拒或其他任何原因）时，经 Lane C 槽位改问 Command Code 上的同一模型一次；首审不跨供应商。其余六个仓库的 Lane B 是 OpenCode Go 上的 Claude Haiku 5.5，失败时同样改问 Command Code 上的 Haiku。
+NebulaLab 的 Lane B 使用 Anthropic 官方 API（每月赠送额度）：首审由 Sonnet 5.5 完成，之后的提交由 Haiku 5.5 审核，首审结果折叠保留在同一条 Lane B 评论底部；2026-10-15 在 #1133/#1237/#1241 上实测，Sonnet 被核实的发现全部成立，Haiku 独有的发现（含两条 P1）全部是误报。首审时的 diff 中位数已是最终 diff 的 97%，因此每个 PR 只做一次首审。Haiku 在 Anthropic 上失败（额度耗尽、出口被拒或其他任何原因）时，经 Lane C 槽位改问 Command Code 上的同一模型一次；首审不跨供应商。2026-10-23 起 Lane B 槽位放两个 Anthropic 账号的 key（每月 $200 与 $100），按 PR 号 2:1 分摊，同一 PR 的首审和后续都在同一账号；某个 key 余额用完、被拒或被限流时，同一请求先换另一把 key 发一次，再按上面的规则跨供应商（见“配置契约”的 `key_weights`）。其余六个仓库的 Lane B 是 OpenCode Go 上的 Claude Haiku 5.5，失败时同样改问 Command Code 上的 Haiku。
 
 Lane A/B 使用 OpenCode Go（整个 workspace 共用一个 5 小时/每周/每月额度池；NebulaLab 的 Lane B 除外），Lane C 使用 Command Code；额度以供应商实际返回为准，额度耗尽时返回 429 属于预期行为。每条 Lane 只有一个兜底，而且不换模型：主模型在本供应商没有产生可用审核时（任何原因，包括额度耗尽、超时、5xx、限流、认证、网络和不完整输出），把同一请求经另一条 Lane 的固定槽位改发另一供应商上的同一模型一次（见“配置契约”的 `cross_provider`）：A/B 改走 Command Code（Lane C 槽位），C 改走 Go（Lane A 槽位）。因此任一供应商用尽或故障时三路仍可发布；但三路的主模型和兜底都在 Go 与 Command Code 这两家上（只有 NebulaLab 的 Lane B 主模型在 Anthropic），两家同时不可用时这些 Lane 会一起失败，达不到两路 quorum，检查变红。失败的 Lane 仍然发布评论和诊断；七份配置均使用 `min_valid_lanes=2`，任何两路有效即可，包括 A+C 或 B+C。绿色检查不能证明每条 Lane 都成功。
 
@@ -99,6 +99,8 @@ PR_AGENT_LANE_C_API_BASE
 
 密钥不写入配置、日志、命令参数或提交。脚本通过安全提示读取 Key，并从 stdin 交给 `gh secret set`。
 
+一个槽位可以放同一供应商的多把 key（不同账号、各自的额度），每行一把；空行和首尾空白会被忽略，GitHub 会对多行 Secret 的每一行分别打码。只有一行时行为与以前完全相同。多把 key 怎样分摊见“配置契约”的 `key_weights`。旧版 runner 会把多行当成一把坏 key，所以必须先让 caller 固定到支持多行的 ci-central 版本，再写入多行 Secret。
+
 ### Caller 迁移状态
 
 原有六个仓库 caller 已切换到固定 Lane A/B/C 槽位；NebulaGraph License Service 使用相同接口接入，其 caller 与六个 Actions Secrets 在业务仓库中配置。reusable workflow 不再声明或读取任何旧供应商命名 Secret；缺少固定槽位凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。
@@ -140,6 +142,7 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 - Gemini 已知行为：Gemini 偶尔完全不思考（usage 不含 `thoughtsTokenCount`，约 15–30 秒返回）。目前只在 ci-central #63（diff 大量涉及模型思考内容的处理代码）上观察到：同一请求 6 次中 3 次不思考、3 次思考 1.2–3.1 万 tokens，固定或新 session 结果相同；同仓库 #61/#62 的 4 次与 NebulaLab PR 的二十多次均正常思考。评论脚注此时显示 `Thinking: 0 tokens`，便于在生产中统计频率。
 - Claude 经 Go 的 `/messages`（Anthropic 协议）调用，使用官方 `@anthropic-ai/sdk`，以 `x-api-key` 认证；Lane base 必须以 `/v1` 结尾。请求固定开启 adaptive thinking，深度只由 `effort` 控制。
 - Lane 可选 `first_pass`（与其他模型同样校验，不能配置 `cross_provider`，id 不得与主备重复）：PR 还没有首审时，它排在主模型前面先审，用同一 Lane 的供应商和密钥；成功后 Lane 评论写入 `ai-pr-review-first-pass:v1` 标记块，之后的提交只走主模型，并把这段首审原样折叠在评论底部（评论超过 GitHub 长度上限时保留标记、正文改为提示查看编辑历史）。首审失败时同一轮由主模型审核且不写标记，下一个提交会再试首审。
+- Lane 可选 `key_weights`（2–4 个 1–100 的整数）：当该 Lane 的槽位有多把 key 时，按 PR 号对权重之和取余，依次落在各把 key 的区间里（例如 `[2, 1]`：余 0、1 用第 1 把，余 2 用第 2 把），因此同一 PR 的首审、后续提交和手动 `/review` 都用同一把 key；超出列表的 key 权重记 1，未配置时平均分。某把 key 因账号原因失败（额度/余额耗尽、401/403 认证失败、429 限流）时，同一模型的同一请求换下一把没试过的 key 再发一次，之后才走 `cross_provider`；本供应商自身的故障（5xx、529 过载、超时、断流、空正文、证据契约失败）换 key 也救不回来，直接走 `cross_provider`。同一轮里余额耗尽或被拒的 key 不再作为后续模型的起点；全部 key 都已耗尽或被拒时，后续模型仍按单 key 时的规则从原定的 key 发一次（立即返回）再走 `cross_provider`。换 key 只用于本 Lane 自己的槽位：`cross_provider` 改发另一条 Lane 的槽位时只用那个槽位按 PR 号选中的 key，不再换 key。评论脚注写成 `Lane B: <模型> · key 2/2`，换过 key 时加横幅说明，状态表显示“key 未能服务，同模型换同一 Secret 槽位的下一把 key 运行中”；日志和评论不出现 key 的任何片段。这是“不在本供应商重发”的唯一例外（用户 2026-10-23 批准）：换的是另一个账号，不是重试同一路由。当前只有 NebulaLab 的 Lane B 配置 `[2, 1]`（第 1 个账号 $200/月，第 2 个 $100/月）。
 - `provider: anthropic` 的请求只允许在 `RUNNER_ENVIRONMENT=self-hosted` 且 `NEBULA_REVIEW_PROXY_URL=http://192.168.122.1:17890` 时发出：szlab Mihomo 对 `anthropic.com` 只路由到用户的台湾专用节点，没有其他出口。GitHub-hosted、VPS 代理或直连一律拒绝并发布诊断。
 - 模型的 `cross_provider`（`{ "credential_lane": "C", "id": "<目标供应商的模型 ID>" }`；2026-10-18 取代只在额度耗尽时触发的 `quota_overflow`，旧字段会被拒绝）：该模型在本 Lane 供应商上没有产生可用审核时（任何原因：额度耗尽、超时、5xx、限流、认证、网络、出口被拒、空正文、不完整输出或证据契约失败），把同一请求（同一 prompt、协议、输出上限、effort 和报告校准）改发 `credential_lane` 那条 Lane 的供应商和固定 Secret 槽位一次，模型 ID 换成 `id`，并获得该模型完整的时间窗口。只发这一个请求，不进入目标 Lane 自己的模型链，因此两条 Lane 可以互为目标。目标必须是另一条已配置、供应商不同的 Lane；Google 协议不支持；只允许这两个字段；首审模型不能配置。目标槽位未配置时不跨供应商，照常发布诊断。评论脚注写成 `Lane A: <模型> via <供应商> <目标模型 ID> (<本 Lane 供应商> unavailable)` 并加横幅说明，状态表显示“本供应商未产生可用审核，同模型经另一供应商运行中”。当前七个仓库：A 的 Muse 1.3 Contributor → Command Code `meta/muse-spark-1.3-contributor`（Responses，Lane C 槽位）；B 的 Haiku 5.5 → Command Code `claude-haiku-5-5`（Messages，Lane C 槽位）；C 的 GPT-6 Luna → Go `gpt-6-luna`（Responses，Lane A 槽位）。Command Code 上的 Muse 与 Haiku 已在 2026-10-15 从 szlab 用生产请求形状验证。以下是 C 仍用 Hy3 时的记录：Go 的 `hy3` 在 2026-10-18 从 szlab 确认可识别（当时 Go 周额度已用尽，返回 `GoUsageLimitError`）。已知限制：2026-10-14 观察到 Go 上的 Hy3 约 300 秒会被上游关流，大 PR 在 Go 上可能无法完成。2026-10-19 NebulaLab #1296 再次出现：Command Code 的 Hy3 返回 429 `RATE_LIMITED` 后改问 Go，Go 上的 Hy3 正常受理（HTTP 200），但思考速度约 120 字符/秒（同日 #1291 约 370 字符/秒、207 秒完成），到约 302 秒仍在思考、没有正文即被干净关流；客户端窗口为 900 秒，不是本地截止。
 
@@ -156,7 +159,7 @@ reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 
 - 自动触发复用“同一 head、同一 reusable workflow 版本、状态为 `valid`”的 Lane；PR 自身 diff 与该 Lane 上次有效审核相同、评论仍显示那次审核时也不调用模型（见“增量复审、重复审核跳过与额度诊断”）。缺失、诊断和不完整的 Lane，以及没有可信审核记录的旧版评论，会单独重跑；有可信记录且改动不大时只做增量复审。
 - 显式 `/review` 一律对每条 Lane 做当前版本的完整审核：不受同 HEAD 去重和“diff 未变”跳过的限制，也不做增量复审。
 - Lane 主模型在本供应商成功时绝不调用跨供应商兜底。
-- 所有模型请求失败（包括超时、限流、认证、HTML 验证页、DNS/TLS、解析失败、空正文和不完整输出）都只把同一模型改发另一供应商一次（`cross_provider`）；仍失败且没有配置其他模型时，发布诊断或明确标记的不完整结果，不计为有效审核。未配置该 Lane 凭据时仍直接发布配置诊断，不发送请求。
+- 所有模型请求失败（包括超时、限流、认证、HTML 验证页、DNS/TLS、解析失败、空正文和不完整输出）都只把同一模型改发另一供应商一次（`cross_provider`）；槽位有多把 key 时，账号原因的失败先换另一把 key 发一次（见 `key_weights`）；仍失败且没有配置其他模型时，发布诊断或明确标记的不完整结果，不计为有效审核。未配置该 Lane 凭据时仍直接发布配置诊断，不发送请求。
 - 不做退避重试，不做可选参数修复后重发，不跟随 HTTP 重定向。A/B/C 并行，每路一旦完整成功或主备均结束就立即校验 PR head/state 并发布稳定评论；不等待其他 Lane。最终 job 仍等待各路结束后执行原有 quorum/required 门禁，不因提早发布而提早放行。
 - 当前每条 Lane 在本供应商与另一供应商各请求一次、逐路即时发布：A 的 Muse 每次 10 分钟，B 的 Haiku 与 C 的 GPT-6 Luna 每次各 15 分钟（`model_budget_ms` 是单次请求的上限，不是 Lane 的累计时长）；三路统一由 SDK 客户端流式接入。SDK 及连接层超时与模型预算匹配，但 DNS/TLS、网络或供应商错误仍可能提前失败。
 - B 通过固定 Lane B 槽位调用 `claude-haiku-5-5`（Messages、effort high、输出上限 120000、diff 预算 120 万字符），失败一次立即经 Lane C 槽位改问 Command Code 上的 `claude-haiku-5-5`；C 通过固定 Lane C 槽位（Command Code）调用 `gpt-6-luna`（Responses、报告校准、输出上限 65536、diff 预算 26 万字符），失败一次立即经 Lane A 槽位改问 Go 上的 `gpt-6-luna`。GPT-6 Luna 的上下文为 1M tokens，暂沿用仓库默认、也是 2026-10-19 实测所用的 26 万字符 diff 预算，超出部分按完整 hunk 省略并在 coverage 中注明；Gemini 专用的“两轮深审”合约只随 `google-generate-content` 协议发送，GPT-6 Luna 不带。

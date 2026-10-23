@@ -5,6 +5,7 @@ const labels = { running: '主模型运行中', fallback: '备用模型运行中
   reused: '复用当前提交的有效证据', failed: '审核未生成', partial: '输出不完整，不计入 quorum',
   publication_failed: '结果发布失败，不计入 quorum', resending: '模型未受理，换会话重发一次中',
   cross: '本供应商未产生可用审核，同模型经另一供应商运行中',
+  account: 'key 未能服务，同模型换同一 Secret 槽位的下一把 key 运行中',
   quota: '供应商额度用尽，审核未生成',
   unchanged: '复用此前提交的有效证据，未请求模型', incremental: '增量审核运行中',
   skipped: '无可审查的文本补丁，未请求模型' };

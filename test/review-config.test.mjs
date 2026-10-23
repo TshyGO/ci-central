@@ -205,6 +205,22 @@ assert.deepEqual(nebula.lanes[1].first_pass, {
   max_output_tokens: 120000, effort: 'high', diff_char_budget: 1200000,
 }, 'NebulaLab Lane B first pass changed without a measurement behind it');
 assert.equal(nebula.lanes[1].primary.reporting_calibration, undefined, 'Haiku stays uncalibrated');
+// Two Anthropic accounts share NebulaLab's Lane B slot, one key per line (2026-10-23). PRs are
+// split by number in proportion to their monthly budgets: $200 for the first, $100 for the second.
+assert.deepEqual(nebula.lanes[1].key_weights, [2, 1], 'NebulaLab Lane B splits PRs 2:1 between its two Anthropic keys');
+for (const repository of repositories) {
+  const config = source.loadConfig(repository, actionPath);
+  assert.ok(config.lanes.every((lane) => lane.key_weights === undefined || (repository === 'TshyGO/NebulaLab' && lane.id === 'B')),
+    `${repository} only NebulaLab's Lane B weighs several keys`);
+}
+for (const loader of [source, bundled]) {
+  for (const weights of [[2], [], [2, 0], [2, 1.5], [2, '1'], [1, 2, 3, 4, 5], [101, 1], '2:1']) {
+    const config = structuredClone(nebula);
+    config.lanes[1].key_weights = weights;
+    assert.throws(() => loader.validateConfig(config, 'TshyGO/NebulaLab'), /lanes\[1\]\.key_weights must be an array of 2 to 4 integers from 1 to 100/,
+      `key_weights ${JSON.stringify(weights)} must be rejected`);
+  }
+}
 
 // A first pass is validated like any lane model, stays on the lane's own provider, and cannot
 // share an id with the models that follow it.

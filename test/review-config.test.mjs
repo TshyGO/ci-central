@@ -22,6 +22,7 @@ const repositories = [
   'TshyGO/NebulaLab-Plugins',
   'ptjworks/NebulaLab-Plugins',
   'TshyGO/resume-form-assistant-plugin',
+  'ptjworks/resume-form-assistant-plugin',
   'TshyGO/AI-Thesis-Polisher',
   'TshyGO/NebulaGraph-License-Service',
 ];
@@ -81,6 +82,11 @@ for (const repository of repositories) {
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
+assert.deepEqual(
+  source.loadConfig('ptjworks/resume-form-assistant-plugin', actionPath),
+  { ...source.loadConfig('TshyGO/resume-form-assistant-plugin', actionPath), repository: 'ptjworks/resume-form-assistant-plugin' },
+  'Resume Pro ownership migration must preserve every review policy and lane setting',
+);
 assert.deepEqual(
   source.loadConfig('ptjworks/NebulaLab-Docs', actionPath),
   { ...source.loadConfig('TshyGO/NebulaLab-Docs', actionPath), repository: 'ptjworks/NebulaLab-Docs' },

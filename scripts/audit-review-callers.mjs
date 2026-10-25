@@ -51,6 +51,7 @@ function api(endpoint) {
 const ownershipTransitions = [
   { id: 1210416222, names: ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins'] },
   { id: 1235769167, names: ['TshyGO/NebulaLab-Docs', 'ptjworks/NebulaLab-Docs'] },
+  { id: 1217054301, names: ['TshyGO/resume-form-assistant-plugin', 'ptjworks/resume-form-assistant-plugin'] },
 ];
 export function inventoryProfiles(profiles) {
   // Register both identities before transfer, but inspect the repository once.

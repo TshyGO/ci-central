@@ -61,11 +61,12 @@ review-action/config/repositories/
 ├─ TshyGO__NebulaLab-Plugins.json
 ├─ ptjworks__NebulaLab-Plugins.json
 ├─ TshyGO__resume-form-assistant-plugin.json
+├─ ptjworks__resume-form-assistant-plugin.json
 ├─ TshyGO__AI-Thesis-Polisher.json
 └─ TshyGO__NebulaGraph-License-Service.json
 ```
 
-七个仓库（九个仓库身份，Docs 与 Plugins 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
+七个仓库（十个仓库身份，Docs、Plugins 与 Resume Pro 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置同时关闭自动审核、跳过提示评论和状态检查；Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 

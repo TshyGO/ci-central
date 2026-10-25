@@ -2,6 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inspectCaller, inventoryProfiles, resolveRepository } from '../scripts/audit-review-callers.mjs';
 const sha = 'a'.repeat(40);
+test('Resume Pro transition resolves the stable repository without querying a future slug', () => {
+  const names = ['TshyGO/resume-form-assistant-plugin', 'ptjworks/resume-form-assistant-plugin'];
+  assert.deepEqual(inventoryProfiles(names), [names[0]]);
+  assert.deepEqual(inventoryProfiles([names[1]]), [names[1]]);
+  for (const profile of names) {
+    for (const canonical of names) {
+      const metadata = resolveRepository(profile, endpoint => {
+        assert.equal(endpoint, 'repositories/1217054301');
+        return { id: 1217054301, full_name: canonical };
+      });
+      assert.equal(metadata.full_name, canonical);
+    }
+  }
+});
 test('ownership transition audits one identity before and after transfer', () => {
   const oldName = 'TshyGO/NebulaLab-Plugins';
   const newName = 'ptjworks/NebulaLab-Plugins';

@@ -48,14 +48,31 @@ export function inspectCaller(text, expectedSha) {
 function api(endpoint) {
   return JSON.parse(execFileSync('gh', ['api', endpoint], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 }
+export function inventoryProfiles(profiles) {
+  // Register both identities before transfer, but inspect the repository once.
+  return profiles.filter((repo) => repo !== 'ptjworks/NebulaLab-Plugins'
+    || !profiles.includes('TshyGO/NebulaLab-Plugins'));
+}
+export function resolveRepository(profile, read = api) {
+  const pluginNames = ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins'];
+  if (!pluginNames.includes(profile)) return read(`repos/${profile}`);
+  // The immutable repository ID survives transfer and cannot be shadowed by a
+  // recreated legacy slug. Do not depend on legacy URL redirects for auditing.
+  const metadata = read('repositories/1210416222');
+  if (metadata.id !== 1210416222 || !pluginNames.includes(metadata.full_name)) {
+    throw new Error('Unexpected Plugins repository identity.');
+  }
+  return metadata;
+}
 export function audit(expectedSha, includeOpenPrs = true) {
   if (!/^[0-9a-f]{40}$/.test(expectedSha)) throw new Error('--expected-sha requires a full immutable SHA.');
   const profiles = fs.readdirSync(path.join(here, '../review-action/config/repositories'))
     .filter((file) => file.endsWith('.json')).map((file) => JSON.parse(fs.readFileSync(path.join(here, '../review-action/config/repositories', file), 'utf8')).repository)
     .filter((repo) => repo !== 'TshyGO/ci-central');
   const rows = [];
-  for (const repo of profiles) {
-    const metadata = api(`repos/${repo}`);
+  for (const profile of inventoryProfiles(profiles)) {
+    const metadata = resolveRepository(profile);
+    const repo = metadata.full_name;
     const refs = [{ label: metadata.default_branch, ref: metadata.default_branch, authoritative: true }];
     if (includeOpenPrs) {
       const pulls = JSON.parse(execFileSync('gh', ['api', '--paginate', '--slurp', `repos/${repo}/pulls?state=open&per_page=100`],

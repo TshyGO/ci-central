@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inspectCaller } from '../scripts/audit-review-callers.mjs';
+import { inspectCaller, inventoryProfiles } from '../scripts/audit-review-callers.mjs';
 const sha = 'a'.repeat(40);
+test('ownership transition audits the legacy route once, before and after transfer', () => {
+  const oldName = 'TshyGO/NebulaLab-Plugins';
+  const newName = 'ptjworks/NebulaLab-Plugins';
+  const other = 'TshyGO/NebulaLab-Docs';
+  assert.deepEqual(inventoryProfiles([oldName, newName, other]), [oldName, other]);
+  assert.deepEqual(inventoryProfiles([newName, other]), [newName, other]);
+  assert.deepEqual(inventoryProfiles([oldName, other]), [oldName, other]);
+});
 const slots = ['A', 'B', 'C'].flatMap((lane) => ['KEY', 'API_BASE'].map((suffix) => `PR_AGENT_LANE_${lane}_${suffix}`));
 const text = `jobs:\n  ai-pr-review:\n    uses: TshyGO/ci-central/.github/workflows/pr-review.yml@${sha}\n    with:\n      central_workflow_sha: ${sha}\n    secrets:\n`
   + slots.map((slot) => `      ${slot}: \${{ secrets.${slot} }}`).join('\n');

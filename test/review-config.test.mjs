@@ -19,6 +19,7 @@ const repositories = [
   'TshyGO/NebulaLab',
   'TshyGO/NebulaLab-Docs',
   'TshyGO/NebulaLab-Plugins',
+  'ptjworks/NebulaLab-Plugins',
   'TshyGO/resume-form-assistant-plugin',
   'TshyGO/AI-Thesis-Polisher',
   'TshyGO/NebulaGraph-License-Service',
@@ -79,6 +80,11 @@ for (const repository of repositories) {
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
+assert.deepEqual(
+  source.loadConfig('ptjworks/NebulaLab-Plugins', actionPath),
+  { ...source.loadConfig('TshyGO/NebulaLab-Plugins', actionPath), repository: 'ptjworks/NebulaLab-Plugins' },
+  'Plugins ownership migration must preserve every review policy and lane setting',
+);
 assert.equal(ciCentral.review_policy.request_timeout_ms, 600000);
 assert.equal(ciCentral.lanes[2].advisory, true, 'ci-central Lane C shares a provider quota and must not gate its own PRs');
 assert.equal(ciCentral.review_policy.model_budget_ms, 720000);

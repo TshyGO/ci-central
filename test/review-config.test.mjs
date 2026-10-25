@@ -18,6 +18,7 @@ const repositories = [
   'TshyGO/ci-central',
   'TshyGO/NebulaLab',
   'TshyGO/NebulaLab-Docs',
+  'ptjworks/NebulaLab-Docs',
   'TshyGO/NebulaLab-Plugins',
   'ptjworks/NebulaLab-Plugins',
   'TshyGO/resume-form-assistant-plugin',
@@ -80,6 +81,11 @@ for (const repository of repositories) {
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
+assert.deepEqual(
+  source.loadConfig('ptjworks/NebulaLab-Docs', actionPath),
+  { ...source.loadConfig('TshyGO/NebulaLab-Docs', actionPath), repository: 'ptjworks/NebulaLab-Docs' },
+  'Docs ownership migration must preserve every review policy and lane setting',
+);
 assert.deepEqual(
   source.loadConfig('ptjworks/NebulaLab-Plugins', actionPath),
   { ...source.loadConfig('TshyGO/NebulaLab-Plugins', actionPath), repository: 'ptjworks/NebulaLab-Plugins' },

@@ -1,14 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inspectCaller, inventoryProfiles } from '../scripts/audit-review-callers.mjs';
+import { inspectCaller, inventoryProfiles, resolveRepository } from '../scripts/audit-review-callers.mjs';
 const sha = 'a'.repeat(40);
-test('ownership transition audits the legacy route once, before and after transfer', () => {
+test('ownership transition audits one identity before and after transfer', () => {
   const oldName = 'TshyGO/NebulaLab-Plugins';
   const newName = 'ptjworks/NebulaLab-Plugins';
   const other = 'TshyGO/NebulaLab-Docs';
   assert.deepEqual(inventoryProfiles([oldName, newName, other]), [oldName, other]);
   assert.deepEqual(inventoryProfiles([newName, other]), [newName, other]);
   assert.deepEqual(inventoryProfiles([oldName, other]), [oldName, other]);
+});
+test('Plugins audit resolves its immutable ID and rejects an unexpected identity', () => {
+  for (const name of ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins']) {
+    for (const canonical of ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins']) {
+      const result = resolveRepository(name, endpoint => {
+        assert.equal(endpoint, 'repositories/1210416222');
+        return { id: 1210416222, full_name: canonical, default_branch: 'main' };
+      });
+      assert.equal(result.full_name, canonical);
+    }
+    assert.throws(() => resolveRepository(name, () => ({ id: 99, full_name: name })), /Unexpected/);
+    assert.throws(() => resolveRepository(name, () => ({ id: 1210416222, full_name: 'other/repository' })), /Unexpected/);
+  }
+  assert.equal(resolveRepository('TshyGO/NebulaLab-Docs', endpoint => endpoint), 'repos/TshyGO/NebulaLab-Docs');
 });
 const slots = ['A', 'B', 'C'].flatMap((lane) => ['KEY', 'API_BASE'].map((suffix) => `PR_AGENT_LANE_${lane}_${suffix}`));
 const text = `jobs:\n  ai-pr-review:\n    uses: TshyGO/ci-central/.github/workflows/pr-review.yml@${sha}\n    with:\n      central_workflow_sha: ${sha}\n    secrets:\n`

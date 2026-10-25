@@ -49,10 +49,20 @@ function api(endpoint) {
   return JSON.parse(execFileSync('gh', ['api', endpoint], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 }
 export function inventoryProfiles(profiles) {
-  // Register the new identity before transferring the repository. The legacy
-  // route exists now and redirects afterwards; resolve its canonical name once.
+  // Register both identities before transfer, but inspect the repository once.
   return profiles.filter((repo) => repo !== 'ptjworks/NebulaLab-Plugins'
     || !profiles.includes('TshyGO/NebulaLab-Plugins'));
+}
+export function resolveRepository(profile, read = api) {
+  const pluginNames = ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins'];
+  if (!pluginNames.includes(profile)) return read(`repos/${profile}`);
+  // The immutable repository ID survives transfer and cannot be shadowed by a
+  // recreated legacy slug. Do not depend on legacy URL redirects for auditing.
+  const metadata = read('repositories/1210416222');
+  if (metadata.id !== 1210416222 || !pluginNames.includes(metadata.full_name)) {
+    throw new Error('Unexpected Plugins repository identity.');
+  }
+  return metadata;
 }
 export function audit(expectedSha, includeOpenPrs = true) {
   if (!/^[0-9a-f]{40}$/.test(expectedSha)) throw new Error('--expected-sha requires a full immutable SHA.');
@@ -61,7 +71,7 @@ export function audit(expectedSha, includeOpenPrs = true) {
     .filter((repo) => repo !== 'TshyGO/ci-central');
   const rows = [];
   for (const profile of inventoryProfiles(profiles)) {
-    const metadata = api(`repos/${profile}`);
+    const metadata = resolveRepository(profile);
     const repo = metadata.full_name;
     const refs = [{ label: metadata.default_branch, ref: metadata.default_branch, authoritative: true }];
     if (includeOpenPrs) {

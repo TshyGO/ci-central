@@ -48,19 +48,23 @@ export function inspectCaller(text, expectedSha) {
 function api(endpoint) {
   return JSON.parse(execFileSync('gh', ['api', endpoint], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 }
+const ownershipTransitions = [
+  { id: 1210416222, names: ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins'] },
+  { id: 1235769167, names: ['TshyGO/NebulaLab-Docs', 'ptjworks/NebulaLab-Docs'] },
+];
 export function inventoryProfiles(profiles) {
   // Register both identities before transfer, but inspect the repository once.
-  return profiles.filter((repo) => repo !== 'ptjworks/NebulaLab-Plugins'
-    || !profiles.includes('TshyGO/NebulaLab-Plugins'));
+  return profiles.filter((repo) => !ownershipTransitions.some(({ names }) =>
+    repo === names[1] && profiles.includes(names[0])));
 }
 export function resolveRepository(profile, read = api) {
-  const pluginNames = ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins'];
-  if (!pluginNames.includes(profile)) return read(`repos/${profile}`);
+  const transition = ownershipTransitions.find(({ names }) => names.includes(profile));
+  if (!transition) return read(`repos/${profile}`);
   // The immutable repository ID survives transfer and cannot be shadowed by a
   // recreated legacy slug. Do not depend on legacy URL redirects for auditing.
-  const metadata = read('repositories/1210416222');
-  if (metadata.id !== 1210416222 || !pluginNames.includes(metadata.full_name)) {
-    throw new Error('Unexpected Plugins repository identity.');
+  const metadata = read(`repositories/${transition.id}`);
+  if (metadata?.id !== transition.id || !transition.names.includes(metadata.full_name)) {
+    throw new Error('Unexpected repository identity during ownership transition.');
   }
   return metadata;
 }

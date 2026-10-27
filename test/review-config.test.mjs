@@ -16,6 +16,7 @@ const bundled = require(path.join(actionPath, 'dist', 'index.js'));
 
 const repositories = [
   'TshyGO/ci-central',
+  'ptjworks/ci-central',
   'TshyGO/NebulaLab',
   'TshyGO/NebulaLab-Docs',
   'ptjworks/NebulaLab-Docs',
@@ -82,6 +83,11 @@ for (const repository of repositories) {
 }
 
 const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
+assert.deepEqual(
+  source.loadConfig('ptjworks/ci-central', actionPath),
+  { ...ciCentral, repository: 'ptjworks/ci-central' },
+  'ci-central ownership migration must preserve every review policy and lane setting',
+);
 assert.deepEqual(
   source.loadConfig('ptjworks/resume-form-assistant-plugin', actionPath),
   { ...source.loadConfig('TshyGO/resume-form-assistant-plugin', actionPath), repository: 'ptjworks/resume-form-assistant-plugin' },

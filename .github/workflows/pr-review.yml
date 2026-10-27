@@ -84,7 +84,21 @@ jobs:
             const jobWorkflowRef = (process.env.JOB_WORKFLOW_REF || '').trim();
             const callerWorkflowSha = (process.env.CALLER_WORKFLOW_SHA || '').trim().toLowerCase();
             const eventSha = (process.env.EVENT_SHA || '').trim().toLowerCase();
-            const expectedPrefix = 'TshyGO/ci-central/.github/workflows/pr-review.yml@';
+            // ci-central moves from TshyGO to ptjworks. The repository ID survives the transfer
+            // and the slug does not, so every identity decision below uses the live name behind
+            // the ID instead of a hard-coded slug or a legacy-name redirect.
+            const centralRepositoryId = 1283955746;
+            const centralRepositories = ['TshyGO/ci-central', 'ptjworks/ci-central'];
+            let central;
+            try {
+              central = (await github.request('GET /repositories/{repository_id}', { repository_id: centralRepositoryId })).data;
+            } catch (error) {
+              throw new Error(`Cannot resolve the ci-central repository by its immutable ID: ${error.message}`);
+            }
+            if (central?.id !== centralRepositoryId || !centralRepositories.includes(central.full_name)) {
+              throw new Error('The ci-central repository ID resolved to an unexpected repository identity.');
+            }
+            const expectedPrefix = `${central.full_name}/.github/workflows/pr-review.yml@`;
             let ref = jobWorkflowSha;
 
             if (jobWorkflowSha && !shaPattern.test(jobWorkflowSha)) {
@@ -104,7 +118,7 @@ jobs:
               ref = refSha;
             }
 
-            if (repository === 'TshyGO/ci-central') {
+            if (repository === central.full_name) {
               if (!ref) ref = eventSha;
               if (callerWorkflowSha && callerWorkflowSha !== ref) {
                 throw new Error('The same-repository central_workflow_sha does not match the resolved PR workflow SHA.');
@@ -125,12 +139,13 @@ jobs:
             if (!shaPattern.test(ref)) {
               throw new Error('Cannot resolve a trusted 40-character ci-central workflow SHA.');
             }
+            core.setOutput('repository', central.full_name);
             core.setOutput('sha', ref);
 
       - name: Check out matching central configuration
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          repository: TshyGO/ci-central
+          repository: ${{ steps.central-ref.outputs.repository }}
           ref: ${{ steps.central-ref.outputs.sha }}
           path: .ci-central
           sparse-checkout: review-action

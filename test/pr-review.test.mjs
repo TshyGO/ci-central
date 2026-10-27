@@ -257,7 +257,7 @@ function checkoutContract(text) {
   const [checkout] = checkoutSteps;
   return Object.keys(checkout.with).sort().join(',') === 'path,ref,repository,sparse-checkout'
     && checkout.uses === pinnedCheckoutAction
-    && checkout.with.repository === 'TshyGO/ci-central'
+    && checkout.with.repository === '${{ steps.central-ref.outputs.repository }}'
     && checkout.with.ref === '${{ steps.central-ref.outputs.sha }}'
     && checkout.with.path === '.ci-central'
     && checkout.with['sparse-checkout'] === 'review-action';
@@ -317,14 +317,14 @@ const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
-    && sha256(resolver) === 'a6c84e5ea58b2db4246625c7fb128eaa2c11e8936ccfeb12eed0a34f6209dc31'
+    && sha256(resolver) === '57f1223e1e0f9d3f3bf3db42ad27a55564c822b1b17e7c90ba058bffb4bff155'
     && sha256(review) === '256124d4dc1e61272ae36bb895f8c34d62c1664bdd6242d85c2661096423fa5a';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
 if (resolverScript === undefined || reviewScript === undefined) throw new Error('Trusted github-script blocks not found');
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-const runResolver = new AsyncFunction('core', 'process', resolverScript);
+const runResolver = new AsyncFunction('core', 'github', 'process', resolverScript);
 const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', 'require', reviewScript);
 
 const repositoryConfig = (name) => JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', `TshyGO__${name}.json`), 'utf8'));
@@ -499,15 +499,25 @@ const healthy = ({ model, body }) => reply(200, body.contents
   ? geminiResult(`# review ${model}`, { thought: 'PRIVATE GEMINI THOUGHT' })
   : chatResult(model, `# review ${model}`));
 
-async function resolverScenario(env) {
-  const outputs = {}, warnings = [];
+const centralRepositoryId = 1283955746;
+const liveCentral = (full_name) => ({ id: centralRepositoryId, full_name });
+// `central` is what the immutable-ID lookup returns: repository metadata, or an Error to throw.
+async function resolverScenario(env, central = liveCentral('TshyGO/ci-central')) {
+  const outputs = {}, warnings = [], requests = [];
+  const github = {
+    request: async (route, parameters) => {
+      requests.push({ route, parameters });
+      if (central instanceof Error) throw central;
+      return { data: central };
+    },
+  };
   let error;
   try {
-    await runResolver({ setOutput: (name, value) => { outputs[name] = value; }, warning: (message) => warnings.push(message) }, { env });
+    await runResolver({ setOutput: (name, value) => { outputs[name] = value; }, warning: (message) => warnings.push(message) }, github, { env });
   } catch (caught) {
     error = caught;
   }
-  return { outputs, warnings, error };
+  return { outputs, warnings, requests, error };
 }
 
 check('workflow exposes only immutable central SHA metadata and a runner tier, never model, provider, fallback, prompt, or budget inputs',
@@ -578,8 +588,8 @@ check('checkout contract rejects a quoted duplicate uses key in a trusted step',
   `        uses: ${pinnedCheckoutAction} # v5\n        "uses": ${pinnedCheckoutAction}`,
 )));
 check('checkout contract rejects a quoted duplicate repository key', !checkoutContract(replaceExactlyOnce(workflowText,
-  '          repository: TshyGO/ci-central',
-  '          repository: TshyGO/ci-central\n          "repository": TshyGO/NebulaLab',
+  '          repository: ${{ steps.central-ref.outputs.repository }}',
+  '          repository: ${{ steps.central-ref.outputs.repository }}\n          "repository": TshyGO/NebulaLab',
 )));
 check('checkout contract rejects a shell clone and checkout of the PR head', !checkoutContract(insertBeforeTrustedCheckout(workflowText,
   `      - name: Clone caller PR code\n        run: |\n          git clone https://github.com/\${{ github.repository }} caller\n          git -C caller checkout \${{ github.event.pull_request.head.sha }}`)));
@@ -618,15 +628,22 @@ check('checkout contract rejects a missing checkout ref', !checkoutContract(repl
   '',
 )));
 check('checkout contract rejects the caller repository', !checkoutContract(replaceExactlyOnce(workflowText,
-  '          repository: TshyGO/ci-central',
+  '          repository: ${{ steps.central-ref.outputs.repository }}',
   '          repository: ${{ github.repository }}',
 )));
 check('checkout contract rejects a literal non-central repository', !checkoutContract(replaceExactlyOnce(workflowText,
-  '          repository: TshyGO/ci-central',
+  '          repository: ${{ steps.central-ref.outputs.repository }}',
   '          repository: TshyGO/NebulaLab',
 )));
+// Either central slug is wrong hard-coded: one is gone after the ptjworks transfer, the other
+// does not exist before it. Only the name resolved from the immutable ID is always live.
+check('checkout contract rejects a hard-coded central slug in favour of the ID-resolved name',
+  ['TshyGO/ci-central', 'ptjworks/ci-central'].every((slug) => !checkoutContract(replaceExactlyOnce(workflowText,
+    '          repository: ${{ steps.central-ref.outputs.repository }}',
+    `          repository: ${slug}`,
+  ))));
 check('checkout contract rejects an implicit caller-repository checkout', !checkoutContract(replaceExactlyOnce(workflowText,
-  '          repository: TshyGO/ci-central\n',
+  '          repository: ${{ steps.central-ref.outputs.repository }}\n',
   '',
 )));
 check('checkout contract rejects additional checkout credentials', !checkoutContract(replaceExactlyOnce(workflowText,
@@ -645,11 +662,14 @@ check('config resolver uses a validated trusted workflow SHA', workflowText.incl
   && workflowText.includes('JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}')
   && workflowText.includes('JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}')
   && workflowText.includes('CALLER_WORKFLOW_SHA: ${{ inputs.central_workflow_sha }}')
-  && workflowText.includes("const expectedPrefix = 'TshyGO/ci-central/.github/workflows/pr-review.yml@';")
+  && workflowText.includes(`const centralRepositoryId = ${centralRepositoryId};`)
+  && workflowText.includes("const centralRepositories = ['TshyGO/ci-central', 'ptjworks/ci-central'];")
+  && workflowText.includes('const expectedPrefix = `${central.full_name}/.github/workflows/pr-review.yml@`;')
   && workflowText.includes('External callers must repeat their full ci-central uses pin as central_workflow_sha.')
   && workflowText.includes('The reusable workflow context SHA does not match central_workflow_sha.')
   && workflowText.includes('REPOSITORY: ${{ github.repository }}')
-  && workflowText.includes("repository === 'TshyGO/ci-central'")
+  && workflowText.includes('if (repository === central.full_name) {')
+  && !workflowText.includes("repository === 'TshyGO/ci-central'")
   && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('trusted 40-character ci-central workflow SHA')
@@ -695,6 +715,50 @@ resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLO
 check('same-repository relative caller falls back to its exact event SHA', resolved.error === undefined && resolved.outputs.sha === headSha);
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
 check('same-repository caller rejects an accidentally mismatched explicit SHA', /same-repository central_workflow_sha does not match/.test(resolved.error?.message || ''));
+
+// ptjworks ownership transfer: ci-central is identified by its immutable repository ID, so
+// the same reviewed SHA keeps working on both sides of the transfer without redirects.
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
+check('resolver looks ci-central up by its immutable ID and checks out the live name',
+  resolved.error === undefined && resolved.outputs.repository === 'TshyGO/ci-central'
+  && resolved.requests.length === 1 && resolved.requests[0].route === 'GET /repositories/{repository_id}'
+  && resolved.requests[0].parameters?.repository_id === centralRepositoryId);
+const transferred = liveCentral('ptjworks/ci-central');
+resolved = await resolverScenario({ REPOSITORY: 'ptjworks/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha }, transferred);
+check('after the transfer the ptjworks self-caller still resolves its exact event SHA',
+  resolved.error === undefined && resolved.outputs.sha === headSha && resolved.outputs.repository === 'ptjworks/ci-central');
+resolved = await resolverScenario({ REPOSITORY: 'ptjworks/NebulaLab-Docs', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha }, transferred);
+check('after the transfer an external caller checks out ci-central under its new name',
+  resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.outputs.repository === 'ptjworks/ci-central');
+resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_REF: `ptjworks/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+}, transferred);
+check('after the transfer an exposed job workflow ref must name the live identity',
+  resolved.error === undefined && resolved.outputs.sha === workflowSha);
+resolved = await resolverScenario({
+  REPOSITORY: 'TshyGO/NebulaLab',
+  CALLER_WORKFLOW_SHA: workflowSha,
+  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+}, transferred);
+check('after the transfer a job workflow ref naming the legacy slug fails closed', /exact ci-central pr-review/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha }, transferred);
+check('a repository recreated at the legacy slug is an external caller, never the trusted self-caller',
+  /must repeat/.test(resolved.error?.message || '') && resolved.outputs.sha === undefined);
+for (const [name, central] of [
+  ['an unexpected repository name', liveCentral('someone-else/ci-central')],
+  ['a different repository ID', { id: 1, full_name: 'ptjworks/ci-central' }],
+  ['an empty response', null],
+]) {
+  resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha }, central);
+  check(`ID lookup returning ${name} fails closed before any checkout`,
+    /unexpected repository identity/.test(resolved.error?.message || '') && resolved.outputs.sha === undefined && resolved.outputs.repository === undefined);
+}
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha }, new Error('HTTP 503'));
+check('a failed ID lookup fails visibly with the cause',
+  /Cannot resolve the ci-central repository by its immutable ID: HTTP 503/.test(resolved.error?.message || '') && resolved.outputs.sha === undefined);
+
 check('reusable workflow accepts only fixed Lane secret slots',
   !['PR_AGENT_OPENAI_KEY', 'PR_AGENT_OPENAI_API_BASE', 'PR_AGENT_TENCENT_KEY', 'PR_AGENT_TENCENT_API_BASE', 'PR_AGENT_GOOGLE_AI_KEY', 'LEGACY_']
     .some((name) => workflowText.includes(name)));
@@ -713,7 +777,15 @@ check('central repository self-caller exercises the workflow from its own PR rev
   && callerText.includes('needs: review-guard')
   && callerText.includes("needs.review-guard.outputs.proceed != 'false'")
   && callerText.includes('!cancelled()')
-  && callerText.includes("github.event.pull_request.author_association == 'OWNER'")
+  // Under ptjworks the owner's PRs are MEMBER. Accept it only from this repository's own
+  // branches, which already needs write access; never widen the automatic path to forks.
+  && callerText.replace(/\r\n/g, '\n').includes([
+    "          github.event_name == 'pull_request' &&",
+    `          contains(fromJSON('["OWNER", "MEMBER"]'), github.event.pull_request.author_association) &&`,
+    '          github.event.pull_request.head.repo.full_name == github.repository',
+    '        ) ||',
+  ].join('\n'))
+  && !callerText.includes("github.event.pull_request.author_association == 'OWNER'")
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
   && workflowText.includes('cancel-in-progress: true')

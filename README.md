@@ -55,6 +55,7 @@ SDK 对干净 EOF、`[DONE]` 和传输层 `AbortError` 都会静默结束迭代�
 ```text
 review-action/config/repositories/
 ├─ TshyGO__ci-central.json
+├─ ptjworks__ci-central.json
 ├─ TshyGO__NebulaLab.json
 ├─ TshyGO__NebulaLab-Docs.json
 ├─ ptjworks__NebulaLab-Docs.json
@@ -66,7 +67,7 @@ review-action/config/repositories/
 └─ TshyGO__NebulaGraph-License-Service.json
 ```
 
-七个仓库（十个仓库身份，Docs、Plugins 与 Resume Pro 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改，非 owner PR 不映射 Lane 密钥。
+七个仓库（十一个仓库身份，ci-central、Docs、Plugins 与 Resume Pro 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改。自动审核只给本仓库分支上作者为 OWNER 或 MEMBER 的 PR 映射 Lane 密钥（迁入 ptjworks 组织后 owner 的 PR 显示为 MEMBER；本仓库分支本身就要求写权限），fork PR 只能由有权限的人手动 `/review`。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置同时关闭自动审核、跳过提示评论和状态检查；Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 
@@ -107,6 +108,15 @@ PR_AGENT_LANE_C_API_BASE
 ### Caller 迁移状态
 
 原有六个仓库 caller 已切换到固定 Lane A/B/C 槽位；NebulaGraph License Service 使用相同接口接入，其 caller 与六个 Actions Secrets 在业务仓库中配置。reusable workflow 不再声明或读取任何旧供应商命名 Secret；缺少固定槽位凭据的 Lane 会发布一条配置诊断，其他 Lane 继续审核。
+
+### ci-central 迁往 ptjworks
+
+ci-central 将从 `TshyGO/ci-central` 转移到 `ptjworks/ci-central`。GitHub 不会把 `uses:` 对 reusable workflow 的调用重定向到新名字，转移那一刻起，仍写旧名字的 caller 就会报 `repository not found`。因此：
+
+- reusable workflow 按不可变仓库 ID `1283955746` 查出 ci-central 的当前名字，再用这个名字检出 `review-action`，并判定是不是同仓自审。同一个已审核 SHA 在转移前后都能用，不依赖旧名字的 Git 重定向；在旧名字上重建的仓库只会被当成外部 caller。
+- `ptjworks__ci-central.json` 与 `TshyGO__ci-central.json` 的内容只差 `repository` 字段，测试强制二者一致。
+- `scripts/audit-review-callers.mjs` 同样按 ID 查出当前名字；`uses:` 写的不是当前名字的 caller 报 `stale_central_name`。
+- 转移时，六个业务仓 caller 的 `uses:` 必须立即把 `TshyGO/ci-central` 改成 `ptjworks/ci-central`，SHA 不变。转移后的收尾 PR 删除 `TshyGO` 身份，并更新本文档、caller 模板与 `scripts/set-lane-secret.ps1` 的仓库列表。以后不要在 `TshyGO` 下再建名为 `ci-central` 的仓库。
 
 ## Runner 选择
 
@@ -151,7 +161,7 @@ caller 只能选择档位，**不能传入任意 runner label**。这不是为�
 
 `review-action` 在发送模型请求前校验配置。文件名、`repository` 字段和 `github.repository` 必须一致；未知仓库会失败关闭，不会落回某个默认模型。
 
-reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 `uses` 中的同一个完整 SHA 重复传入唯一的非策略输入 `central_workflow_sha`；如果 GitHub 提供 `github.job_workflow_sha` 或 `github.job_workflow_ref`，则严格校验 workflow 路径、40 位 SHA 及二者一致性。当前 GitHub 外部 reusable job 实测不会暴露这两个字段，此时会发出 warning，并以受审 caller 的显式 SHA 检出 `review-action`/仓库 JSON、写入 v2 evidence。此 fallback 无法在 called workflow 内独立证明 `uses` 也使用相同 SHA，因此 caller 文件的 code review 是信任边界；三个业务仓必须同时修改 `uses` 与 `with.central_workflow_sha`，禁止使用分支或 tag。仅当 `github.repository` 严格等于 `TshyGO/ci-central` 且同仓相对 caller 无法提供上述 SHA 时，才使用本次事件的 `github.sha`。
+reusable workflow 先解析并校验 40 位中央 ref：外部 caller 必须把 `uses` 中的同一个完整 SHA 重复传入唯一的非策略输入 `central_workflow_sha`；如果 GitHub 提供 `github.job_workflow_sha` 或 `github.job_workflow_ref`，则严格校验 workflow 路径（必须以按仓库 ID 查出的 ci-central 当前名字开头）、40 位 SHA 及二者一致性。当前 GitHub 外部 reusable job 实测不会暴露这两个字段，此时会发出 warning，并以受审 caller 的显式 SHA 检出 `review-action`/仓库 JSON、写入 v2 evidence。此 fallback 无法在 called workflow 内独立证明 `uses` 也使用相同 SHA，因此 caller 文件的 code review 是信任边界；三个业务仓必须同时修改 `uses` 与 `with.central_workflow_sha`，禁止使用分支或 tag。仅当 `github.repository` 严格等于按仓库 ID `1283955746` 查出的 ci-central 当前名字，且同仓相对 caller 无法提供上述 SHA 时，才使用本次事件的 `github.sha`。中央配置也从这个当前名字检出；ID 查不到，或查出的名字不在 `TshyGO/ci-central`、`ptjworks/ci-central` 之内时，失败关闭。
 
 ## 精度、去重与节流保证
 

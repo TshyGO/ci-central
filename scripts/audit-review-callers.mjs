@@ -6,11 +6,15 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export function inspectCaller(text, expectedSha) {
+// ci-central itself is moving to ptjworks. GitHub does not redirect reusable-workflow calls,
+// so a caller must name whichever identity is live; the immutable ID says which one that is.
+const centralRepositoryId = 1283955746;
+export const centralRepositories = ['TshyGO/ci-central', 'ptjworks/ci-central'];
+export function inspectCaller(text, expectedSha, expectedCentral = null) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const uses = lines.flatMap((line, index) => {
-    const match = /^ {4}uses:\s*TshyGO\/ci-central\/\.github\/workflows\/pr-review\.yml@([a-f0-9]{40})\s*(?:#.*)?$/.exec(line);
-    return match ? [{ index, sha: match[1] }] : [];
+    const match = /^ {4}uses:\s*(TshyGO\/ci-central|ptjworks\/ci-central)\/\.github\/workflows\/pr-review\.yml@([a-f0-9]{40})\s*(?:#.*)?$/.exec(line);
+    return match ? [{ index, central: match[1], sha: match[2] }] : [];
   });
   let block = '';
   if (uses.length === 1) {
@@ -39,10 +43,19 @@ export function inspectCaller(text, expectedSha) {
     return [...secretBlock.matchAll(expression)].length === 1;
   });
   const matched = pins.length === 1 && inputs.length === 1 && pins[0] === inputs[0];
-  return { pin: pins.length === 1 ? pins[0] : null, matched, mappingsValid,
-    current: matched && pins[0] === expectedSha,
+  const central = uses.length === 1 ? uses[0].central : null;
+  // Every ci-central reference must follow the move, not only the pr-review pin inspected
+  // above: NebulaLab's caller also pins claude-pr-review.yml, which breaks just the same.
+  // GitHub resolves owner and repository names case-insensitively, so compare them that way.
+  const centralNames = lines.flatMap((line) => {
+    const match = /^\s*(?:-\s+)?uses:\s*["']?(TshyGO\/ci-central|ptjworks\/ci-central)\//i.exec(line);
+    return match ? [match[1].toLowerCase()] : [];
+  });
+  const centralLive = !expectedCentral || centralNames.every((name) => name === expectedCentral.toLowerCase());
+  return { pin: pins.length === 1 ? pins[0] : null, central, matched, mappingsValid,
+    current: matched && centralLive && pins[0] === expectedSha,
     diagnosis: !matched ? 'caller_pin_mismatch' : !mappingsValid ? 'secret_mapping_mismatch'
-      : pins[0] !== expectedSha ? 'old_branch_pin' : 'current' };
+      : !centralLive ? 'stale_central_name' : pins[0] !== expectedSha ? 'old_branch_pin' : 'current' };
 }
 
 function api(endpoint) {
@@ -54,9 +67,17 @@ const ownershipTransitions = [
   { id: 1217054301, names: ['TshyGO/resume-form-assistant-plugin', 'ptjworks/resume-form-assistant-plugin'] },
 ];
 export function inventoryProfiles(profiles) {
-  // Register both identities before transfer, but inspect the repository once.
-  return profiles.filter((repo) => !ownershipTransitions.some(({ names }) =>
-    repo === names[1] && profiles.includes(names[0])));
+  // ci-central reviews itself through a relative caller, so neither of its identities is
+  // audited. Register both identities of a moving caller, but inspect the repository once.
+  return profiles.filter((repo) => !centralRepositories.includes(repo)
+    && !ownershipTransitions.some(({ names }) => repo === names[1] && profiles.includes(names[0])));
+}
+export function resolveCentralRepository(read = api) {
+  const metadata = read(`repositories/${centralRepositoryId}`);
+  if (metadata?.id !== centralRepositoryId || !centralRepositories.includes(metadata.full_name)) {
+    throw new Error('Unexpected ci-central repository identity during ownership transition.');
+  }
+  return metadata.full_name;
 }
 export function resolveRepository(profile, read = api) {
   const transition = ownershipTransitions.find(({ names }) => names.includes(profile));
@@ -72,8 +93,8 @@ export function resolveRepository(profile, read = api) {
 export function audit(expectedSha, includeOpenPrs = true) {
   if (!/^[0-9a-f]{40}$/.test(expectedSha)) throw new Error('--expected-sha requires a full immutable SHA.');
   const profiles = fs.readdirSync(path.join(here, '../review-action/config/repositories'))
-    .filter((file) => file.endsWith('.json')).map((file) => JSON.parse(fs.readFileSync(path.join(here, '../review-action/config/repositories', file), 'utf8')).repository)
-    .filter((repo) => repo !== 'TshyGO/ci-central');
+    .filter((file) => file.endsWith('.json')).map((file) => JSON.parse(fs.readFileSync(path.join(here, '../review-action/config/repositories', file), 'utf8')).repository);
+  const liveCentral = resolveCentralRepository();
   const rows = [];
   for (const profile of inventoryProfiles(profiles)) {
     const metadata = resolveRepository(profile);
@@ -91,7 +112,7 @@ export function audit(expectedSha, includeOpenPrs = true) {
       const workflow = /NebulaLab-(Docs|Plugins)$/.test(repo) ? 'ai-pr-review.yml' : 'pr-agent.yml';
       try {
         const file = api(`repos/${repo}/contents/.github/workflows/${workflow}?ref=${encodeURIComponent(target.ref)}`);
-        const result = inspectCaller(Buffer.from(file.content, 'base64').toString('utf8'), expectedSha);
+        const result = inspectCaller(Buffer.from(file.content, 'base64').toString('utf8'), expectedSha, liveCentral);
         rows.push({ repository: repo, target: target.label, authoritative: target.authoritative, ...result });
       } catch {
         rows.push({ repository: repo, target: target.label, authoritative: target.authoritative, diagnosis: 'unavailable' });

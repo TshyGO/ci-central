@@ -44,7 +44,13 @@ export function inspectCaller(text, expectedSha, expectedCentral = null) {
   });
   const matched = pins.length === 1 && inputs.length === 1 && pins[0] === inputs[0];
   const central = uses.length === 1 ? uses[0].central : null;
-  const centralLive = !expectedCentral || central === expectedCentral;
+  // Every ci-central reference must follow the move, not only the pr-review pin inspected
+  // above: NebulaLab's caller also pins claude-pr-review.yml, which breaks just the same.
+  const centralNames = lines.flatMap((line) => {
+    const match = /^\s*(?:-\s+)?uses:\s*["']?(TshyGO\/ci-central|ptjworks\/ci-central)\//.exec(line);
+    return match ? [match[1]] : [];
+  });
+  const centralLive = !expectedCentral || centralNames.every((name) => name === expectedCentral);
   return { pin: pins.length === 1 ? pins[0] : null, central, matched, mappingsValid,
     current: matched && centralLive && pins[0] === expectedSha,
     diagnosis: !matched ? 'caller_pin_mismatch' : !mappingsValid ? 'secret_mapping_mismatch'

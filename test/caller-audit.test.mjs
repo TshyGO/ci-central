@@ -101,3 +101,12 @@ test('rollout audit requires callers to name the live ci-central identity', () =
   assert.equal(stale.current, false);
   assert.equal(inspectCaller(text.replace('uses: TshyGO/ci-central/', 'uses: someone/ci-central/'), sha).diagnosis, 'caller_pin_mismatch');
 });
+test('rollout audit flags any other ci-central pin left on the stale identity', () => {
+  const moved = text.replace('uses: TshyGO/ci-central/', 'uses: ptjworks/ci-central/');
+  const claudeJob = (owner) => `\n  claude-review:\n    uses: ${owner}/ci-central/.github/workflows/claude-pr-review.yml@${'b'.repeat(40)}\n`;
+  assert.equal(inspectCaller(moved + claudeJob('TshyGO'), sha, 'ptjworks/ci-central').diagnosis, 'stale_central_name');
+  assert.equal(inspectCaller(moved + claudeJob('ptjworks'), sha, 'ptjworks/ci-central').diagnosis, 'current');
+  assert.equal(inspectCaller(moved + `\n  claude-review:\n    uses: "TshyGO/ci-central/.github/workflows/claude-pr-review.yml@${'b'.repeat(40)}"\n`, sha, 'ptjworks/ci-central').diagnosis, 'stale_central_name');
+  // A comment that still mentions the old name is not a call and must not fail the audit.
+  assert.equal(inspectCaller('# Thin caller: logic lives in TshyGO/ci-central.\n#    uses: TshyGO/ci-central/.github/workflows/claude-pr-review.yml@x\n' + moved, sha, 'ptjworks/ci-central').diagnosis, 'current');
+});

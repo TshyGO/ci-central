@@ -107,6 +107,11 @@ test('rollout audit flags any other ci-central pin left on the stale identity', 
   assert.equal(inspectCaller(moved + claudeJob('TshyGO'), sha, 'ptjworks/ci-central').diagnosis, 'stale_central_name');
   assert.equal(inspectCaller(moved + claudeJob('ptjworks'), sha, 'ptjworks/ci-central').diagnosis, 'current');
   assert.equal(inspectCaller(moved + `\n  claude-review:\n    uses: "TshyGO/ci-central/.github/workflows/claude-pr-review.yml@${'b'.repeat(40)}"\n`, sha, 'ptjworks/ci-central').diagnosis, 'stale_central_name');
+  // GitHub resolves names case-insensitively, so a re-cased legacy pin still targets the old name.
+  for (const owner of ['tshygo', 'TSHYGO']) {
+    assert.equal(inspectCaller(moved + claudeJob(owner), sha, 'ptjworks/ci-central').diagnosis, 'stale_central_name');
+  }
+  assert.equal(inspectCaller(moved + claudeJob('PtjWorks'), sha, 'ptjworks/ci-central').diagnosis, 'current');
   // A comment that still mentions the old name is not a call and must not fail the audit.
   assert.equal(inspectCaller('# Thin caller: logic lives in TshyGO/ci-central.\n#    uses: TshyGO/ci-central/.github/workflows/claude-pr-review.yml@x\n' + moved, sha, 'ptjworks/ci-central').diagnosis, 'current');
 });

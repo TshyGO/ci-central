@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { centralRepositories, inspectCaller, inventoryProfiles, resolveCentralRepository, resolveRepository } from '../scripts/audit-review-callers.mjs';
 const sha = 'a'.repeat(40);
-test('ci-central audits neither of its own identities as a caller', () => {
+// Only the live identity is excluded. A repository recreated at the retired TshyGO/ci-central
+// slug is a separate repository, so a profile for it would be audited like any other caller.
+test('ci-central does not audit its live identity as a caller', () => {
   assert.deepEqual(inventoryProfiles([...centralRepositories, 'TshyGO/NebulaLab']), ['TshyGO/NebulaLab']);
   assert.deepEqual(inventoryProfiles(['ptjworks/ci-central', 'ptjworks/NebulaLab-Docs']), ['ptjworks/NebulaLab-Docs']);
 });

@@ -67,6 +67,7 @@ const ownershipTransitions = [
   { id: 1210416222, names: ['TshyGO/NebulaLab-Plugins', 'ptjworks/NebulaLab-Plugins'] },
   { id: 1235769167, names: ['TshyGO/NebulaLab-Docs', 'ptjworks/NebulaLab-Docs'] },
   { id: 1217054301, names: ['TshyGO/resume-form-assistant-plugin', 'ptjworks/resume-form-assistant-plugin'] },
+  { id: 1190330270, names: ['TshyGO/AI-Thesis-Polisher', 'ptjworks/AI-Thesis-Polisher'] },
 ];
 export function inventoryProfiles(profiles) {
   // ci-central reviews itself through a relative caller, so neither of its identities is

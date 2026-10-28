@@ -14,7 +14,7 @@ param(
         'ptjworks/NebulaLab-Docs',
         'ptjworks/NebulaLab-Plugins',
         'ptjworks/resume-form-assistant-plugin',
-        'TshyGO/AI-Thesis-Polisher',
+        'ptjworks/AI-Thesis-Polisher',
         'TshyGO/NebulaGraph-License-Service'
     )
 )

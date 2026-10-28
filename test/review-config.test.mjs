@@ -23,7 +23,6 @@ const repositories = [
   'ptjworks/NebulaLab-Plugins',
   'TshyGO/resume-form-assistant-plugin',
   'ptjworks/resume-form-assistant-plugin',
-  'TshyGO/AI-Thesis-Polisher',
   'ptjworks/AI-Thesis-Polisher',
   'TshyGO/NebulaGraph-License-Service',
 ];
@@ -85,11 +84,8 @@ for (const repository of repositories) {
 const ciCentral = source.loadConfig('ptjworks/ci-central', actionPath);
 // ci-central left TshyGO on 2026-10-27; a repository recreated at the old name gets no policy.
 assert.throws(() => source.loadConfig('TshyGO/ci-central', actionPath), /No central PR review config exists for TshyGO\/ci-central/);
-assert.deepEqual(
-  source.loadConfig('ptjworks/AI-Thesis-Polisher', actionPath),
-  { ...source.loadConfig('TshyGO/AI-Thesis-Polisher', actionPath), repository: 'ptjworks/AI-Thesis-Polisher' },
-  'Thesis Polisher ownership migration must preserve every review policy and lane setting',
-);
+// AI-Thesis-Polisher left TshyGO on 2026-10-28; a repository recreated at the old name gets no policy.
+assert.throws(() => source.loadConfig('TshyGO/AI-Thesis-Polisher', actionPath), /No central PR review config exists for TshyGO\/AI-Thesis-Polisher/);
 assert.deepEqual(
   source.loadConfig('ptjworks/resume-form-assistant-plugin', actionPath),
   { ...source.loadConfig('TshyGO/resume-form-assistant-plugin', actionPath), repository: 'ptjworks/resume-form-assistant-plugin' },

@@ -62,12 +62,11 @@ review-action/config/repositories/
 ├─ ptjworks__NebulaLab-Plugins.json
 ├─ TshyGO__resume-form-assistant-plugin.json
 ├─ ptjworks__resume-form-assistant-plugin.json
-├─ TshyGO__AI-Thesis-Polisher.json
 ├─ ptjworks__AI-Thesis-Polisher.json
 └─ TshyGO__NebulaGraph-License-Service.json
 ```
 
-七个仓库（十一个仓库身份，Docs、Plugins、Resume Pro 与 AI-Thesis-Polisher 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改。自动审核只给 owner（TshyGO，不可变用户 ID `50545377`）在本仓库分支上开的 PR 映射 Lane 密钥，与迁移前只认 OWNER 时的范围相同。迁入 ptjworks 后，`author_association` 认不出 owner：以 owner 身份调 API 看到的是 MEMBER；而组织成员身份是私密的，workflow 事件里只看得到 owner 对仓库的直接 admin 权限，记为 COLLABORATOR。#80 的第一次自审就因此被跳过，所以改为按用户 ID 判断。其他人的 PR（含 fork PR）由有权限的人手动 `/review`。
+七个仓库（十个仓库身份，Docs、Plugins 与 Resume Pro 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改。自动审核只给 owner（TshyGO，不可变用户 ID `50545377`）在本仓库分支上开的 PR 映射 Lane 密钥，与迁移前只认 OWNER 时的范围相同。迁入 ptjworks 后，`author_association` 认不出 owner：以 owner 身份调 API 看到的是 MEMBER；而组织成员身份是私密的，workflow 事件里只看得到 owner 对仓库的直接 admin 权限，记为 COLLABORATOR。#80 的第一次自审就因此被跳过，所以改为按用户 ID 判断。其他人的 PR（含 fork PR）由有权限的人手动 `/review`。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置同时关闭自动审核、跳过提示评论和状态检查；Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 
@@ -115,9 +114,16 @@ ci-central 已从 `TshyGO/ci-central` 转移到 `ptjworks/ci-central`，仓库 I
 
 - reusable workflow 仍按仓库 ID 查出 ci-central 的当前名字，再用它检出 `review-action`、判定是不是同仓自审。以后再改名或转移，同一个 SHA 也不依赖旧名字的重定向。查出的名字只接受 `ptjworks/ci-central`；在旧名字上重建的仓库只会被当成外部 caller。
 - `scripts/audit-review-callers.mjs` 按 ID 查当前名字。`uses:` 里遗留的 `TshyGO/ci-central`（不区分大小写）报 `stale_central_name`。
-- 转移会清空 ruleset 里用户级的绕过名单。`Protect main branch` 的 `User:50545377:always` 是转移后手工恢复的；以后再转移，要先记下绕过名单，转移后对照恢复。
+- 转移会清空 ruleset 的绕过名单，用户级和仓库角色级都一样。`Protect main branch` 的 `User:50545377:always` 是转移后手工恢复的。转入 ptjworks 还会按组织默认关掉 secret scanning 和推送保护。以后再转移，要先记下这些设置，转移后对照恢复。
 - 以后不要在 `TshyGO` 下再建名为 `ci-central` 的仓库，否则旧名字残余的重定向会被永久删除。
 - 迁移过程与各阶段 PR 记录在 ci-center 工作区的 `rollout-records-20261027/ci-central-ptjworks-move.md`。
+
+### AI-Thesis-Polisher 已迁往 ptjworks（2026-10-28）
+
+`TshyGO/AI-Thesis-Polisher` 已转移到 `ptjworks/AI-Thesis-Polisher`，仓库 ID `1190330270` 不变。中央按 caller 的完整仓库名取审核配置，所以顺序是：先合并 #81 加上新名字的配置，caller 固定到它的合并提交 `ee22faf`，再转移；转移后删除旧名字的配置。
+
+- caller 的自动审核门槛同时从 `author_association == 'OWNER'` 改为按 owner 用户 ID `50545377` 判断，并要求 PR 来自本仓库分支。转入组织后 owner 在事件里显示为 COLLABORATOR，原条件会让自动审核全部跳过。
+- 转移清空了 `Protect main branch` 的 `RepositoryRole:4:always` 绕过，也关掉了 secret scanning 和推送保护。三项都已按转移前恢复。
 
 ## Runner 选择
 

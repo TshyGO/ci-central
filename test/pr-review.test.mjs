@@ -767,11 +767,12 @@ check('central repository self-caller exercises the workflow from its own PR rev
   && callerText.includes('needs: review-guard')
   && callerText.includes("needs.review-guard.outputs.proceed != 'false'")
   && callerText.includes('!cancelled()')
-  // Under ptjworks the owner's PRs are MEMBER. Accept it only from this repository's own
-  // branches, which already needs write access; never widen the automatic path to forks.
+  // Under ptjworks the owner's PRs reach the workflow as COLLABORATOR (private membership) and
+  // the API calls them MEMBER. Accept those only from this repository's own branches, which
+  // already needs write access; never widen the automatic path to forks.
   && callerText.replace(/\r\n/g, '\n').includes([
     "          github.event_name == 'pull_request' &&",
-    `          contains(fromJSON('["OWNER", "MEMBER"]'), github.event.pull_request.author_association) &&`,
+    `          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&`,
     '          github.event.pull_request.head.repo.full_name == github.repository',
     '        ) ||',
   ].join('\n'))

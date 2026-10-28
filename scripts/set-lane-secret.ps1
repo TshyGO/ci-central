@@ -9,11 +9,11 @@ param(
     [string]$ApiBase,
 
     [string[]]$Repositories = @(
-        'TshyGO/ci-central',
+        'ptjworks/ci-central',
         'TshyGO/NebulaLab',
-        'TshyGO/NebulaLab-Docs',
-        'TshyGO/NebulaLab-Plugins',
-        'TshyGO/resume-form-assistant-plugin',
+        'ptjworks/NebulaLab-Docs',
+        'ptjworks/NebulaLab-Plugins',
+        'ptjworks/resume-form-assistant-plugin',
         'TshyGO/AI-Thesis-Polisher',
         'TshyGO/NebulaGraph-License-Service'
     )

@@ -317,7 +317,7 @@ const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
-    && sha256(resolver) === '57f1223e1e0f9d3f3bf3db42ad27a55564c822b1b17e7c90ba058bffb4bff155'
+    && sha256(resolver) === '002085b662243bc9abf82c561b55aa632c85fdaac8134f123c0daae6e1d58712'
     && sha256(review) === '256124d4dc1e61272ae36bb895f8c34d62c1664bdd6242d85c2661096423fa5a';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
@@ -502,7 +502,7 @@ const healthy = ({ model, body }) => reply(200, body.contents
 const centralRepositoryId = 1283955746;
 const liveCentral = (full_name) => ({ id: centralRepositoryId, full_name });
 // `central` is what the immutable-ID lookup returns: repository metadata, or an Error to throw.
-async function resolverScenario(env, central = liveCentral('TshyGO/ci-central')) {
+async function resolverScenario(env, central = liveCentral('ptjworks/ci-central')) {
   const outputs = {}, warnings = [], requests = [];
   const github = {
     request: async (route, parameters) => {
@@ -635,8 +635,8 @@ check('checkout contract rejects a literal non-central repository', !checkoutCon
   '          repository: ${{ steps.central-ref.outputs.repository }}',
   '          repository: TshyGO/NebulaLab',
 )));
-// Either central slug is wrong hard-coded: one is gone after the ptjworks transfer, the other
-// does not exist before it. Only the name resolved from the immutable ID is always live.
+// A hard-coded central slug breaks on the next transfer or rename, as TshyGO/ci-central did on
+// 2026-10-27. Only the name resolved from the immutable ID is always live.
 check('checkout contract rejects a hard-coded central slug in favour of the ID-resolved name',
   ['TshyGO/ci-central', 'ptjworks/ci-central'].every((slug) => !checkoutContract(replaceExactlyOnce(workflowText,
     '          repository: ${{ steps.central-ref.outputs.repository }}',
@@ -663,19 +663,20 @@ check('config resolver uses a validated trusted workflow SHA', workflowText.incl
   && workflowText.includes('JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}')
   && workflowText.includes('CALLER_WORKFLOW_SHA: ${{ inputs.central_workflow_sha }}')
   && workflowText.includes(`const centralRepositoryId = ${centralRepositoryId};`)
-  && workflowText.includes("const centralRepositories = ['TshyGO/ci-central', 'ptjworks/ci-central'];")
+  && workflowText.includes("const centralRepositories = ['ptjworks/ci-central'];")
   && workflowText.includes('const expectedPrefix = `${central.full_name}/.github/workflows/pr-review.yml@`;')
   && workflowText.includes('External callers must repeat their full ci-central uses pin as central_workflow_sha.')
   && workflowText.includes('The reusable workflow context SHA does not match central_workflow_sha.')
   && workflowText.includes('REPOSITORY: ${{ github.repository }}')
   && workflowText.includes('if (repository === central.full_name) {')
-  && !workflowText.includes("repository === 'TshyGO/ci-central'")
+  // The legacy identity is gone everywhere, not only from the self-caller check.
+  && !workflowText.includes('TshyGO/ci-central')
   && workflowText.includes('ref: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('PR_REVIEW_WORKFLOW_SHA: ${{ steps.central-ref.outputs.sha }}')
   && workflowText.includes('trusted 40-character ci-central workflow SHA')
   && !workflowText.includes('github.workflow_ref')
-  && !workflowText.includes('TshyGO/ci-central/.github/workflows/pr-review.yml@main')
-  && !workflowText.includes('TshyGO/ci-central/review-action@main'));
+  && !workflowText.includes('ci-central/.github/workflows/pr-review.yml@main')
+  && !workflowText.includes('ci-central/review-action@main'));
 
 let resolved = await resolverScenario({
   REPOSITORY: 'TshyGO/NebulaLab',
@@ -688,9 +689,9 @@ check('external caller falls back visibly to its reviewed explicit SHA when GitH
   resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.warnings.length === 1);
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: '', EVENT_SHA: headSha });
 check('external caller rejects a missing explicit central SHA', /must repeat/.test(resolved.error?.message || ''));
-resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_REF: 'TshyGO/ci-central/.github/workflows/pr-review.yml@main' });
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_REF: 'ptjworks/ci-central/.github/workflows/pr-review.yml@main' });
 check('a provided job workflow ref rejects branch or tag pins', /full 40-character/.test(resolved.error?.message || ''));
-resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/other.yml@${workflowSha}` });
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_REF: `ptjworks/ci-central/.github/workflows/other.yml@${workflowSha}` });
 check('a provided job workflow ref rejects another workflow path', /exact ci-central pr-review/.test(resolved.error?.message || ''));
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_SHA: '0'.repeat(40) });
 check('external caller rejects a GitHub context SHA that disagrees with its explicit pin', /does not match/.test(resolved.error?.message || ''));
@@ -698,7 +699,7 @@ resolved = await resolverScenario({
   REPOSITORY: 'TshyGO/NebulaLab',
   CALLER_WORKFLOW_SHA: workflowSha,
   JOB_WORKFLOW_SHA: workflowSha,
-  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+  JOB_WORKFLOW_REF: `ptjworks/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
 });
 check('matching GitHub SHA, exact workflow ref, and caller pin resolve without fallback warning',
   resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.warnings.length === 0);
@@ -706,47 +707,36 @@ resolved = await resolverScenario({
   REPOSITORY: 'TshyGO/NebulaLab',
   CALLER_WORKFLOW_SHA: workflowSha,
   JOB_WORKFLOW_SHA: '0'.repeat(40),
-  JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
+  JOB_WORKFLOW_REF: `ptjworks/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
 });
 check('disagreeing GitHub job workflow SHA and ref fail closed', /job_workflow_sha and github.job_workflow_ref disagree/.test(resolved.error?.message || ''));
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, JOB_WORKFLOW_SHA: 'not-a-sha' });
 check('a malformed GitHub job workflow SHA fails with a precise diagnostic', /not a full 40-character SHA/.test(resolved.error?.message || ''));
-resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
+resolved = await resolverScenario({ REPOSITORY: 'ptjworks/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
 check('same-repository relative caller falls back to its exact event SHA', resolved.error === undefined && resolved.outputs.sha === headSha);
-resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
+resolved = await resolverScenario({ REPOSITORY: 'ptjworks/ci-central', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
 check('same-repository caller rejects an accidentally mismatched explicit SHA', /same-repository central_workflow_sha does not match/.test(resolved.error?.message || ''));
 
-// ptjworks ownership transfer: ci-central is identified by its immutable repository ID, so
-// the same reviewed SHA keeps working on both sides of the transfer without redirects.
+// ci-central is identified by its immutable repository ID, so a reviewed SHA does not depend
+// on the slug it had when it was pinned. It left TshyGO for ptjworks on 2026-10-27.
 resolved = await resolverScenario({ REPOSITORY: 'TshyGO/NebulaLab', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha });
 check('resolver looks ci-central up by its immutable ID and checks out the live name',
-  resolved.error === undefined && resolved.outputs.repository === 'TshyGO/ci-central'
+  resolved.error === undefined && resolved.outputs.repository === 'ptjworks/ci-central'
   && resolved.requests.length === 1 && resolved.requests[0].route === 'GET /repositories/{repository_id}'
   && resolved.requests[0].parameters?.repository_id === centralRepositoryId);
-const transferred = liveCentral('ptjworks/ci-central');
-resolved = await resolverScenario({ REPOSITORY: 'ptjworks/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha }, transferred);
-check('after the transfer the ptjworks self-caller still resolves its exact event SHA',
-  resolved.error === undefined && resolved.outputs.sha === headSha && resolved.outputs.repository === 'ptjworks/ci-central');
-resolved = await resolverScenario({ REPOSITORY: 'ptjworks/NebulaLab-Docs', CALLER_WORKFLOW_SHA: workflowSha, EVENT_SHA: headSha }, transferred);
-check('after the transfer an external caller checks out ci-central under its new name',
-  resolved.error === undefined && resolved.outputs.sha === workflowSha && resolved.outputs.repository === 'ptjworks/ci-central');
-resolved = await resolverScenario({
-  REPOSITORY: 'TshyGO/NebulaLab',
-  CALLER_WORKFLOW_SHA: workflowSha,
-  JOB_WORKFLOW_REF: `ptjworks/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
-}, transferred);
-check('after the transfer an exposed job workflow ref must name the live identity',
-  resolved.error === undefined && resolved.outputs.sha === workflowSha);
+resolved = await resolverScenario({ REPOSITORY: 'ptjworks/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
+check('the self-caller checks out its own live name', resolved.outputs.repository === 'ptjworks/ci-central');
 resolved = await resolverScenario({
   REPOSITORY: 'TshyGO/NebulaLab',
   CALLER_WORKFLOW_SHA: workflowSha,
   JOB_WORKFLOW_REF: `TshyGO/ci-central/.github/workflows/pr-review.yml@${workflowSha}`,
-}, transferred);
-check('after the transfer a job workflow ref naming the legacy slug fails closed', /exact ci-central pr-review/.test(resolved.error?.message || ''));
-resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha }, transferred);
+});
+check('a job workflow ref naming the legacy TshyGO slug fails closed', /exact ci-central pr-review/.test(resolved.error?.message || ''));
+resolved = await resolverScenario({ REPOSITORY: 'TshyGO/ci-central', JOB_WORKFLOW_SHA: '', JOB_WORKFLOW_REF: '', EVENT_SHA: headSha });
 check('a repository recreated at the legacy slug is an external caller, never the trusted self-caller',
   /must repeat/.test(resolved.error?.message || '') && resolved.outputs.sha === undefined);
 for (const [name, central] of [
+  ['the retired TshyGO name', liveCentral('TshyGO/ci-central')],
   ['an unexpected repository name', liveCentral('someone-else/ci-central')],
   ['a different repository ID', { id: 1, full_name: 'ptjworks/ci-central' }],
   ['an empty response', null],

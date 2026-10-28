@@ -6,14 +6,15 @@ test('ci-central audits neither of its own identities as a caller', () => {
   assert.deepEqual(inventoryProfiles([...centralRepositories, 'TshyGO/NebulaLab']), ['TshyGO/NebulaLab']);
   assert.deepEqual(inventoryProfiles(['ptjworks/ci-central', 'ptjworks/NebulaLab-Docs']), ['ptjworks/NebulaLab-Docs']);
 });
-test('ci-central live identity resolves by immutable ID on both sides of the transfer', () => {
-  for (const name of centralRepositories) {
-    assert.equal(resolveCentralRepository(endpoint => {
-      assert.equal(endpoint, 'repositories/1283955746');
-      return { id: 1283955746, full_name: name };
-    }), name);
-  }
-  for (const payload of [null, {}, { id: 9, full_name: 'ptjworks/ci-central' }, { id: 1283955746, full_name: 'other/ci-central' }]) {
+test('ci-central live identity resolves by immutable ID to ptjworks only', () => {
+  assert.deepEqual(centralRepositories, ['ptjworks/ci-central']);
+  assert.equal(resolveCentralRepository(endpoint => {
+    assert.equal(endpoint, 'repositories/1283955746');
+    return { id: 1283955746, full_name: 'ptjworks/ci-central' };
+  }), 'ptjworks/ci-central');
+  // ci-central left TshyGO on 2026-10-27; that name is no longer a valid live identity.
+  for (const payload of [null, {}, { id: 9, full_name: 'ptjworks/ci-central' }, { id: 1283955746, full_name: 'other/ci-central' },
+    { id: 1283955746, full_name: 'TshyGO/ci-central' }]) {
     assert.throws(() => resolveCentralRepository(() => payload), /Unexpected ci-central repository identity/);
   }
 });

@@ -15,7 +15,6 @@ const source = require(path.join(actionPath, 'src', 'index.js'));
 const bundled = require(path.join(actionPath, 'dist', 'index.js'));
 
 const repositories = [
-  'TshyGO/ci-central',
   'ptjworks/ci-central',
   'TshyGO/NebulaLab',
   'TshyGO/NebulaLab-Docs',
@@ -82,12 +81,9 @@ for (const repository of repositories) {
     && lane.fallbacks.every((model) => model.omit_max_tokens === undefined)), `${repository} no active lane may silently omit the output ceiling`);
 }
 
-const ciCentral = source.loadConfig('TshyGO/ci-central', actionPath);
-assert.deepEqual(
-  source.loadConfig('ptjworks/ci-central', actionPath),
-  { ...ciCentral, repository: 'ptjworks/ci-central' },
-  'ci-central ownership migration must preserve every review policy and lane setting',
-);
+const ciCentral = source.loadConfig('ptjworks/ci-central', actionPath);
+// ci-central left TshyGO on 2026-10-27; a repository recreated at the old name gets no policy.
+assert.throws(() => source.loadConfig('TshyGO/ci-central', actionPath), /No central PR review config exists for TshyGO\/ci-central/);
 assert.deepEqual(
   source.loadConfig('ptjworks/resume-form-assistant-plugin', actionPath),
   { ...source.loadConfig('TshyGO/resume-form-assistant-plugin', actionPath), repository: 'ptjworks/resume-form-assistant-plugin' },

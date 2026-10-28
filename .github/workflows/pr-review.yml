@@ -84,11 +84,11 @@ jobs:
             const jobWorkflowRef = (process.env.JOB_WORKFLOW_REF || '').trim();
             const callerWorkflowSha = (process.env.CALLER_WORKFLOW_SHA || '').trim().toLowerCase();
             const eventSha = (process.env.EVENT_SHA || '').trim().toLowerCase();
-            // ci-central moves from TshyGO to ptjworks. The repository ID survives the transfer
-            // and the slug does not, so every identity decision below uses the live name behind
-            // the ID instead of a hard-coded slug or a legacy-name redirect.
+            // ci-central moved from TshyGO to ptjworks on 2026-10-27. The repository ID survives a
+            // transfer or rename and the slug does not, so every identity decision below uses the
+            // live name behind the ID instead of a hard-coded slug or a legacy-name redirect.
             const centralRepositoryId = 1283955746;
-            const centralRepositories = ['TshyGO/ci-central', 'ptjworks/ci-central'];
+            const centralRepositories = ['ptjworks/ci-central'];
             let central;
             try {
               central = (await github.request('GET /repositories/{repository_id}', { repository_id: centralRepositoryId })).data;

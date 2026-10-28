@@ -7,6 +7,7 @@ const sha = 'a'.repeat(40);
 test('ci-central does not audit its live identity as a caller', () => {
   assert.deepEqual(inventoryProfiles([...centralRepositories, 'TshyGO/NebulaLab']), ['TshyGO/NebulaLab']);
   assert.deepEqual(inventoryProfiles(['ptjworks/ci-central', 'ptjworks/NebulaLab-Docs']), ['ptjworks/NebulaLab-Docs']);
+  assert.deepEqual(inventoryProfiles(['TshyGO/ci-central', 'ptjworks/ci-central']), ['TshyGO/ci-central']);
 });
 test('ci-central live identity resolves by immutable ID to ptjworks only', () => {
   assert.deepEqual(centralRepositories, ['ptjworks/ci-central']);

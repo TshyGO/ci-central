@@ -167,12 +167,12 @@ jobs:
     # never ran, still starts the review. The guard can decline a duplicate; it can never
     # silently swallow a review.
     #
-    # Automatic reviews map the Lane credentials only for the maintainers' own branches. Under
-    # the ptjworks organization the owner is no longer OWNER: the API, asked as the owner, says
-    # MEMBER, but the workflow payload cannot see a private membership and reports the owner's
-    # direct admin access as COLLABORATOR (PR #80's first review was skipped on exactly that).
-    # All three are accepted, but only from a branch of this repository: pushing one already
-    # requires write access, while a read-only member's fork PR stays on the manual /review path.
+    # Automatic reviews map the Lane credentials only for the owner's own branches, as they did
+    # while the owner was OWNER. Under the ptjworks organization author_association no longer
+    # identifies the owner: the API, asked as the owner, says MEMBER, while the workflow payload
+    # cannot see a private membership and reports COLLABORATOR (PR #80's first review was skipped
+    # on that). The owner's immutable user ID (TshyGO, 50545377) keeps the gate exactly as narrow
+    # as before the move. Everyone else, forks included, stays on the manual /review path.
     if: |
       !cancelled() &&
       needs.review-guard.outputs.proceed != 'false' &&
@@ -180,7 +180,7 @@ jobs:
       (
         (
           github.event_name == 'pull_request' &&
-          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
+          github.event.pull_request.user.id == 50545377 &&
           github.event.pull_request.head.repo.full_name == github.repository
         ) ||
         (

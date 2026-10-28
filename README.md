@@ -66,7 +66,7 @@ review-action/config/repositories/
 └─ TshyGO__NebulaGraph-License-Service.json
 ```
 
-七个仓库（十个仓库身份，Docs、Plugins 与 Resume Pro 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改。自动审核只给本仓库分支上作者为 OWNER、MEMBER 或 COLLABORATOR 的 PR 映射 Lane 密钥（本仓库分支本身就要求写权限）。迁入 ptjworks 后，owner 不再是 OWNER：以 owner 身份调 API 看到的是 MEMBER，但组织成员身份是私密的，workflow 事件里看到的是对仓库的直接 admin 权限，记为 COLLABORATOR。#80 的第一次自审就因此被跳过。fork PR 只能由有权限的人手动 `/review`。
+七个仓库（十个仓库身份，Docs、Plugins 与 Resume Pro 同时保留迁移前后身份）都使用相同的三 Lane 拓扑；唯一差别是 NebulaLab 的 Lane B 在 Anthropic 上并带首审模型。`ci-central` 的 policy 更侧重 reusable workflow、Action 供应链、Secret 边界和失败可见性；其余仓库按各自代码与文档风险调整 prompt。业务仓 caller 固定到已审核的 ci-central commit；`ci-central` 自身使用同仓库相对 reusable workflow，使 owner 创建的 PR 能实际审核和验收本次 workflow 修改。自动审核只给 owner（TshyGO，不可变用户 ID `50545377`）在本仓库分支上开的 PR 映射 Lane 密钥，与迁移前只认 OWNER 时的范围相同。迁入 ptjworks 后，`author_association` 认不出 owner：以 owner 身份调 API 看到的是 MEMBER；而组织成员身份是私密的，workflow 事件里只看得到 owner 对仓库的直接 admin 权限，记为 COLLABORATOR。#80 的第一次自审就因此被跳过，所以改为按用户 ID 判断。其他人的 PR（含 fork PR）由有权限的人手动 `/review`。
 
 CodeRabbit 和 GitHub Copilot 不作为默认自动审核器；三 Lane 中央审核是默认 AI review。CodeRabbit 仓库配置同时关闭自动审核、跳过提示评论和状态检查；Copilot 自动审核需在 GitHub Copilot Code review 设置中保持关闭。
 

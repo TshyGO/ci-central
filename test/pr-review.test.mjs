@@ -767,16 +767,16 @@ check('central repository self-caller exercises the workflow from its own PR rev
   && callerText.includes('needs: review-guard')
   && callerText.includes("needs.review-guard.outputs.proceed != 'false'")
   && callerText.includes('!cancelled()')
-  // Under ptjworks the owner's PRs reach the workflow as COLLABORATOR (private membership) and
-  // the API calls them MEMBER. Accept those only from this repository's own branches, which
-  // already needs write access; never widen the automatic path to forks.
+  // Under ptjworks author_association no longer identifies the owner (MEMBER to the API,
+  // COLLABORATOR in the workflow payload). The automatic path stays as narrow as it was while
+  // the owner was OWNER: the owner's immutable user ID, on a branch of this repository only.
   && callerText.replace(/\r\n/g, '\n').includes([
     "          github.event_name == 'pull_request' &&",
-    `          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&`,
+    '          github.event.pull_request.user.id == 50545377 &&',
     '          github.event.pull_request.head.repo.full_name == github.repository',
     '        ) ||',
   ].join('\n'))
-  && !callerText.includes("github.event.pull_request.author_association == 'OWNER'")
+  && !callerText.includes('github.event.pull_request.author_association')
   && !/qwen|glm|gemini|kimi|deepseek|alibaba|tencent|google/i.test(callerText));
 check('reusable job uses one latest-wins group for automatic and manual triggers', workflowText.includes('group: centralized-ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}')
   && workflowText.includes('cancel-in-progress: true')

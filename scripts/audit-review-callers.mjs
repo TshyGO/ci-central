@@ -6,10 +6,12 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// ci-central itself is moving to ptjworks. GitHub does not redirect reusable-workflow calls,
-// so a caller must name whichever identity is live; the immutable ID says which one that is.
+// ci-central moved from TshyGO to ptjworks on 2026-10-27. GitHub does not redirect
+// reusable-workflow calls, so a caller must name the live identity; the immutable ID says
+// which one that is. The `uses:` patterns below still recognise the legacy TshyGO name, but
+// only so that a leftover pin is reported as stale_central_name rather than as a mismatch.
 const centralRepositoryId = 1283955746;
-export const centralRepositories = ['TshyGO/ci-central', 'ptjworks/ci-central'];
+export const centralRepositories = ['ptjworks/ci-central'];
 export function inspectCaller(text, expectedSha, expectedCentral = null) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const uses = lines.flatMap((line, index) => {

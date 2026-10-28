@@ -55,7 +55,24 @@ test('Plugins audit resolves its immutable ID and rejects an unexpected identity
     assert.throws(() => resolveRepository(name, () => ({ id: 99, full_name: name })), /Unexpected/);
     assert.throws(() => resolveRepository(name, () => ({ id: 1210416222, full_name: 'other/repository' })), /Unexpected/);
   }
-  assert.equal(resolveRepository('TshyGO/AI-Thesis-Polisher', endpoint => endpoint), 'repos/TshyGO/AI-Thesis-Polisher');
+  assert.equal(resolveRepository('TshyGO/NebulaGraph-License-Service', endpoint => endpoint), 'repos/TshyGO/NebulaGraph-License-Service');
+});
+test('Thesis Polisher transition audits one identity and resolves its immutable ID', () => {
+  const names = ['TshyGO/AI-Thesis-Polisher', 'ptjworks/AI-Thesis-Polisher'];
+  assert.deepEqual(inventoryProfiles([...names, 'TshyGO/NebulaLab']), [names[0], 'TshyGO/NebulaLab']);
+  assert.deepEqual(inventoryProfiles([names[1]]), [names[1]]);
+  for (const profile of names) {
+    for (const canonical of names) {
+      const result = resolveRepository(profile, endpoint => {
+        assert.equal(endpoint, 'repositories/1190330270');
+        return { id: 1190330270, full_name: canonical, default_branch: 'main' };
+      });
+      assert.equal(result.full_name, canonical);
+    }
+    for (const payload of [null, {}, { id: 9, full_name: profile }, { id: 1190330270, full_name: 'other/AI-Thesis-Polisher' }]) {
+      assert.throws(() => resolveRepository(profile, () => payload), /Unexpected repository identity/);
+    }
+  }
 });
 test('Docs inventory deduplicates ownership aliases and resolves the stable ID', () => {
   const names = ['TshyGO/NebulaLab-Docs', 'ptjworks/NebulaLab-Docs'];

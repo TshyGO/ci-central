@@ -24,6 +24,7 @@ const repositories = [
   'TshyGO/resume-form-assistant-plugin',
   'ptjworks/resume-form-assistant-plugin',
   'TshyGO/AI-Thesis-Polisher',
+  'ptjworks/AI-Thesis-Polisher',
   'TshyGO/NebulaGraph-License-Service',
 ];
 assert.match(probeScript, /provider -ne 'volcengine-ark-coding'/, 'only Ark Coding may tolerate a missing or incomplete /models response');
@@ -84,6 +85,11 @@ for (const repository of repositories) {
 const ciCentral = source.loadConfig('ptjworks/ci-central', actionPath);
 // ci-central left TshyGO on 2026-10-27; a repository recreated at the old name gets no policy.
 assert.throws(() => source.loadConfig('TshyGO/ci-central', actionPath), /No central PR review config exists for TshyGO\/ci-central/);
+assert.deepEqual(
+  source.loadConfig('ptjworks/AI-Thesis-Polisher', actionPath),
+  { ...source.loadConfig('TshyGO/AI-Thesis-Polisher', actionPath), repository: 'ptjworks/AI-Thesis-Polisher' },
+  'Thesis Polisher ownership migration must preserve every review policy and lane setting',
+);
 assert.deepEqual(
   source.loadConfig('ptjworks/resume-form-assistant-plugin', actionPath),
   { ...source.loadConfig('TshyGO/resume-form-assistant-plugin', actionPath), repository: 'ptjworks/resume-form-assistant-plugin' },

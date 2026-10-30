@@ -58,17 +58,21 @@ var require_index = __commonJS({
     }
     function validateCrossProvider(config, lane, model, protocol, location) {
       const cross = model.cross_provider;
-      if (!cross || typeof cross !== "object" || Array.isArray(cross) || Object.keys(cross).some((key) => !["credential_lane", "id"].includes(key))) {
-        throw new Error(`${location}.cross_provider must be an object with only credential_lane and id.`);
+      if (!cross || typeof cross !== "object" || Array.isArray(cross) || Object.keys(cross).some((key) => !["credential_lane", "credential_provider", "id"].includes(key))) {
+        throw new Error(`${location}.cross_provider must be an object with only credential_lane and id, optionally credential_provider.`);
       }
       if (typeof cross.id !== "string" || !cross.id.trim()) {
         throw new Error(`${location}.cross_provider.id must be a non-empty string.`);
       }
       const target = config.lanes.find((candidate) => candidate?.id === cross.credential_lane);
-      if (!target || cross.credential_lane === lane.id) {
+      if (!target || cross.credential_lane === lane.id && cross.credential_provider === void 0) {
         throw new Error(`${location}.cross_provider.credential_lane must name another configured lane.`);
       }
-      if (typeof target.provider !== "string" || target.provider === lane.provider) {
+      const provider = cross.credential_provider ?? target.provider;
+      if (cross.credential_provider !== void 0 && !target.credential_providers?.includes(cross.credential_provider)) {
+        throw new Error(`${location}.cross_provider.credential_provider must name a configured provider in the target slot.`);
+      }
+      if (typeof provider !== "string" || provider === lane.provider) {
         throw new Error(`${location}.cross_provider must use a provider other than the lane's own.`);
       }
       if (protocol === "google-generate-content") {
@@ -113,6 +117,9 @@ var require_index = __commonJS({
         if (laneIds.has(lane.id)) throw new Error(`Lane ${lane.id} is configured more than once.`);
         laneIds.add(lane.id);
         if (typeof lane.provider !== "string" || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
+        if (lane.credential_providers !== void 0 && (!Array.isArray(lane.credential_providers) || lane.credential_providers.length !== 2 || new Set(lane.credential_providers).size !== 2 || lane.credential_providers.some((provider) => !["openai", "command-code"].includes(provider)) || !lane.credential_providers.includes(lane.provider) || lane.key_weights !== void 0)) {
+          throw new Error(`${location}.credential_providers must contain openai and command-code, include the lane provider, and cannot use key_weights.`);
+        }
         if (lane.advisory !== void 0 && typeof lane.advisory !== "boolean") throw new Error(`${location}.advisory must be a boolean.`);
         if (lane.resend_unserved !== void 0 && typeof lane.resend_unserved !== "boolean") {
           throw new Error(`${location}.resend_unserved must be a boolean.`);
@@ -146,6 +153,9 @@ var require_index = __commonJS({
         }
         for (const [model, modelLocation] of modelEntries) {
           const protocol = model.protocol ?? lane.protocol;
+          if (model.reasoning_effort !== void 0 && (protocol !== "openai-responses" || !["none", "low", "medium", "high", "xhigh", "max"].includes(model.reasoning_effort))) {
+            throw new Error(`${modelLocation}.reasoning_effort requires openai-responses and a supported effort.`);
+          }
           if (model.omit_max_tokens && protocol !== "openai-chat-completions") {
             throw new Error(`${modelLocation}.omit_max_tokens is only supported by openai-chat-completions.`);
           }
@@ -212,6 +222,73 @@ var require_index = __commonJS({
       }
     }
     module2.exports = { configFileName, loadConfig, validateConfig: validateConfig2, run };
+  }
+});
+
+// review-action/src/review-credentials.js
+var require_review_credentials = __commonJS({
+  "review-action/src/review-credentials.js"(exports2, module2) {
+    "use strict";
+    function readCredentials2(lanes, env, maskSecret = () => {
+    }) {
+      const slots = /* @__PURE__ */ new Map();
+      const keysOf = (value) => String(value || "").split(/\r?\n/).map((key) => key.trim()).filter(Boolean);
+      const credential = (key, base) => {
+        const keys = keysOf(key);
+        for (const value of keys) maskSecret(value);
+        return { apiKey: keys[0], keys, baseUrl: String(base || "").replace(/\/$/, "") };
+      };
+      const envelope = (raw, providers) => {
+        const value = JSON.parse(raw);
+        if (!value || value.schema_version !== 1 || Object.keys(value).sort().join(",") !== "providers,schema_version" || !value.providers || Array.isArray(value.providers) || Object.keys(value.providers).sort().join(",") !== [...providers].sort().join(",") || providers.some((provider) => typeof value.providers[provider] !== "string" || !value.providers[provider].trim())) {
+          throw new Error("Invalid credential bundle");
+        }
+        return value.providers;
+      };
+      for (const lane of lanes) {
+        const key = env[`LANE_${lane.id}_KEY`] || "";
+        const base = env[`LANE_${lane.id}_API_BASE`] || "";
+        const profiles = /* @__PURE__ */ new Map();
+        try {
+          if (lane.credential_providers) {
+            if (!key && !base) {
+              for (const provider of lane.credential_providers) profiles.set(provider, credential("", ""));
+            } else {
+              try {
+                const keys = envelope(key, lane.credential_providers);
+                for (const provider of lane.credential_providers) {
+                  for (const value of keysOf(keys[provider])) maskSecret(value);
+                }
+                const bases = envelope(base, lane.credential_providers);
+                for (const provider of lane.credential_providers) {
+                  const keysForProvider = keysOf(keys[provider]);
+                  profiles.set(provider, { apiKey: keysForProvider[0], keys: keysForProvider, baseUrl: bases[provider].trim().replace(/\/$/, "") });
+                }
+                for (const { baseUrl } of profiles.values()) {
+                  const url = new URL(baseUrl);
+                  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Invalid endpoint");
+                }
+              } catch {
+                throw new Error(`Lane ${lane.id} requires matching version-1 provider credential bundles; no requests were sent.`);
+              }
+            }
+          } else {
+            if (key.trim().startsWith("{") || base.trim().startsWith("{")) {
+              throw new Error(`Lane ${lane.id} does not configure provider credential bundles; no requests were sent.`);
+            }
+            profiles.set(lane.provider, credential(key, base));
+          }
+        } catch {
+          profiles.clear();
+          for (const provider of lane.credential_providers || [lane.provider]) {
+            profiles.set(provider, { apiKey: void 0, keys: [], baseUrl: "", invalid: true });
+          }
+        }
+        slots.set(lane.id, profiles);
+      }
+      return (laneId, provider) => slots.get(laneId)?.get(provider);
+    }
+    module2.exports = { readCredentials: readCredentials2 };
   }
 });
 
@@ -1163,6 +1240,7 @@ var require_review_incremental = __commonJS({
 
 // review-action/src/review-runner.js
 var { validateConfig } = require_index();
+var { readCredentials } = require_review_credentials();
 var { packDiff, packIncremental, collectIssues, enrichWorkflows } = require_review_context();
 var { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require_review_report();
 var { createStatusPublisher } = require_review_status();
@@ -1215,7 +1293,8 @@ async function runReview({
   fetch = globalThis.fetch,
   timers = globalThis,
   logger = globalThis.console,
-  sdk
+  sdk,
+  maskSecret
 }) {
   const process2 = { env };
   const console = logger;
@@ -1235,15 +1314,8 @@ async function runReview({
   }
   const lanes = reviewConfig.lanes;
   const reviewPolicy = reviewConfig.review_policy;
-  const slot = (key, base) => {
-    const keys = String(key || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    return { apiKey: keys[0], keys, baseUrl: (base || "").replace(/\/$/, "") };
-  };
-  const laneCredentials = {
-    A: slot(process2.env.LANE_A_KEY, process2.env.LANE_A_API_BASE),
-    B: slot(process2.env.LANE_B_KEY, process2.env.LANE_B_API_BASE),
-    C: slot(process2.env.LANE_C_KEY, process2.env.LANE_C_API_BASE)
-  };
+  const credentialsFor = readCredentials(lanes, process2.env, maskSecret);
+  const laneCredentials = Object.fromEntries(lanes.map((lane) => [lane.id, credentialsFor(lane.id, lane.provider)]));
   const { data: pull } = await github.rest.pulls.get({
     owner,
     repo,
@@ -1696,7 +1768,13 @@ ${googleDeepReviewContract}`), model.review_lane_id, laneMode(model));
   }
   function responsesPayload(model) {
     const chat = basePayload(model);
-    return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false };
+    return {
+      model: model.id,
+      input: chat.messages,
+      max_output_tokens: model.max_output_tokens,
+      store: false,
+      ...model.reasoning_effort ? { reasoning: { effort: model.reasoning_effort } } : {}
+    };
   }
   function anthropicPayload(model) {
     const throttled = model.context_profile === "kimi-k3-throttled";
@@ -1747,12 +1825,12 @@ ${requestError || ""}`;
   }
   const spentKeys = { A: /* @__PURE__ */ new Set(), B: /* @__PURE__ */ new Set(), C: /* @__PURE__ */ new Set() };
   const creditSpentKeys = { A: /* @__PURE__ */ new Set(), B: /* @__PURE__ */ new Set(), C: /* @__PURE__ */ new Set() };
-  const weightsOf = (laneId) => {
+  const weightsOf = (laneId, provider = lanes.find((lane) => lane.id === laneId)?.provider) => {
     const configured = lanes.find((lane) => lane.id === laneId)?.key_weights ?? [];
-    return laneCredentials[laneId].keys.map((_, index) => configured[index] ?? 1);
+    return credentialsFor(laneId, provider).keys.map((_, index) => configured[index] ?? 1);
   };
-  function pickedKey(laneId) {
-    const weights = weightsOf(laneId);
+  function pickedKey(laneId, provider) {
+    const weights = weightsOf(laneId, provider);
     let rest = (Math.abs(Number(pullNumber)) || 0) % weights.reduce((sum, weight) => sum + weight, 0);
     return Math.max(0, weights.findIndex((weight) => (rest -= weight) < 0));
   }
@@ -1786,12 +1864,12 @@ ${requestError || ""}`;
     let localDeadline = false;
     let quota = null;
     try {
-      const credentials = laneCredentials[route.credentialLane];
+      const credentials = credentialsFor(route.credentialLane, route.provider);
       const apiKey = credentials.keys[route.keyIndex ?? 0];
       const goRoute = route.provider === "opencode-go";
       let proxyUrl;
-      const directGoModel = process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(route.modelId);
-      if (goRoute && process2.env.RUNNER_ENVIRONMENT !== "github-hosted" && !directGoModel) {
+      const directGoModel = goRoute && process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(route.modelId);
+      if ((goRoute || route.provider === "openai") && process2.env.RUNNER_ENVIRONMENT !== "github-hosted" && !directGoModel) {
         proxyUrl = process2.env.NEBULA_REVIEW_PROXY_URL !== void 0 ? process2.env.NEBULA_REVIEW_PROXY_URL : process2.env.https_proxy || process2.env.HTTPS_PROXY || void 0;
         let proxy;
         try {
@@ -1903,12 +1981,13 @@ ${requestError || ""}`;
     const cross = model.cross_provider;
     if (!cross) return null;
     const target = lanes.find((candidate) => candidate.id === cross.credential_lane);
-    const credentials = laneCredentials[cross.credential_lane];
+    const provider = cross.credential_provider ?? target?.provider;
+    const credentials = credentialsFor(cross.credential_lane, provider);
     if (!target || !credentials?.apiKey || !credentials?.baseUrl) {
       console.log(`[Lane ${lane.id}/${model.id}] a cross-provider fallback is configured, but the Lane ${cross.credential_lane} secret slot is not provisioned.`);
       return null;
     }
-    return { provider: target.provider, credentialLane: target.id, modelId: cross.id, keyIndex: pickedKey(target.id) };
+    return { provider, credentialLane: target.id, modelId: cross.id, keyIndex: pickedKey(target.id, provider) };
   }
   function validateAndRender(lane, text, model, complete, finishReason) {
     const supplied = contextFor(model, lane.id).pack;
@@ -2012,7 +2091,7 @@ ${requestError || ""}`;
       };
     }
     if (!credentials?.apiKey || !credentials?.baseUrl) {
-      console.log(`[Lane ${lane.id}] fixed credential slots are not available; skipping model requests for this lane.`);
+      console.log(`[Lane ${lane.id}] fixed credential slots are ${credentials?.invalid ? "invalid" : "not available"}; skipping model requests for this lane.`);
       return {
         lane,
         primary,
@@ -2023,7 +2102,7 @@ ${requestError || ""}`;
         review: [
           "> AI review was not generated.",
           "",
-          `Lane ${lane.id} is not provisioned.`,
+          credentials?.invalid ? `Lane ${lane.id} credential format is invalid; this slot and its cross routes are disabled.` : `Lane ${lane.id} is not provisioned.`,
           "",
           `Action needed: set PR_AGENT_LANE_${lane.id}_KEY and PR_AGENT_LANE_${lane.id}_API_BASE in the caller repository.`
         ].join("\n")

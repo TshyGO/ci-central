@@ -318,22 +318,23 @@ const trustedGithubScriptBodies = (text) => {
   const [resolver, review] = githubScriptBodies(text);
   return resolver !== undefined && review !== undefined
     && sha256(resolver) === '002085b662243bc9abf82c561b55aa632c85fdaac8134f123c0daae6e1d58712'
-    && sha256(review) === '256124d4dc1e61272ae36bb895f8c34d62c1664bdd6242d85c2661096423fa5a';
+    && sha256(review) === '262152c863ed186d97a512853fc0c76b0b6c41ebeaeaeabe70d3a288e6bb5342';
 };
 if (!trustedGithubScriptBodies(workflowText)) throw new Error('Security-critical github-script body digest mismatch');
 const [resolverScript, reviewScript] = githubScriptBodies(workflowText);
 if (resolverScript === undefined || reviewScript === undefined) throw new Error('Trusted github-script blocks not found');
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const runResolver = new AsyncFunction('core', 'github', 'process', resolverScript);
-const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', 'require', reviewScript);
+const runScript = new AsyncFunction('github', 'context', 'process', 'fetch', 'setTimeout', 'clearTimeout', 'console', 'require', 'core', reviewScript);
 
 const repositoryConfig = (name) => JSON.parse(fs.readFileSync(path.join(here, '..', 'review-action', 'config', 'repositories', `TshyGO__${name}.json`), 'utf8'));
 // NebulaLab's own config (Lane B on Anthropic with a Sonnet first pass) has its own checks below.
 // The shared policy checks keep the Go Lane B every other repository still uses.
 const nebulaConfig = repositoryConfig('NebulaLab');
-const centralConfig = structuredClone(nebulaConfig);
-centralConfig.lanes = centralConfig.lanes.map((lane) => lane.id === 'B'
-  ? repositoryConfig('NebulaGraph-License-Service').lanes.find(({ id }) => id === 'B') : lane);
+const centralConfig = { ...structuredClone(nebulaConfig), lanes: repositoryConfig('NebulaGraph-License-Service').lanes };
+// Exercise the previously deployed NebulaLab policy as well as the new bundled-slot policy.
+const legacyNebulaConfig = { ...structuredClone(nebulaConfig), lanes: centralConfig.lanes.map((lane) => structuredClone(lane.id === 'B' ? nebulaConfig.lanes[1] : lane)) };
+delete legacyNebulaConfig.lanes[1].primary.cross_provider.credential_provider;
 const patch = (filename, size) => ({ filename, status: 'modified', additions: 2, deletions: 1, patch: `@@\n${'+x\n'.repeat(size)}` });
 const files = [patch('src/a.ts', 100), patch('tests/a.test.ts', 100)];
 const headSha = 'deadbeef'.repeat(5);
@@ -481,7 +482,7 @@ async function scenario(route, overrides = {}, options = {}) {
       if (name !== './.ci-central/review-action/dist/review-runner.js') throw new Error('Unexpected workflow require');
       return { runReview: (args) => (options.useBundle ? bundledRunner : runner).runReview({ ...args, fetch, logger: { log: (...xs) => logs.push(xs.join(' ')) }, timers: { setTimeout: (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout }, sdk: { requestChatCompletion: stubSdkRequest(fetch) } }) };
     };
-    await runScript(github, options.context || context, { env: { RUNNER_ENVIRONMENT: 'github-hosted', ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk);
+    await runScript(github, options.context || context, { env: { RUNNER_ENVIRONMENT: 'github-hosted', ...env, ...overrides } }, fetch, (fn, ms) => { timeouts.push(ms); return setTimeout(fn, 0); }, clearTimeout, { log: (...xs) => logs.push(xs.join(' ')) }, requireSdk, { setSecret: () => {} });
   } catch (caught) {
     error = caught;
   }
@@ -1814,7 +1815,7 @@ for (const invalid of [0, -1, 1.5, '300000', null]) {
 // NebulaLab: Lane B on Anthropic. Sonnet 5.5 reviews a PR's first commit and Haiku 5.5 the later
 // ones, with the first review kept folded in the lane comment. Anthropic traffic leaves only
 // through the szlab Taiwan egress on a self-hosted review runner.
-const twEgress = { PR_REVIEW_CONFIG: JSON.stringify(nebulaConfig), RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' };
+const twEgress = { PR_REVIEW_CONFIG: JSON.stringify(legacyNebulaConfig), RUNNER_ENVIRONMENT: 'self-hosted', NEBULA_REVIEW_PROXY_URL: 'http://192.168.122.1:17890' };
 const laneBCalls = (result) => result.captured.filter(({ lane }) => lane === 'B').map(({ model }) => model).join(',');
 const laneBBody = (result) => result.posted.filter((body) => body.includes('lane=B')).at(-1) || '';
 const firstPassMark = (head) => `<!-- ai-pr-review-first-pass:v1 lane=B head=${head} model=claude-sonnet-5-5 -->`;
@@ -2343,5 +2344,61 @@ r = await scenario(healthy, twEgress, linearRound({ comments: sonnetRoundOne }))
 check('NebulaLab: after the Sonnet first pass, Haiku reviews later pushes incrementally and keeps the first pass folded', !r.error
   && laneBCalls(r) === 'claude-haiku-5-5' && isIncremental(r.captured.find(({ lane }) => lane === 'B'))
   && laneBBody(r).includes(firstPassMark(H1)) && laneBBody(r).includes('· 增量'));
+
+
+// New NebulaLab C policy: independently named OpenAI and Command Code profiles.
+const providerBundle = (providers) => JSON.stringify({ schema_version: 1, providers });
+const openaiEgress = { ...twEgress, PR_REVIEW_CONFIG: JSON.stringify(nebulaConfig),
+  LANE_C_KEY: providerBundle({ openai: 'openai-test-key', 'command-code': 'cc-test-key' }),
+  LANE_C_API_BASE: providerBundle({ openai: 'https://lane-c.openai.example.test/v1', 'command-code': 'https://lane-c.cc.example.test/v1' }) };
+const laneCBody = (result) => result.posted.find((body) => body.startsWith('<!-- ai-pr-review-bot:lane-C -->')) || '';
+const laneCCalls = (result) => result.captured.filter((call) => call.lane === 'C');
+r = await scenario(healthy, openaiEgress, { useBundle: true });
+const terraFirst = laneCBody(r);
+check('NebulaLab C: Terra alone performs the first pass on OpenAI with high reasoning', !r.error
+  && laneCCalls(r).length === 1 && laneCCalls(r)[0].model === 'gpt-6.1-terra'
+  && laneCCalls(r)[0].body.reasoning?.effort === 'high'
+  && laneCCalls(r)[0].headers.authorization === 'Bearer openai-test-key'
+  && terraFirst.includes('ai-pr-review-first-pass:v1 lane=C') && terraFirst.includes('status=valid'));
+r = await scenario(healthy, openaiEgress, { useBundle: true, files: [patch('src/a.ts', 101), patch('tests/a.test.ts', 100)], comments: [{ body: terraFirst }], pulls: [{ ...pull, head: { ...pull.head, sha: H2 } }],
+  context: { ...context, payload: { pull_request: { number: 42, head: { sha: H2 } } } } });
+check('NebulaLab C: subsequent heads use Luna on OpenAI and preserve the Terra first pass', !r.error
+  && laneCCalls(r).map((call) => call.model).join(',') === 'gpt-6-luna'
+  && laneCCalls(r)[0].body.reasoning?.effort === 'medium' && laneCBody(r).includes('model=gpt-6.1-terra'));
+r = await scenario((call) => call.url.startsWith('https://lane-c.openai.') ? reply(503, 'unavailable') : healthy(call), openaiEgress);
+check('NebulaLab C: failed Terra proceeds to Luna, then exactly one same-model CC fallback', !r.error
+  && laneCCalls(r).map((call) => call.model).join(',') === 'gpt-6.1-terra,gpt-6-luna,gpt-6-luna'
+  && laneCCalls(r).map((call) => call.headers.authorization).join(',') === 'Bearer openai-test-key,Bearer openai-test-key,Bearer cc-test-key'
+  && !laneCBody(r).includes('ai-pr-review-first-pass:v1 lane=C') && laneCBody(r).includes('via command-code'));
+r = await scenario((call) => call.lane !== 'C' ? reply(503, 'unavailable') : healthy(call), openaiEgress);
+check('NebulaLab: A and B still cross to CC, never to the OpenAI profile or the C model chain', !r.error
+  && r.captured.filter((call) => call.lane === 'C' && call.model !== 'gpt-6.1-terra').map((call) => call.model).sort().join(',') === 'claude-haiku-5-5,meta/muse-spark-1.3-contributor'
+  && r.captured.filter((call) => call.lane === 'C' && call.model !== 'gpt-6.1-terra').every((call) => call.headers.authorization === 'Bearer cc-test-key' || call.headers['x-api-key'] === 'cc-test-key'));
+r = await scenario(healthy, { ...openaiEgress, LANE_C_KEY: '{never-echo-this-secret' });
+check('NebulaLab: malformed C bundles disable C while A/B continue without exposing input', !r.error
+  && r.captured.map((call) => call.lane).sort().join(',') === 'A,B'
+  && laneCBody(r).includes('credential format is invalid') && laneCBody(r).includes('status=diagnostic')
+  && !JSON.stringify([r.posted, r.logs]).includes('never-echo'));
+
+const openaiChat = structuredClone(nebulaConfig);
+delete openaiChat.lanes[2].first_pass;
+delete openaiChat.lanes[2].primary.cross_provider;
+delete openaiChat.lanes[2].primary.reasoning_effort;
+openaiChat.lanes[2].primary.id = 'kimi-k2.7-code';
+openaiChat.lanes[2].protocol = 'openai-chat-completions';
+r = await scenario(healthy, { ...openaiEgress, PR_REVIEW_CONFIG: JSON.stringify(openaiChat) });
+check('OpenAI cannot inherit a Go-only direct-egress exemption by sharing a model id', !r.error
+  && laneCCalls(r).length === 1 && laneCCalls(r)[0].proxy === 'http://192.168.122.1:17890');
+r = await scenario(healthy, { ...openaiEgress, NEBULA_REVIEW_PROXY_URL: undefined, https_proxy: undefined, HTTPS_PROXY: undefined });
+check('self-hosted OpenAI without an approved proxy never sends a direct request', !r.error
+  && !r.captured.some((call) => call.url.startsWith('https://lane-c.openai.'))
+  && laneCCalls(r).some((call) => call.model === 'gpt-6-luna' && call.url.startsWith('https://lane-c.cc.')));
+
+r = await scenario((call) => call.url.startsWith('https://lane-c.openai.') ? reply(401, 'refused') : healthy(call), {
+  ...openaiEgress, LANE_C_KEY: providerBundle({ openai: 'openai-one\nopenai-two', 'command-code': 'cc-one\ncc-two' }),
+});
+check('spent OpenAI account indices never change the CC profile PR-number key', !r.error
+  && laneCCalls(r).filter((call) => call.url.startsWith('https://lane-c.cc.')).length === 1
+  && laneCCalls(r).find((call) => call.url.startsWith('https://lane-c.cc.')).headers.authorization === 'Bearer cc-one');
 
 if (checks.some((value) => !value)) process.exitCode = 1;

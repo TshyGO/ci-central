@@ -170,4 +170,4 @@ jobs:
         with:
           script: |
             const { runReview } = require('./.ci-central/review-action/dist/review-runner.js');
-            await runReview({ github, context, env: process.env });
+            await runReview({ github, context, env: process.env, maskSecret: core.setSecret });

@@ -1,0 +1,149 @@
+{
+  "commit": "44b566efd2aa2904d2e1e8a358682e2647b7c886",
+  "bundle_sha256": {
+    "review-runner.js": "1e534d197f52af5aedfd7d8834981cdb1b6298fc41d4eb8b8743a75110376bba",
+    "sdk-client.js": "597a4e37c35c83cdd0efbaa17a9df9d0e8d1f36264d53df3d1412aed82876a30"
+  },
+  "github_context": "simulated; no GitHub writes",
+  "runner": "ci-review",
+  "proxy": "approved szlab review proxy",
+  "summaries": [
+    {
+      "case": "Terra first pass / real OpenAI",
+      "valid": true,
+      "first_pass_preserved": true,
+      "synthetic_lanes": [
+        "A",
+        "B"
+      ],
+      "traces": [
+        {
+          "provider": "stub",
+          "model": "muse-spark-1.3-contributor",
+          "synthetic": true,
+          "injected": false
+        },
+        {
+          "provider": "stub",
+          "model": "claude-sonnet-5-5",
+          "synthetic": true,
+          "injected": false
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-6.1-terra",
+          "http_status": 200,
+          "real_request": true
+        }
+      ]
+    },
+    {
+      "case": "Luna subsequent head / real OpenAI",
+      "valid": true,
+      "first_pass_preserved": true,
+      "synthetic_lanes": [
+        "A",
+        "B"
+      ],
+      "traces": [
+        {
+          "provider": "stub",
+          "model": "muse-spark-1.3-contributor",
+          "synthetic": true,
+          "injected": false
+        },
+        {
+          "provider": "stub",
+          "model": "claude-haiku-5-5",
+          "synthetic": true,
+          "injected": false
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-6-luna",
+          "http_status": 200,
+          "real_request": true
+        }
+      ]
+    },
+    {
+      "case": "Luna injected OpenAI outage / real CC fallback",
+      "valid": true,
+      "first_pass_preserved": true,
+      "synthetic_lanes": [
+        "A",
+        "B"
+      ],
+      "traces": [
+        {
+          "provider": "stub",
+          "model": "muse-spark-1.3-contributor",
+          "synthetic": true,
+          "injected": false
+        },
+        {
+          "provider": "stub",
+          "model": "claude-haiku-5-5",
+          "synthetic": true,
+          "injected": false
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-6-luna",
+          "injected": true
+        },
+        {
+          "provider": "command-code",
+          "model": "gpt-6-luna",
+          "http_status": 200,
+          "real_request": true
+        }
+      ]
+    },
+    {
+      "case": "A/B injected own-provider outages / real CC fallbacks",
+      "valid": true,
+      "first_pass_preserved": null,
+      "synthetic_lanes": [
+        "C"
+      ],
+      "traces": [
+        {
+          "provider": "stub",
+          "model": "muse-spark-1.3-contributor",
+          "synthetic": false,
+          "injected": true
+        },
+        {
+          "provider": "stub",
+          "model": "claude-sonnet-5-5",
+          "synthetic": false,
+          "injected": true
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-6.1-terra",
+          "synthetic": true
+        },
+        {
+          "provider": "stub",
+          "model": "claude-haiku-5-5",
+          "synthetic": false,
+          "injected": true
+        },
+        {
+          "provider": "command-code",
+          "model": "claude-haiku-5-5",
+          "http_status": 200,
+          "real_request": true
+        },
+        {
+          "provider": "command-code",
+          "model": "meta/muse-spark-1.3-contributor",
+          "http_status": 200,
+          "real_request": true
+        }
+      ]
+    }
+  ]
+}

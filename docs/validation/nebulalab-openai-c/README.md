@@ -17,7 +17,7 @@ The fixture changes its patch between heads, so unchanged-diff reuse cannot hide
 Luna request. Every result identifies real requests, injected failures and synthetic lanes.
 The acceptance report records SHA-256 hashes of both deployed bundles.
 
-Observed real calls:
+Initial real calls before the user updated the Dev CC credential:
 
 | Path | Result |
 | --- | --- |
@@ -27,10 +27,10 @@ Observed real calls:
 | Independent CC Luna / Muse / Haiku SDK probes | All return HTTP 401 |
 | Independent Node fetch, same CC key and Provider API | HTTP 401 UNAUTHORIZED |
 
-The CC key was not changed. Shape checks show one key, no Bearer prefix, no internal
+At that initial checkpoint the CC key had not been changed. Shape checks showed one key, no Bearer prefix, no internal
 whitespace or non-ASCII characters. These observations do not establish that the key
-itself is invalid: the existing CI request also returns 401, and the account/provider
-authentication cause remains unresolved. Do not rotate the key based on this report alone.
+itself was invalid: the existing CI request also returned 401, and the historical account/provider
+authentication cause was not established. No credential was automatically regenerated or rotated.
 The CC probe endpoint is the repository-documented and current provider-documented
 `https://api.commandcode.ai/provider/v1`.
 
@@ -39,6 +39,25 @@ The existing PR run provides a separate control: run
 `0a7689d8f9d344598744c60281ffcbef78d6a602`, records CC Luna HTTP 401 at
 2026-10-30 13:08:43 UTC, then a valid Go Luna response. That run uses ci-central's
 unchanged own C policy, not NebulaLab's new OpenAI policy.
+
+## Successful revalidation after the user updated 1Password
+
+The user updated the existing Dev CC credential and requested a fresh test. All four
+actual-runner cases then passed, on the same ci-review VM, production bundles and endpoints:
+
+| Path | Result |
+| --- | --- |
+| Terra/OpenAI first pass | HTTP 200, valid report and first-pass marker |
+| Luna/OpenAI subsequent head | HTTP 200, valid report and Terra marker preserved |
+| Injected OpenAI failure, real Luna/CC fallback | HTTP 200, valid report |
+| Injected A/B provider failures, real Muse/CC and Haiku/CC | Both HTTP 200, valid reports |
+
+[Machine-readable result](actual-runner.json) records tested runtime commit
+`44b566efd2aa2904d2e1e8a358682e2647b7c886`, bundle hashes and each real/injected/synthetic
+call. Its bundle hashes were independently compared with `git show HEAD:<bundle>` bytes.
+The subsequent evidence-only commit does not change runtime code, configuration or bundles.
+No GitHub Secret was changed: this revalidation used fresh 1Password values through stdin.
+The historical reason for the previous credential's 401 remains unproven.
 
 ## Approved proxy prerequisite
 
@@ -71,4 +90,4 @@ Anthropic trace `loc=TW`; all 15 existing proxy policy tests pass remotely.
 
 No NebulaLab caller pin or GitHub Secret was changed, and no PR was merged. Production
 cutover must follow the migration document after central merge and successful CC acceptance.
-Passing tests and OpenAI primary acceptance do not substitute for a successful CC fallback.
+The updated-credential revalidation establishes the successful CC fallback as well as both OpenAI primary paths. The production caller/secret cutover remains a separate post-merge step.

@@ -59,17 +59,22 @@ function validateModel(model, location) {
 function validateCrossProvider(config, lane, model, protocol, location) {
   const cross = model.cross_provider;
   if (!cross || typeof cross !== 'object' || Array.isArray(cross)
-    || Object.keys(cross).some((key) => !['credential_lane', 'id'].includes(key))) {
-    throw new Error(`${location}.cross_provider must be an object with only credential_lane and id.`);
+    || Object.keys(cross).some((key) => !['credential_lane', 'credential_provider', 'id'].includes(key))) {
+    throw new Error(`${location}.cross_provider must be an object with only credential_lane and id, optionally credential_provider.`);
   }
   if (typeof cross.id !== 'string' || !cross.id.trim()) {
     throw new Error(`${location}.cross_provider.id must be a non-empty string.`);
   }
   const target = config.lanes.find((candidate) => candidate?.id === cross.credential_lane);
-  if (!target || cross.credential_lane === lane.id) {
+  if (!target || (cross.credential_lane === lane.id && cross.credential_provider === undefined)) {
     throw new Error(`${location}.cross_provider.credential_lane must name another configured lane.`);
   }
-  if (typeof target.provider !== 'string' || target.provider === lane.provider) {
+  const provider = cross.credential_provider ?? target.provider;
+  if (cross.credential_provider !== undefined
+    && (!target.credential_providers?.includes(cross.credential_provider))) {
+    throw new Error(`${location}.cross_provider.credential_provider must name a configured provider in the target slot.`);
+  }
+  if (typeof provider !== 'string' || provider === lane.provider) {
     throw new Error(`${location}.cross_provider must use a provider other than the lane's own.`);
   }
   if (protocol === 'google-generate-content') {
@@ -116,6 +121,13 @@ function validateConfig(config, repository) {
     if (laneIds.has(lane.id)) throw new Error(`Lane ${lane.id} is configured more than once.`);
     laneIds.add(lane.id);
     if (typeof lane.provider !== 'string' || !lane.provider.trim()) throw new Error(`${location}.provider must be non-empty.`);
+    if (lane.credential_providers !== undefined
+      && (!Array.isArray(lane.credential_providers) || lane.credential_providers.length !== 2
+        || new Set(lane.credential_providers).size !== 2
+        || lane.credential_providers.some((provider) => !['openai', 'command-code'].includes(provider))
+        || !lane.credential_providers.includes(lane.provider) || lane.key_weights !== undefined)) {
+      throw new Error(`${location}.credential_providers must contain openai and command-code, include the lane provider, and cannot use key_weights.`);
+    }
     if (lane.advisory !== undefined && typeof lane.advisory !== 'boolean') throw new Error(`${location}.advisory must be a boolean.`);
     if (lane.resend_unserved !== undefined && typeof lane.resend_unserved !== 'boolean') {
       throw new Error(`${location}.resend_unserved must be a boolean.`);
@@ -154,6 +166,10 @@ function validateConfig(config, repository) {
     }
     for (const [model, modelLocation] of modelEntries) {
       const protocol = model.protocol ?? lane.protocol;
+      if (model.reasoning_effort !== undefined && (protocol !== 'openai-responses'
+        || !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(model.reasoning_effort))) {
+        throw new Error(`${modelLocation}.reasoning_effort requires openai-responses and a supported effort.`);
+      }
       if (model.omit_max_tokens && protocol !== 'openai-chat-completions') {
         throw new Error(`${modelLocation}.omit_max_tokens is only supported by openai-chat-completions.`);
       }

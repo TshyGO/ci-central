@@ -46,16 +46,16 @@ for (const repository of repositories) {
   assert.deepEqual(fromSource.lanes.map((lane) => lane.id), ['A', 'B', 'C']);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gpt-6-luna']);
   // Lanes A/B draw on the OpenCode Go plan (NebulaLab's B on Anthropic) and Lane C on Command Code.
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', onAnthropic ? 'anthropic' : 'opencode-go', 'command-code'], `${repository} lane providers changed`);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.provider), ['opencode-go', onAnthropic ? 'anthropic' : 'opencode-go', onAnthropic ? 'openai' : 'command-code'], `${repository} lane providers changed`);
   // A fallback on the same provider cannot help once that provider's quota is gone or it is down.
   // So a primary that yields no usable review, for any reason, is asked once more as the same
   // model on the other provider: Lanes A/B on Command Code through the Lane C slot, Lane C on Go
   // through the Lane A slot. Command Code served Muse 1.3 and Haiku on 2026-10-15, and Go served
   // GPT-6 Luna on 2026-10-19 under the same id.
   assert.deepEqual(fromSource.lanes.map((lane) => lane.primary.cross_provider), [
-    { credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor' },
-    { credential_lane: 'C', id: 'claude-haiku-5-5' },
-    { credential_lane: 'A', id: 'gpt-6-luna' },
+    { credential_lane: 'C', id: 'meta/muse-spark-1.3-contributor', ...(onAnthropic ? { credential_provider: 'command-code' } : {}) },
+    { credential_lane: 'C', id: 'claude-haiku-5-5', ...(onAnthropic ? { credential_provider: 'command-code' } : {}) },
+    onAnthropic ? { credential_lane: 'C', credential_provider: 'command-code', id: 'gpt-6-luna' } : { credential_lane: 'A', id: 'gpt-6-luna' },
   ], `${repository} each primary must name the same model on the other provider`);
   assert.deepEqual(fromSource.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-responses']);
   // Go serves GPT-6 Luna only over Responses (Chat Completions returns 400 ModelProtocolUnsupported),
@@ -63,8 +63,8 @@ for (const repository of repositories) {
   assert.equal(fromSource.lanes[2].primary.protocol ?? fromSource.lanes[2].protocol, 'openai-responses',
     `${repository} GPT-6 Luna must be asked over Responses on both providers`);
   assert.equal(fromSource.lanes[2].primary.max_output_tokens, 65536);
-  assert.deepEqual(fromSource.lanes.map((lane) => lane.first_pass?.id ?? null), [null, onAnthropic ? 'claude-sonnet-5-5' : null, null],
-    `${repository} only NebulaLab's Lane B has a first pass`);
+  assert.deepEqual(fromSource.lanes.map((lane) => lane.first_pass?.id ?? null), [null, onAnthropic ? 'claude-sonnet-5-5' : null, onAnthropic ? 'gpt-6.1-terra' : null],
+    `${repository} only NebulaLab's Lanes B/C have first passes`);
   // Lane C's unserved resend was dropped: each lane is one request on its own provider, then one on the other.
   assert.ok(fromSource.lanes.every((lane) => lane.resend_unserved === undefined), `${repository} no lane resends on the same provider`);
   // Haiku at max effort spent all 65,536 output tokens thinking on three large NebulaLab PRs; high finished them.
@@ -178,8 +178,9 @@ const inputTokenRoom = {
   // GPT-6 Luna: a 1M-token window (recorded 2026-10-19). Command Code and Go use the same id, so this
   // one entry bounds both routes; it is counted together with its output, the conservative reading.
   'gpt-6-luna': 1000000,
+  'gpt-6.1-terra': 1000000,
 };
-const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'z-ai/glm-5.3-flash', 'moonshotai/Kimi-K2.7-Code', 'gpt-6-luna']);
+const sharesWindowWithOutput = new Set(['kimi-k2.7-code', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'tencent/hy3-paid', 'z-ai/glm-5.3-flash', 'moonshotai/Kimi-K2.7-Code', 'gpt-6-luna', 'gpt-6.1-terra']);
 for (const repository of repositories) {
   const config = source.loadConfig(repository, actionPath);
   const policy = config.review_policy;
@@ -215,7 +216,11 @@ for (const repository of repositories) {
 const nebula = source.loadConfig('TshyGO/NebulaLab', actionPath);
 assert.equal(nebula.lanes[0].provider, 'opencode-go');
 assert.equal(nebula.lanes[1].provider, 'anthropic');
-assert.equal(nebula.lanes[2].provider, 'command-code');
+assert.equal(nebula.lanes[2].provider, 'openai');
+assert.deepEqual(nebula.lanes[2].credential_providers, ['openai', 'command-code']);
+assert.equal(nebula.lanes[2].first_pass.id, 'gpt-6.1-terra');
+assert.equal(nebula.lanes[2].first_pass.reasoning_effort, 'high');
+assert.equal(nebula.lanes[2].primary.reasoning_effort, 'medium');
 assert.deepEqual(nebula.lanes.map((lane) => lane.protocol), ['openai-responses', 'anthropic-messages', 'openai-responses']);
 assert.deepEqual(nebula.lanes.map((lane) => lane.primary.id), ['muse-spark-1.3-contributor', 'claude-haiku-5-5', 'gpt-6-luna']);
 assert.equal(nebula.lanes[0].primary.context_profile, 'full');
@@ -288,6 +293,8 @@ assert.throws(() => source.validateConfig(duplicateInsideLane, 'TshyGO/NebulaLab
 
 const invalidThinkingLevel = structuredClone(nebula);
 invalidThinkingLevel.lanes[2].protocol = 'google-generate-content';
+delete invalidThinkingLevel.lanes[2].first_pass;
+delete invalidThinkingLevel.lanes[2].primary.reasoning_effort;
 delete invalidThinkingLevel.lanes[2].primary.cross_provider;
 invalidThinkingLevel.lanes[2].primary.thinking_level = 'maximum';
 assert.throws(() => source.validateConfig(invalidThinkingLevel, 'TshyGO/NebulaLab'), /thinking_level is not supported/);
@@ -302,6 +309,8 @@ assert.throws(() => source.validateConfig(invalidOmitMaxTokens, 'TshyGO/NebulaLa
 
 const googleOmitMaxTokens = structuredClone(nebula);
 googleOmitMaxTokens.lanes[2].protocol = 'google-generate-content';
+delete googleOmitMaxTokens.lanes[2].first_pass;
+delete googleOmitMaxTokens.lanes[2].primary.reasoning_effort;
 delete googleOmitMaxTokens.lanes[2].primary.cross_provider;
 googleOmitMaxTokens.lanes[2].primary.omit_max_tokens = true;
 assert.throws(() => source.validateConfig(googleOmitMaxTokens, 'TshyGO/NebulaLab'), /omit_max_tokens is only supported by openai-chat-completions/);
@@ -331,9 +340,9 @@ assert.throws(() => source.validateConfig(everyLaneAdvisory, 'TshyGO/NebulaLab')
 // The cross-provider fallback sends a review to another lane's provider, so its shape is strict.
 for (const loader of [source, bundled]) {
   for (const [mutate, message] of [
-    [(config) => { config.lanes[0].primary.cross_provider.credential_lane = 'A'; }, /must name another configured lane/],
-    [(config) => { config.lanes[0].primary.cross_provider.credential_lane = 'D'; }, /must name another configured lane/],
-    [(config) => { config.lanes[1].provider = 'opencode-go'; config.lanes[1].primary.cross_provider.credential_lane = 'A'; }, /provider other than the lane's own/],
+    [(config) => { config.lanes[0].primary.cross_provider.credential_lane = 'A'; delete config.lanes[0].primary.cross_provider.credential_provider; }, /must name another configured lane/],
+    [(config) => { config.lanes[0].primary.cross_provider.credential_lane = 'D'; delete config.lanes[0].primary.cross_provider.credential_provider; }, /must name another configured lane/],
+    [(config) => { config.lanes[1].provider = 'opencode-go'; config.lanes[1].primary.cross_provider.credential_lane = 'A'; delete config.lanes[1].primary.cross_provider.credential_provider; }, /provider other than the lane's own/],
     [(config) => { config.lanes[0].primary.cross_provider.id = ' '; }, /cross_provider\.id must be a non-empty string/],
     [(config) => { config.lanes[0].primary.cross_provider.provider = 'other'; }, /only credential_lane and id/],
     [(config) => { config.lanes[0].primary.cross_provider = 'C'; }, /only credential_lane and id/],
@@ -349,6 +358,7 @@ for (const loader of [source, bundled]) {
   // other (A and C already do) and may target a lane that crosses too.
   const towardAnthropic = structuredClone(nebula);
   towardAnthropic.lanes[0].primary.cross_provider.credential_lane = 'B';
+  delete towardAnthropic.lanes[0].primary.cross_provider.credential_provider;
   assert.doesNotThrow(() => loader.validateConfig(towardAnthropic, 'TshyGO/NebulaLab'));
 }
 

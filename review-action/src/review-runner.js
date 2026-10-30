@@ -1,6 +1,7 @@
 'use strict';
 
 const { validateConfig } = require('./index.js');
+const { readCredentials } = require('./review-credentials.js');
 const { packDiff, packIncremental, collectIssues, enrichWorkflows } = require('./review-context.js');
 const { PROMPT_VERSION, buildSystemPrompt, parseReview, renderReview, renderPartialReview } = require('./review-report.js');
 const { createStatusPublisher } = require('./review-status.js');
@@ -41,7 +42,7 @@ function quotaWording(provider, { window, resetAt, credit = false }) {
 
 // Runs only from the trusted central checkout. Runtime injection is used by contract tests.
 async function runReview({ github, context, env = globalThis.process.env, fetch = globalThis.fetch,
-  timers = globalThis, logger = globalThis.console, sdk }) {
+  timers = globalThis, logger = globalThis.console, sdk, maskSecret }) {
   const process = { env };
   const console = logger;
   const { setTimeout, clearTimeout } = timers;
@@ -62,15 +63,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const reviewPolicy = reviewConfig.review_policy;
   // A fixed secret slot may hold several keys of its provider, one per line: separate accounts,
   // each with its own credit. GitHub masks every line of a multi-line secret on its own.
-  const slot = (key, base) => {
-    const keys = String(key || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    return { apiKey: keys[0], keys, baseUrl: (base || '').replace(/\/$/, '') };
-  };
-  const laneCredentials = {
-    A: slot(process.env.LANE_A_KEY, process.env.LANE_A_API_BASE),
-    B: slot(process.env.LANE_B_KEY, process.env.LANE_B_API_BASE),
-    C: slot(process.env.LANE_C_KEY, process.env.LANE_C_API_BASE),
-  };
+  const credentialsFor = readCredentials(lanes, process.env, maskSecret);
+  const laneCredentials = Object.fromEntries(lanes.map((lane) => [lane.id, credentialsFor(lane.id, lane.provider)]));
   const { data: pull } = await github.rest.pulls.get({
     owner,
     repo,
@@ -543,7 +537,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
 
   function responsesPayload(model) {
     const chat = basePayload(model);
-    return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false };
+    return { model: model.id, input: chat.messages, max_output_tokens: model.max_output_tokens, store: false,
+      ...(model.reasoning_effort ? { reasoning: { effort: model.reasoning_effort } } : {}) };
   }
 
   // Claude models think adaptively; effort is the only depth control.
@@ -626,12 +621,12 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   const spentKeys = { A: new Set(), B: new Set(), C: new Set() };
   // The spent keys whose credit or plan ran out, as opposed to a refused key.
   const creditSpentKeys = { A: new Set(), B: new Set(), C: new Set() };
-  const weightsOf = (laneId) => {
+  const weightsOf = (laneId, provider = lanes.find((lane) => lane.id === laneId)?.provider) => {
     const configured = lanes.find((lane) => lane.id === laneId)?.key_weights ?? [];
-    return laneCredentials[laneId].keys.map((_, index) => configured[index] ?? 1);
+    return credentialsFor(laneId, provider).keys.map((_, index) => configured[index] ?? 1);
   };
-  function pickedKey(laneId) {
-    const weights = weightsOf(laneId);
+  function pickedKey(laneId, provider) {
+    const weights = weightsOf(laneId, provider);
     let rest = (Math.abs(Number(pullNumber)) || 0) % weights.reduce((sum, weight) => sum + weight, 0);
     return Math.max(0, weights.findIndex((weight) => (rest -= weight) < 0));
   }
@@ -673,13 +668,13 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     let localDeadline = false;
     let quota = null;
     try {
-      const credentials = laneCredentials[route.credentialLane];
+      const credentials = credentialsFor(route.credentialLane, route.provider);
       const apiKey = credentials.keys[route.keyIndex ?? 0];
       const goRoute = route.provider === 'opencode-go';
       let proxyUrl;
       const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
         && protocolOf(lane, model) === 'openai-chat-completions' && DIRECT_GO_MODELS.has(route.modelId);
-      if (goRoute && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
+      if ((goRoute || route.provider === 'openai') && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
         // Keep GitHub's runner-wide proxy independent from model egress.
         // An invalid explicit override fails closed without trying the VPS.
         proxyUrl = process.env.NEBULA_REVIEW_PROXY_URL !== undefined
@@ -799,14 +794,15 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
     const cross = model.cross_provider;
     if (!cross) return null;
     const target = lanes.find((candidate) => candidate.id === cross.credential_lane);
-    const credentials = laneCredentials[cross.credential_lane];
+    const provider = cross.credential_provider ?? target?.provider;
+    const credentials = credentialsFor(cross.credential_lane, provider);
     if (!target || !credentials?.apiKey || !credentials?.baseUrl) {
       console.log(`[Lane ${lane.id}/${model.id}] a cross-provider fallback is configured, but the Lane ${cross.credential_lane} secret slot is not provisioned.`);
       return null;
     }
     // The target slot's PR-number key, never one its own lane skipped to: lanes run in parallel, so
     // that lane's spent keys would make the account depend on timing.
-    return { provider: target.provider, credentialLane: target.id, modelId: cross.id, keyIndex: pickedKey(target.id) };
+    return { provider, credentialLane: target.id, modelId: cross.id, keyIndex: pickedKey(target.id, provider) };
   }
 
   // A complete report is checked against exactly what was supplied, its findings get the ids the

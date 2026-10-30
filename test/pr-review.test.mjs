@@ -2375,7 +2375,26 @@ check('NebulaLab: A and B still cross to CC, never to the OpenAI profile or the 
   && r.captured.filter((call) => call.lane === 'C' && call.model !== 'gpt-6.1-terra').map((call) => call.model).sort().join(',') === 'claude-haiku-5-5,meta/muse-spark-1.3-contributor'
   && r.captured.filter((call) => call.lane === 'C' && call.model !== 'gpt-6.1-terra').every((call) => call.headers.authorization === 'Bearer cc-test-key' || call.headers['x-api-key'] === 'cc-test-key'));
 r = await scenario(healthy, { ...openaiEgress, LANE_C_KEY: '{never-echo-this-secret' });
-check('NebulaLab: malformed provider bundles fail closed before all model requests without exposing input', r.captured.length === 0
-  && r.error?.message.includes('matching version-1') && !r.error.message.includes('never-echo'));
+check('NebulaLab: malformed C bundles disable C while A/B continue without exposing input', !r.error
+  && r.captured.map((call) => call.lane).sort().join(',') === 'A,B'
+  && laneCBody(r).includes('credential format is invalid') && laneCBody(r).includes('status=diagnostic')
+  && !JSON.stringify([r.posted, r.logs]).includes('never-echo'));
+
+const openaiChat = structuredClone(nebulaConfig);
+delete openaiChat.lanes[2].first_pass;
+delete openaiChat.lanes[2].primary.cross_provider;
+delete openaiChat.lanes[2].primary.reasoning_effort;
+openaiChat.lanes[2].primary.id = 'kimi-k2.7-code';
+openaiChat.lanes[2].protocol = 'openai-chat-completions';
+r = await scenario(healthy, { ...openaiEgress, PR_REVIEW_CONFIG: JSON.stringify(openaiChat) });
+check('OpenAI cannot inherit a Go-only direct-egress exemption by sharing a model id', !r.error
+  && laneCCalls(r).length === 1 && laneCCalls(r)[0].proxy === 'http://192.168.122.1:17890');
+
+r = await scenario((call) => call.url.startsWith('https://lane-c.openai.') ? reply(401, 'refused') : healthy(call), {
+  ...openaiEgress, LANE_C_KEY: providerBundle({ openai: 'openai-one\nopenai-two', 'command-code': 'cc-one\ncc-two' }),
+});
+check('spent OpenAI account indices never change the CC profile PR-number key', !r.error
+  && laneCCalls(r).filter((call) => call.url.startsWith('https://lane-c.cc.')).length === 1
+  && laneCCalls(r).find((call) => call.url.startsWith('https://lane-c.cc.')).headers.authorization === 'Bearer cc-one');
 
 if (checks.some((value) => !value)) process.exitCode = 1;

@@ -17,7 +17,7 @@ test('provider credentials stay paired, nested keys are masked, legacy accounts 
   assert.equal(get('C', 'anthropic'), undefined);
   assert.deepEqual(masked.sort(), ['anthropic-1', 'anthropic-2', 'cc-key', 'openai-key']);
 });
-test('malformed, partial, mismatched and unconfigured bundles fail without echoing input', () => {
+test('bad bundles disable only the affected slot, without borrowing keys or echoing input', () => {
   for (const change of [
     { LANE_C_KEY: '{secret-never-print' },
     { LANE_C_KEY: 'secret-never-print' },
@@ -26,10 +26,20 @@ test('malformed, partial, mismatched and unconfigured bundles fail without echoi
     { LANE_C_API_BASE: bundle({ openai: 'https://wrong.example?key=secret-never-print', 'command-code': 'https://cc.example' }) },
     { LANE_C_KEY: JSON.stringify({ schema_version: 2, providers: { openai: 'secret-never-print', 'command-code': 'cc-key' } }) },
   ]) {
-    assert.throws(() => readCredentials(lanes, { ...env, ...change }), (error) =>
-      error.message.includes('Lane C requires matching') && !error.message.includes('secret-never-print'));
+    const get = readCredentials(lanes, { ...env, ...change });
+    assert.equal(get('C', 'openai').invalid, true);
+    assert.equal(get('C', 'openai').apiKey, undefined);
+    assert.equal(get('C', 'command-code').apiKey, undefined);
+    assert.equal(get('B', 'anthropic').apiKey, 'anthropic-1');
+    assert.ok(!JSON.stringify(get('C', 'openai')).includes('secret-never-print'));
   }
-  assert.throws(() => readCredentials([{ id: 'C', provider: 'command-code' }], env), /does not configure provider credential bundles/);
+  assert.equal(readCredentials([{ id: 'C', provider: 'command-code' }], env)('C', 'command-code').invalid, true);
+});
+test('nested keys are masked even when the base bundle is malformed', () => {
+  const masked = [];
+  const get = readCredentials(lanes, { ...env, LANE_C_API_BASE: '{bad' }, (key) => masked.push(key));
+  assert.ok(masked.includes('openai-key') && masked.includes('cc-key'));
+  assert.equal(get('C', 'openai').invalid, true);
 });
 test('an absent bundle supplies no provider instead of borrowing another provider key', () => {
   const get = readCredentials(lanes, { ...env, LANE_C_KEY: '', LANE_C_API_BASE: '' });

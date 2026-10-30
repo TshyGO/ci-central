@@ -249,27 +249,40 @@ var require_review_credentials = __commonJS({
         const key = env[`LANE_${lane.id}_KEY`] || "";
         const base = env[`LANE_${lane.id}_API_BASE`] || "";
         const profiles = /* @__PURE__ */ new Map();
-        if (lane.credential_providers) {
-          if (!key && !base) {
-            for (const provider of lane.credential_providers) profiles.set(provider, credential("", ""));
-          } else {
-            try {
-              const keys = envelope(key, lane.credential_providers);
-              const bases = envelope(base, lane.credential_providers);
-              for (const provider of lane.credential_providers) profiles.set(provider, credential(keys[provider], bases[provider]));
-              for (const { baseUrl } of profiles.values()) {
-                const url = new URL(baseUrl);
-                if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Invalid endpoint");
+        try {
+          if (lane.credential_providers) {
+            if (!key && !base) {
+              for (const provider of lane.credential_providers) profiles.set(provider, credential("", ""));
+            } else {
+              try {
+                const keys = envelope(key, lane.credential_providers);
+                for (const provider of lane.credential_providers) {
+                  for (const value of keysOf(keys[provider])) maskSecret(value);
+                }
+                const bases = envelope(base, lane.credential_providers);
+                for (const provider of lane.credential_providers) {
+                  const keysForProvider = keysOf(keys[provider]);
+                  profiles.set(provider, { apiKey: keysForProvider[0], keys: keysForProvider, baseUrl: bases[provider].replace(/\/$/, "") });
+                }
+                for (const { baseUrl } of profiles.values()) {
+                  const url = new URL(baseUrl);
+                  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Invalid endpoint");
+                }
+              } catch {
+                throw new Error(`Lane ${lane.id} requires matching version-1 provider credential bundles; no requests were sent.`);
               }
-            } catch {
-              throw new Error(`Lane ${lane.id} requires matching version-1 provider credential bundles; no requests were sent.`);
             }
+          } else {
+            if (key.trim().startsWith("{") || base.trim().startsWith("{")) {
+              throw new Error(`Lane ${lane.id} does not configure provider credential bundles; no requests were sent.`);
+            }
+            profiles.set(lane.provider, credential(key, base));
           }
-        } else {
-          if (key.trim().startsWith("{") || base.trim().startsWith("{")) {
-            throw new Error(`Lane ${lane.id} does not configure provider credential bundles; no requests were sent.`);
+        } catch {
+          profiles.clear();
+          for (const provider of lane.credential_providers || [lane.provider]) {
+            profiles.set(provider, { apiKey: void 0, keys: [], baseUrl: "", invalid: true });
           }
-          profiles.set(lane.provider, credential(key, base));
         }
         slots.set(lane.id, profiles);
       }
@@ -1855,7 +1868,7 @@ ${requestError || ""}`;
       const apiKey = credentials.keys[route.keyIndex ?? 0];
       const goRoute = route.provider === "opencode-go";
       let proxyUrl;
-      const directGoModel = process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(route.modelId);
+      const directGoModel = goRoute && process2.env.RUNNER_ENVIRONMENT === "self-hosted" && protocolOf(lane, model) === "openai-chat-completions" && DIRECT_GO_MODELS.has(route.modelId);
       if ((goRoute || route.provider === "openai") && process2.env.RUNNER_ENVIRONMENT !== "github-hosted" && !directGoModel) {
         proxyUrl = process2.env.NEBULA_REVIEW_PROXY_URL !== void 0 ? process2.env.NEBULA_REVIEW_PROXY_URL : process2.env.https_proxy || process2.env.HTTPS_PROXY || void 0;
         let proxy;
@@ -2078,7 +2091,7 @@ ${requestError || ""}`;
       };
     }
     if (!credentials?.apiKey || !credentials?.baseUrl) {
-      console.log(`[Lane ${lane.id}] fixed credential slots are not available; skipping model requests for this lane.`);
+      console.log(`[Lane ${lane.id}] fixed credential slots are ${credentials?.invalid ? "invalid" : "not available"}; skipping model requests for this lane.`);
       return {
         lane,
         primary,
@@ -2089,7 +2102,7 @@ ${requestError || ""}`;
         review: [
           "> AI review was not generated.",
           "",
-          `Lane ${lane.id} is not provisioned.`,
+          credentials?.invalid ? `Lane ${lane.id} credential format is invalid; this slot and its cross routes are disabled.` : `Lane ${lane.id} is not provisioned.`,
           "",
           `Action needed: set PR_AGENT_LANE_${lane.id}_KEY and PR_AGENT_LANE_${lane.id}_API_BASE in the caller repository.`
         ].join("\n")

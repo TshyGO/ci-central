@@ -34,7 +34,7 @@ versioned JSON. These examples contain placeholders, never real keys.
 ```
 
 Both provider maps must exactly match `credential_providers`. Malformed or mismatched
-bundles stop before requests without echoing input. Every nested key is masked before
+bundles disable C and its cross routes without echoing input; A/B can still review. Every parsed nested key is masked before
 requests or diagnostics. A provider selects both its key and endpoint. Legacy multiline
 keys still mean separate accounts of one provider; bundles cannot use `key_weights`.
 NebulaLab B stays plain and weighted 2:1.

@@ -4,6 +4,10 @@
 // GitHub is simulated; model requests use the exact production bundle and SDK.
 const { runReview } = require('../review-action/dist/review-runner.js');
 const { requestChatCompletion } = require('../review-action/dist/sdk-client.js');
+const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const bundleHashes = Object.fromEntries(['review-runner.js','sdk-client.js'].map((name) => [name, createHash('sha256').update(fs.readFileSync(path.join(__dirname,'../review-action/dist',name))).digest('hex')]));
 const config = require('../review-action/config/repositories/TshyGO__NebulaLab.json');
 const workflow = process.argv[2];
 if (!/^[a-f0-9]{40}$/.test(workflow || '')) throw new Error('Supply the tested 40-character commit');
@@ -13,6 +17,7 @@ const fakeReview = (model) => response(200, JSON.stringify({ model, choices: [{ 
 const bundle = (providers) => JSON.stringify({ schema_version: 1, providers });
 let stage = 'read-input';
 let lastTraces = [];
+const completedCases = [];
 let lastLogCodes = [];
 let input = '';
 process.stdin.setEncoding('utf8');
@@ -28,7 +33,7 @@ process.stdin.on('end', async () => {
       LANE_B_KEY: 'acceptance-stub-b', LANE_B_API_BASE: 'https://stub-b.invalid/v1',
       LANE_C_KEY: bundle({ openai: secrets.openai_key, 'command-code': secrets.cc_key }),
       LANE_C_API_BASE: bundle(bases) };
-    const summaries = [];
+    const summaries = completedCases;
     async function round(name, headDigit, prior = [], inject = false, verifyAB = false) {
       stage = name;
       console.error(`Acceptance case: ${name}`);
@@ -53,8 +58,8 @@ process.stdin.on('end', async () => {
         payload: { pull_request: { number: 42, head: { sha: head } } }, serverUrl: 'https://github.com', runId: 1 }, env,
         logger: { log: (message) => { const code = /error_code=([A-Za-z0-9_-]+)/.exec(String(message)); if (code) lastLogCodes.push(code[1]); } }, maskSecret: () => {}, sdk: { requestChatCompletion: async (args) => {
           const provider = args.baseURL === bases.openai ? 'openai' : args.baseURL === bases['command-code'] ? 'command-code' : 'stub';
-          if (provider === 'stub') return verifyAB ? response(503, 'Injected own-provider outage') : fakeReview(args.payload.model);
-          if (verifyAB && provider === 'openai') return fakeReview(args.payload.model);
+          if (provider === 'stub') { traces.push({ provider, model: args.payload.model, synthetic: !verifyAB, injected: verifyAB }); return verifyAB ? response(503, 'Injected own-provider outage') : fakeReview(args.payload.model); }
+          if (verifyAB && provider === 'openai') { traces.push({ provider, model: args.payload.model, synthetic: true }); return fakeReview(args.payload.model); }
           if (inject && provider === 'openai') { traces.push({ provider, model: args.payload.model, injected: true }); return response(503, 'Injected outage'); }
           try {
             const result = await requestChatCompletion(args);
@@ -76,18 +81,18 @@ process.stdin.on('end', async () => {
       if (JSON.stringify(actual) !== JSON.stringify(expected.sort())) throw new Error('Unexpected provider/model trace');
       if (verifyAB && laneComments.some((body) => !body.includes('status=valid'))) throw new Error('A/B evidence was not valid');
       if (!firstPass) throw new Error('First pass was not preserved');
-      summaries.push({ case: name, valid: true, first_pass_preserved: firstPass, traces });
+      summaries.push({ case: name, valid: true, first_pass_preserved: verifyAB ? null : firstPass, synthetic_lanes: verifyAB ? ['C'] : ['A', 'B'], traces });
       return laneComments;
     }
     const first = await round('Terra first pass / real OpenAI', 'b');
     await round('Luna subsequent head / real OpenAI', 'c', first);
     await round('Luna injected OpenAI outage / real CC fallback', 'd', first, true);
     await round('A/B injected own-provider outages / real CC fallbacks', 'e', [], false, true);
-    console.log(JSON.stringify({ commit: workflow, github_context: 'simulated; no GitHub writes', runner: process.env.RUNNER_NAME || require('node:os').hostname(),
+    console.log(JSON.stringify({ commit: workflow, bundle_sha256: bundleHashes, github_context: 'simulated; no GitHub writes', runner: process.env.RUNNER_NAME || require('node:os').hostname(),
       proxy: 'approved szlab review proxy', summaries }, null, 2));
   } catch (error) {
     // Neither provider errors nor secret-bearing inputs are printed by this harness.
-    console.error(JSON.stringify({ failed_case: stage, traces: lastTraces, error_codes: lastLogCodes, exception: error.name, frames: String(error.stack).split("\n").filter((line) => /^\s+at /.test(line)).slice(0, 5) }));
+    console.log(JSON.stringify({ commit: workflow, bundle_sha256: bundleHashes, failed_case: stage, completed_cases: completedCases, traces: lastTraces, error_codes: lastLogCodes, exception: error.name, frames: String(error.stack).split("\n").filter((line) => /^\s+at /.test(line)).slice(0, 5) }));
     process.exitCode = 1;
   }
 });

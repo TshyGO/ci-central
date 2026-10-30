@@ -672,7 +672,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
       const apiKey = credentials.keys[route.keyIndex ?? 0];
       const goRoute = route.provider === 'opencode-go';
       let proxyUrl;
-      const directGoModel = process.env.RUNNER_ENVIRONMENT === 'self-hosted'
+      const directGoModel = goRoute && process.env.RUNNER_ENVIRONMENT === 'self-hosted'
         && protocolOf(lane, model) === 'openai-chat-completions' && DIRECT_GO_MODELS.has(route.modelId);
       if ((goRoute || route.provider === 'openai') && process.env.RUNNER_ENVIRONMENT !== 'github-hosted' && !directGoModel) {
         // Keep GitHub's runner-wide proxy independent from model egress.
@@ -898,7 +898,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         review: '> AI review was not generated.\n\nNo complete inspectable text patch was supplied. No model request was sent; binary, unavailable or omitted patches cannot establish review evidence.' };
     }
     if (!credentials?.apiKey || !credentials?.baseUrl) {
-      console.log(`[Lane ${lane.id}] fixed credential slots are not available; skipping model requests for this lane.`);
+      console.log(`[Lane ${lane.id}] fixed credential slots are ${credentials?.invalid ? 'invalid' : 'not available'}; skipping model requests for this lane.`);
       return {
         lane,
         primary,
@@ -909,7 +909,7 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
         review: [
           '> AI review was not generated.',
           '',
-          `Lane ${lane.id} is not provisioned.`,
+          credentials?.invalid ? `Lane ${lane.id} credential format is invalid; this slot and its cross routes are disabled.` : `Lane ${lane.id} is not provisioned.`,
           '',
           `Action needed: set PR_AGENT_LANE_${lane.id}_KEY and PR_AGENT_LANE_${lane.id}_API_BASE in the caller repository.`,
         ].join('\n'),

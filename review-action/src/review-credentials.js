@@ -24,15 +24,21 @@ function readCredentials(lanes, env, maskSecret = () => {}) {
     const key = env[`LANE_${lane.id}_KEY`] || '';
     const base = env[`LANE_${lane.id}_API_BASE`] || '';
     const profiles = new Map();
+    try {
     if (lane.credential_providers) {
       if (!key && !base) {
         for (const provider of lane.credential_providers) profiles.set(provider, credential('', ''));
       } else {
         try {
           const keys = envelope(key, lane.credential_providers);
+          for (const provider of lane.credential_providers) {
+            for (const value of keysOf(keys[provider])) maskSecret(value);
+          }
           const bases = envelope(base, lane.credential_providers);
-          // Register every nested key before any request or diagnostic can expose it.
-          for (const provider of lane.credential_providers) profiles.set(provider, credential(keys[provider], bases[provider]));
+          for (const provider of lane.credential_providers) {
+            const keysForProvider = keysOf(keys[provider]);
+            profiles.set(provider, { apiKey: keysForProvider[0], keys: keysForProvider, baseUrl: bases[provider].replace(/\/$/, '') });
+          }
           for (const { baseUrl } of profiles.values()) {
             const url = new URL(baseUrl);
             if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('Invalid endpoint');
@@ -47,6 +53,14 @@ function readCredentials(lanes, env, maskSecret = () => {}) {
         throw new Error(`Lane ${lane.id} does not configure provider credential bundles; no requests were sent.`);
       }
       profiles.set(lane.provider, credential(key, base));
+    }
+    } catch {
+      // A bad slot disables only that slot and its cross routes. Independent lanes
+      // may still meet the quorum; no profile may borrow a different provider's key.
+      profiles.clear();
+      for (const provider of lane.credential_providers || [lane.provider]) {
+        profiles.set(provider, { apiKey: undefined, keys: [], baseUrl: '', invalid: true });
+      }
     }
     slots.set(lane.id, profiles);
   }

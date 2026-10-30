@@ -12,6 +12,8 @@ const response = (status, content) => ({ ok: status < 400, status, text: async (
 const fakeReview = (model) => response(200, JSON.stringify({ model, choices: [{ finish_reason: 'stop', message: { content: report } }] }));
 const bundle = (providers) => JSON.stringify({ schema_version: 1, providers });
 let stage = 'read-input';
+let lastTraces = [];
+let lastLogCodes = [];
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
@@ -33,6 +35,8 @@ process.stdin.on('end', async () => {
       const head = headDigit.repeat(40);
       const comments = prior.map((comment, i) => ({ id: i + 1, user: { login: 'github-actions[bot]' }, body: comment }));
       const traces = [];
+      lastTraces = traces;
+      lastLogCodes = [];
       const github = { rest: { pulls: { get: async () => ({ data: { number: 42, state: 'open', title: 'Runner acceptance fixture',
         user: { login: 'acceptance' }, body: '', base: { ref: 'main', sha: 'a'.repeat(40) }, head: { ref: 'acceptance', sha: head } } }),
         listFiles: 'files', listCommits: 'commits', listReviews: 'reviews', listReviewComments: 'replies' },
@@ -47,14 +51,20 @@ process.stdin.on('end', async () => {
             : which === 'commits' ? [{ commit: { message: 'Acceptance fixture' } }] : [] };
       await runReview({ github, context: { eventName: 'pull_request', repo: { owner: 'TshyGO', repo: 'NebulaLab' },
         payload: { pull_request: { number: 42, head: { sha: head } } }, serverUrl: 'https://github.com', runId: 1 }, env,
-        logger: { log: () => {} }, maskSecret: () => {}, sdk: { requestChatCompletion: async (args) => {
+        logger: { log: (message) => { const code = /error_code=([A-Za-z0-9_-]+)/.exec(String(message)); if (code) lastLogCodes.push(code[1]); } }, maskSecret: () => {}, sdk: { requestChatCompletion: async (args) => {
           const provider = args.baseURL === bases.openai ? 'openai' : args.baseURL === bases['command-code'] ? 'command-code' : 'stub';
           if (provider === 'stub') return verifyAB ? response(503, 'Injected own-provider outage') : fakeReview(args.payload.model);
           if (verifyAB && provider === 'openai') return fakeReview(args.payload.model);
           if (inject && provider === 'openai') { traces.push({ provider, model: args.payload.model, injected: true }); return response(503, 'Injected outage'); }
-          const result = await requestChatCompletion(args);
-          traces.push({ provider, model: args.payload.model, http_status: result.status, real_request: true });
-          return result;
+          try {
+            const result = await requestChatCompletion(args);
+            traces.push({ provider, model: args.payload.model, http_status: result.status, real_request: true });
+            return result;
+          } catch (error) {
+            traces.push({ provider, model: args.payload.model, http_status: Number.isInteger(error.httpStatus) ? error.httpStatus : Number.isInteger(error.status) ? error.status : null,
+              error_code: /^[A-Za-z0-9_-]{1,80}$/.test(error.code || '') ? error.code : 'request-failed', real_request: true });
+            throw error;
+          }
         } } });
       const laneComments = comments.filter((item) => item.body.startsWith('<!-- ai-pr-review-bot:lane-')).map((item) => item.body);
       const c = laneComments.find((body) => body.startsWith('<!-- ai-pr-review-bot:lane-C -->')) || '';
@@ -75,9 +85,9 @@ process.stdin.on('end', async () => {
     await round('A/B injected own-provider outages / real CC fallbacks', 'e', [], false, true);
     console.log(JSON.stringify({ commit: workflow, github_context: 'simulated; no GitHub writes', runner: process.env.RUNNER_NAME || require('node:os').hostname(),
       proxy: 'approved szlab review proxy', summaries }, null, 2));
-  } catch {
+  } catch (error) {
     // Neither provider errors nor secret-bearing inputs are printed by this harness.
-    console.error(`Actual-runner acceptance failed at ${stage}; no secret values or provider error bodies were printed.`);
+    console.error(JSON.stringify({ failed_case: stage, traces: lastTraces, error_codes: lastLogCodes, exception: error.name, frames: String(error.stack).split("\n").filter((line) => /^\s+at /.test(line)).slice(0, 5) }));
     process.exitCode = 1;
   }
 });

@@ -2389,6 +2389,10 @@ openaiChat.lanes[2].protocol = 'openai-chat-completions';
 r = await scenario(healthy, { ...openaiEgress, PR_REVIEW_CONFIG: JSON.stringify(openaiChat) });
 check('OpenAI cannot inherit a Go-only direct-egress exemption by sharing a model id', !r.error
   && laneCCalls(r).length === 1 && laneCCalls(r)[0].proxy === 'http://192.168.122.1:17890');
+r = await scenario(healthy, { ...openaiEgress, NEBULA_REVIEW_PROXY_URL: undefined, https_proxy: undefined, HTTPS_PROXY: undefined });
+check('self-hosted OpenAI without an approved proxy never sends a direct request', !r.error
+  && !r.captured.some((call) => call.url.startsWith('https://lane-c.openai.'))
+  && laneCCalls(r).some((call) => call.model === 'gpt-6-luna' && call.url.startsWith('https://lane-c.cc.')));
 
 r = await scenario((call) => call.url.startsWith('https://lane-c.openai.') ? reply(401, 'refused') : healthy(call), {
   ...openaiEgress, LANE_C_KEY: providerBundle({ openai: 'openai-one\nopenai-two', 'command-code': 'cc-one\ncc-two' }),

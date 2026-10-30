@@ -41,6 +41,11 @@ test('nested keys are masked even when the base bundle is malformed', () => {
   assert.ok(masked.includes('openai-key') && masked.includes('cc-key'));
   assert.equal(get('C', 'openai').invalid, true);
 });
+test('bundle endpoints normalize surrounding whitespace before validation and SDK use', () => {
+  const get = readCredentials(lanes, { ...env, LANE_C_API_BASE: bundle({ openai: ' \nhttps://openai.example/v1/\r\n', 'command-code': 'https://cc.example/v1 ' }) });
+  assert.equal(get('C', 'openai').baseUrl, 'https://openai.example/v1');
+  assert.equal(get('C', 'command-code').baseUrl, 'https://cc.example/v1');
+});
 test('an absent bundle supplies no provider instead of borrowing another provider key', () => {
   const get = readCredentials(lanes, { ...env, LANE_C_KEY: '', LANE_C_API_BASE: '' });
   assert.equal(get('C', 'openai').apiKey, undefined);

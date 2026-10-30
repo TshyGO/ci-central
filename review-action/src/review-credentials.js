@@ -37,7 +37,7 @@ function readCredentials(lanes, env, maskSecret = () => {}) {
           const bases = envelope(base, lane.credential_providers);
           for (const provider of lane.credential_providers) {
             const keysForProvider = keysOf(keys[provider]);
-            profiles.set(provider, { apiKey: keysForProvider[0], keys: keysForProvider, baseUrl: bases[provider].replace(/\/$/, '') });
+            profiles.set(provider, { apiKey: keysForProvider[0], keys: keysForProvider, baseUrl: bases[provider].trim().replace(/\/$/, '') });
           }
           for (const { baseUrl } of profiles.values()) {
             const url = new URL(baseUrl);

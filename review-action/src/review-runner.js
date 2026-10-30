@@ -618,6 +618,8 @@ async function runReview({ github, context, env = globalThis.process.env, fetch 
   // A slot's keys split PRs by number, in proportion to its lane's key_weights, so each PR stays
   // on one account. A key that failed for an account reason in this run is not started on again
   // while another key of the slot has not.
+  // Own-provider state only: cross routes use pickedKey(provider) and the
+  // `if (crossing) continue` below prevents them from writing these sets.
   const spentKeys = { A: new Set(), B: new Set(), C: new Set() };
   // The spent keys whose credit or plan ran out, as opposed to a refused key.
   const creditSpentKeys = { A: new Set(), B: new Set(), C: new Set() };

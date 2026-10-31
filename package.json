@@ -7,7 +7,7 @@
   },
   "scripts": {
     "build": "node scripts/build-sdk.mjs",
-    "test": "node test/review-config.test.mjs && node test/pr-review.test.mjs && node --test test/review-credentials.test.mjs test/review-contract.test.mjs test/review-incremental.test.mjs test/review-status.test.mjs test/caller-audit.test.mjs test/review-evaluation.test.mjs test/sdk-client.test.mjs"
+    "test": "node test/review-config.test.mjs && node test/pr-review.test.mjs && node --test test/review-credentials.test.mjs test/review-contract.test.mjs test/review-incremental.test.mjs test/review-status.test.mjs test/caller-audit.test.mjs test/review-evaluation.test.mjs test/sdk-client.test.mjs test/set-lane-secret.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.131.0",

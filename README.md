@@ -102,6 +102,8 @@ PR_AGENT_LANE_C_API_BASE
 
 密钥不写入配置、日志、命令参数或提交。脚本通过安全提示读取 Key，并从 stdin 交给 `gh secret set`。
 
+脚本只写普通 Key。目标仓库的该 Lane 在中央配置里设了 `credential_providers`（目前只有 NebulaLab 的 Lane C）时，它的槽位是 version-1 JSON bundle，写入普通 Key 会让这条 Lane 失效；脚本在读取 Key 之前就会拒绝，什么都不写。仓库名按不区分大小写匹配配置；在 `review-action/config/repositories` 里找不到配置的目标，槽位格式未知，也会被拒绝。轮换 Command Code Key 时，先用 `-Repositories` 列出其余六个仓库写普通 Key，再按 [迁移说明](docs/nebulalab-openai-c-migration.md) 更新 NebulaLab bundle 里的 `command-code` 项。漏掉的仓库里，凡是发往 Command Code 的请求都会收到 401：普通仓库的 C 会悄悄切到 Go 兜底，评论状态看不出来；NebulaLab 会失去 C 的 Luna 兜底和 A/B 的跨供应商兜底。
+
 一个槽位可以放同一供应商的多把 key（不同账号、各自的额度），每行一把；空行和首尾空白会被忽略，GitHub 会对多行 Secret 的每一行分别打码。只有一行时行为与以前完全相同。多把 key 怎样分摊见“配置契约”的 `key_weights`。旧版 runner 会把多行当成一把坏 key，所以必须先让 caller 固定到支持多行的 ci-central 版本，再写入多行 Secret。
 
 ### Caller 迁移状态
@@ -299,7 +301,7 @@ PR 在集中修复阶段保持 Draft。每次推送后，等待 Lane A/B/C、常
 # 只探测，不写 Secret；Key 通过安全提示输入
 pwsh ./scripts/probe-provider.ps1 -Lane B -Repository TshyGO/NebulaLab -ApiBase https://example.invalid/v1
 
-# 向三个业务仓库写固定 Lane 槽位；支持 -WhatIf
+# 向业务仓库写固定 Lane 槽位；支持 -WhatIf；拒绝 provider bundle 槽位
 pwsh ./scripts/set-lane-secret.ps1 -Lane B -ApiBase https://example.invalid/v1
 
 # 离线验证

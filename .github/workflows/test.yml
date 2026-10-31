@@ -23,4 +23,4 @@ jobs:
       - run: git diff --exit-code -- review-action/dist
       - run: node test/review-config.test.mjs
       - run: node test/pr-review.test.mjs
-      - run: node --test test/review-credentials.test.mjs test/review-contract.test.mjs test/review-incremental.test.mjs test/review-status.test.mjs test/caller-audit.test.mjs test/review-evaluation.test.mjs test/sdk-client.test.mjs
+      - run: node --test test/review-credentials.test.mjs test/review-contract.test.mjs test/review-incremental.test.mjs test/review-status.test.mjs test/caller-audit.test.mjs test/review-evaluation.test.mjs test/sdk-client.test.mjs test/set-lane-secret.test.mjs

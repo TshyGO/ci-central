@@ -22,6 +22,24 @@ param(
 $ErrorActionPreference = 'Stop'
 $keyName = "PR_AGENT_LANE_${Lane}_KEY"
 $baseName = "PR_AGENT_LANE_${Lane}_API_BASE"
+
+# Check every target before asking for the key. A lane with credential_providers keeps a
+# version-1 JSON bundle in its slots, and a plain key written there would disable the lane.
+$configDirectory = Join-Path $PSScriptRoot '..' 'review-action' 'config' 'repositories'
+$bundled = foreach ($repository in $Repositories) {
+    if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+        throw "Invalid repository identifier: $repository"
+    }
+    $configPath = Join-Path $configDirectory (($repository -replace '/', '__') + '.json')
+    if (Test-Path -LiteralPath $configPath) {
+        $laneConfig = (Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).lanes | Where-Object id -eq $Lane
+        if ($laneConfig -and $laneConfig.PSObject.Properties['credential_providers']) { $repository }
+    }
+}
+if ($bundled) {
+    throw "Lane $Lane uses a version-1 provider credential bundle in $($bundled -join ', '). This script writes a plain key and would disable it. Leave those repositories out with -Repositories and update their bundle as docs/nebulalab-openai-c-migration.md describes. No secrets were written."
+}
+
 $secureKey = Read-Host "Enter the new Lane $Lane API key" -AsSecureString
 $key = [System.Net.NetworkCredential]::new('', $secureKey).Password
 
@@ -30,9 +48,6 @@ try {
         throw 'The API key must not be empty.'
     }
     foreach ($repository in $Repositories) {
-        if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
-            throw "Invalid repository identifier: $repository"
-        }
         if ($PSCmdlet.ShouldProcess($repository, "set $keyName and $baseName")) {
             $key | & gh secret set $keyName --repo $repository --app actions
             if ($LASTEXITCODE -ne 0) { throw "Failed to set $keyName for $repository." }

@@ -57,6 +57,15 @@ not write production secrets or pin callers to an unmerged central commit.
 Retain original CC credentials in 1Password. Rollback must restore a compatible caller
 and the original plain C secret pair together. Never put values in files or logs.
 
+## Key rotation
+
+`scripts/set-lane-secret.ps1` writes plain keys only and refuses NebulaLab's C slot. When
+the Command Code key changes, update both sides: the plain C key on the other callers
+(pass them with `-Repositories`), and the `command-code` entry of NebulaLab's C key bundle,
+rewritten whole with the current OpenAI key from 1Password. Every Command Code request from a
+repository left on the old key gets 401: a plain caller's C crosses to Go with no sign in the
+comment status, and NebulaLab loses C's Luna fallback and the A/B cross routes.
+
 ## Validation boundary
 
 Contract tests cover legacy slots, provider pairing, fail-closed parsing, masking,
